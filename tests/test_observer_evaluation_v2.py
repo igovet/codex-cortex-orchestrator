@@ -40,6 +40,188 @@ def test_hook_actions_are_separate_from_model_and_mcp_events(tmp_path):
     assert rows[1]['parent_session_id']=='parent-2'
 
 
+def test_desktop_observation_is_scoped_to_submitted_task_tree(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    events=tmp_path/'events';events.mkdir()
+    stamp='2026-09-10T18:17:00Z'
+    usage=dict(input_tokens=10,cached_input_tokens=0,cache_write_input_tokens=0,
+               output_tokens=2,reasoning_output_tokens=1,total_tokens=12)
+    def rollout(path,thread,parent=None):
+        source=[]
+        if parent:
+            source.append(dict(timestamp=stamp,type='session_meta',payload=dict(
+                source=dict(subagent=dict(thread_spawn=dict(parent_thread_id=parent))))))
+        source.extend([
+            dict(timestamp=stamp,type='response_item',payload=dict(
+                type='function_call',call_id='call-'+thread,name='list_agents',arguments='{}')),
+            dict(timestamp=stamp,type='response_item',payload=dict(
+                type='function_call_output',call_id='call-'+thread,output='ok')),
+            dict(timestamp=stamp,type='token_usage_record',payload=dict(
+                thread_id=thread,response_id='response-'+thread,usage=usage)),
+        ])
+        path.write_text('\n'.join(json.dumps(row) for row in source)+'\n')
+    paths={name:tmp_path/f'{name}.jsonl' for name in ('root-a','child-a','root-b','child-b')}
+    rollout(paths['root-a'],'root-a');rollout(paths['child-a'],'child-a','root-a')
+    rollout(paths['root-b'],'root-b');rollout(paths['child-b'],'child-b','root-b')
+    created=1789064200
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,reasoning_effort TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.executemany('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',[
+            ('root-a',str(paths['root-a']),None,'gpt-5.6-luna','high',created,'/fixture'),
+            ('child-a',str(paths['child-a']),'qa_engineer','gpt-5.6-luna','medium',created,'/fixture'),
+            ('root-b',str(paths['root-b']),None,'gpt-5.6-luna','high',created,'/fixture'),
+            ('child-b',str(paths['child-b']),'qa_engineer','gpt-5.6-luna','medium',created,'/fixture'),
+        ])
+        db.executemany('INSERT INTO thread_spawn_edges VALUES (?,?)',[
+            ('root-a','child-a'),('root-b','child-b')])
+    (events/'server.jsonl').write_text('\n'.join(json.dumps(row) for row in [
+        dict(time_ns=1,operation='create_task',outcome='success',thread_id='root-a'),
+        dict(time_ns=2,operation='create_task',outcome='success',thread_id='root-b'),
+        dict(time_ns=3,operation='initialize',outcome='success'),
+    ])+'\n')
+    (events/'hooks-test.jsonl').write_text('\n'.join(json.dumps(row) for row in [
+        dict(time_ns=1,event_kind='hook',hook_event='Stop',outcome='success',parent_session_id='root-a'),
+        dict(time_ns=2,event_kind='hook',hook_event='Stop',outcome='success',parent_session_id='root-b'),
+    ])+'\n')
+    state=dict(workdir='/fixture',started_at=created,thread_created_since=created,
+               trial_started_at=created,first_submission_at=created,
+               thread_id='root-a',events=str(events))
+    assert OBSERVER['desktop_task_thread_ids'](state)=={'root-a','child-a'}
+    assert OBSERVER['desktop_task_inventory'](state)==(
+        {'root-a','child-a'},['root-b'],[])
+    calls=OBSERVER['observed_tool_calls'](state)
+    assert {row.get('thread_id') for row in calls if row.get('thread_id')}=={'root-a','child-a'}
+    scoped=OBSERVER['desktop_task_thread_ids'](state)
+    assert [row.get('thread_id') for row in OBSERVER['observed_events'](events,scoped)]==[
+        'root-a',None]
+    assert [row['parent_session_id'] for row in OBSERVER['observed_hook_events'](events,scoped)]==[
+        'root-a']
+    usage_result=OBSERVER['participant_token_usage'](state)
+    assert {row['thread_id'] for row in usage_result['participants']}=={'root-a','child-a'}
+
+
+def test_task_scope_rejects_rows_with_any_conflicting_native_identity():
+    check=OBSERVER['event_in_task_scope'];scope={'root','child'}
+    assert check({'thread_id':'child','parent_thread_id':'root','task_id':'t_cortex'},scope)
+    assert not check({'thread_id':'foreign','parent_thread_id':'root'},scope)
+    assert not check({'task_id':'foreign','parent_session_id':'root'},scope)
+    assert not check({'thread_id':'child','parent_session_id':'foreign'},scope)
+    assert check({'operation':'initialize'},scope)
+
+
+def test_desktop_inventory_surfaces_duplicate_and_cyclic_foreign_topology(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    created=1789064200
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.executemany('INSERT INTO threads VALUES (?,?,?)',[
+            ('root',created,'/fixture'),('child',created,'/fixture'),
+            ('cycle-a',created,'/fixture'),('cycle-b',created,'/fixture')])
+        db.executemany('INSERT INTO thread_spawn_edges VALUES (?,?)',[
+            ('root','child'),('root','child'),
+            ('cycle-a','cycle-b'),('cycle-b','cycle-a')])
+    state=dict(workdir='/fixture',started_at=created,thread_id='root')
+    scoped,foreign,invalid=OBSERVER['desktop_task_inventory'](state)
+    assert scoped=={'root','child'}
+    assert foreign==['cycle-a','cycle-b']
+    assert 'duplicate_edge:child' in invalid
+    assert {'parent_cycle:cycle-a','parent_cycle:cycle-b'} <= set(invalid)
+    usage=OBSERVER['participant_token_usage'](state)
+    assert usage['status']=='invalid_topology'
+    assert usage['participants']==[]
+    assert 'duplicate_edge:child' in usage['invalid_task_topology']
+
+
+def test_desktop_inventory_surfaces_self_parent_and_malformed_recent_edge(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    created=1789064200
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.executemany('INSERT INTO threads VALUES (?,?,?)',[
+            ('root',created,'/fixture'),('foreign',created,'/fixture')])
+        db.executemany('INSERT INTO thread_spawn_edges VALUES (?,?)',[
+            ('foreign','foreign'),('root','missing-child')])
+    state=dict(workdir='/fixture',started_at=created,thread_id='root')
+    scoped,foreign,invalid=OBSERVER['desktop_task_inventory'](state)
+    assert scoped=={'root'}
+    assert foreign==['foreign']
+    assert 'self_parent:foreign' in invalid
+    assert 'parent_cycle:foreign' in invalid
+    assert 'edge_child_outside_recent_inventory:missing-child' in invalid
+
+
+def test_usage_fails_closed_on_conflicting_child_parents(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    created=1789064200
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.executemany('INSERT INTO threads VALUES (?,?,?)',[
+            ('root',created,'/fixture'),('foreign',created,'/fixture'),
+            ('child',created,'/fixture')])
+        db.executemany('INSERT INTO thread_spawn_edges VALUES (?,?)',[
+            ('root','child'),('foreign','child')])
+    state=dict(workdir='/fixture',started_at=created,thread_id='root')
+    scoped,foreign,invalid=OBSERVER['desktop_task_inventory'](state)
+    assert scoped=={'root'}
+    assert foreign==['child','foreign']
+    assert 'multiple_parents:child' in invalid
+    usage=OBSERVER['participant_token_usage'](state)
+    assert usage==dict(status='invalid_topology',wall_seconds=None,totals=None,
+                       participants=[],foreign_task_roots=['child','foreign'],
+                       invalid_task_topology=['multiple_parents:child'])
+
+
+def test_original_request_receipt_accepts_native_user_message_event(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    events=tmp_path/'events';events.mkdir()
+    rollout=tmp_path/'root.jsonl'
+    prompt='Make list:\n1. first'
+    delivered='$cortex:orchestrator Make list:\n\n1. first'
+    captured=OBSERVER['native_archived_request_digest'](delivered)
+    def entry(stamp,payload,kind='response_item'):
+        return json.dumps(dict(timestamp=stamp,type=kind,payload=payload))
+    rollout.write_text('\n'.join([
+        entry('2026-09-10T18:00:00.000Z',dict(type='item_completed',thread_id='root',
+            item=dict(type='UserMessage',id='message-root',
+                      content=[dict(type='text',text=delivered)])),'event_msg'),
+        entry('2026-09-10T18:00:00.010Z',dict(type='custom_tool_call',call_id='create',
+            name='functions.exec',input='await tools.mcp__cortex__create_task({project_root:"/fixture",request_key:"key"})')),
+        entry('2026-09-10T18:00:00.050Z',dict(type='item_completed',item=dict(
+            type='McpToolCall',server='cortex',tool='create_task',status='completed',
+            arguments={'project_root':'/fixture','request_key':'key'},
+            result={'structuredContent':{'original_request_sha256':captured}}))),
+        entry('2026-09-10T18:00:00.100Z',dict(type='custom_tool_call_output',call_id='create',
+            output='Script completed')),
+    ])+'\n')
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,reasoning_effort TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',
+                   ('root',str(rollout),None,'gpt-5.6-luna','high',1789063200,'/fixture'))
+    (events/'server.jsonl').write_text(json.dumps(dict(
+        time_ns=1789063200040000000,operation='create_task',outcome='success',
+        thread_id='root',parent_thread_id=None))+'\n')
+    state=dict(workdir='/fixture',started_at=1789063200,thread_created_since=1789063200,
+               thread_id='root',events=str(events),
+               original_request_sha256=OBSERVER['original_request_digest'](prompt),
+               desktop_editor_source_sha256=OBSERVER['original_request_digest'](
+                   OBSERVER['desktop_editor_source'](prompt)))
+    rows=OBSERVER['observed_tool_calls'](state)
+    create=[row for row in rows if row.get('tool')=='mcp__cortex__create_task']
+    assert len(create)==1 and create[0]['original_request_preserved'] is True
+    assert 'coordinator_original_request_changed' not in {
+        row['violation'] for row in OBSERVER['call_policy_violations'](rows)}
+
+
 def test_worker_static_bracket_and_alias_app_calls_are_observed(tmp_path,monkeypatch):
     codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
     rollout=tmp_path/'worker.jsonl'
@@ -179,6 +361,58 @@ def test_mcp_event_joins_unique_nearby_receipt_by_operation_identity():
     assert matched is receipt
 
 
+def test_observed_tool_calls_correlates_read_report_event_to_original_wrapper(tmp_path, monkeypatch):
+    """Exercise the complete rollout/receipt/event join that exposed the canary defect."""
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    rollout=tmp_path/'coordinator.jsonl'
+    report='r_0123456789ab'
+    def entry(stamp, payload):
+        return json.dumps(dict(timestamp=stamp, type='response_item', payload=payload))
+    rollout.write_text('\n'.join([
+        entry('2026-09-06T00:00:00.100Z', dict(
+            type='custom_tool_call', call_id='call-1',
+            input=f'tools.mcp__cortex__read_report({{report_id:"{report}"}})')),
+        entry('2026-09-06T00:00:00.101Z', dict(
+            type='custom_tool_call_output', call_id='call-1', output='Script completed')),
+        entry('2026-09-06T00:00:00.102Z', dict(
+            type='item_completed', item=dict(
+                type='McpToolCall', server='cortex', tool='read_report', status='completed',
+                arguments={'report_id':report},
+                result={'structuredContent': {'report_id':report, 'kind':'report'}}))),
+    ])+'\n')
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,reasoning_effort TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',
+                   ('parent',str(rollout),None,'gpt-5.6-luna','high',1788652800,'/fixture'))
+    events=tmp_path/'events';events.mkdir()
+    (events/'server.jsonl').write_text(json.dumps(dict(
+        time_ns=1788652800102000000, operation='read_report', outcome='success',
+        thread_id='parent', parent_thread_id=None, report_id=report,
+        document_kind='report', page='start', requested_limit=4000))+'\n')
+    rows=OBSERVER['observed_tool_calls'](dict(workdir='/fixture',started_at=1788652800,
+                                              thread_created_since=1788652800,
+                                              events=str(events)))
+    reads=[row for row in rows if row.get('tool')=='mcp__cortex__read_report']
+    assert len(reads)==1 and reads[0]['server_observed'] is True
+    assert OBSERVER['call_policy_violations'](rows)==[]
+
+
+def test_mcp_event_correlation_fails_closed_for_ambiguous_or_mismatched_identity():
+    base=dict(thread_id='worker', tool='mcp__cortex__read_report', outcome='success',
+              server_observed=False, host_receipt_observed=True,
+              host_receipt_outcome='success',
+              host_receipt_timestamp='2026-09-06T00:43:36.243Z',
+              requested_report_id='r_0123456789ab')
+    event=dict(outcome='success', report_id='r_0123456789ab')
+    assert OBSERVER['event_call_candidate']([dict(base),dict(base)],
+        1788655416243491179,event['report_id'],event) is None
+    mismatched=dict(base, requested_report_id='r_deadbeefdead')
+    assert OBSERVER['event_call_candidate']([mismatched],
+        1788655416243491179,event['report_id'],event) is None
+
+
 def test_mcp_event_does_not_pair_same_template_twenty_milliseconds_late():
     receipt=dict(thread_id='worker',tool='mcp__cortex__create_draft',outcome='success',
                  server_observed=False,host_receipt_observed=True,
@@ -201,9 +435,19 @@ def test_mcp_correlation_retains_typo_and_missing_server_receipt_failures():
                         template='verification')
     flags={(row['tool'],row['violation'])
            for row in OBSERVER['call_policy_violations']([typo,missing_server])}
-    assert ('mcp__create_draft','mcp_tool_error_observed') in flags
-    assert ('mcp__create_draft','mcp_call_missing_host_receipt') in flags
+    assert ('mcp__create_draft','mcp_tool_error_observed') not in flags
+    assert ('mcp__create_draft','mcp_call_missing_host_receipt') not in flags
     assert ('mcp__cortex__create_draft','cortex_call_missing_server_event') in flags
+
+
+def test_failed_cortex_mcp_call_remains_an_acceptance_critical_error():
+    failed=dict(thread_id='worker',role='worker',tool='mcp__cortex__create_draft',
+                outcome='error',server_observed=True,host_receipt_observed=True,
+                host_receipt_outcome='error',argument_digest='cortex-error')
+    violations=OBSERVER['call_policy_violations']([failed])
+    assert ('mcp__cortex__create_draft','mcp_tool_error_observed') in {
+        (row['tool'],row['violation']) for row in violations}
+    assert OBSERVER['orchestration_policy_violations'](violations)
 
 
 def test_paired_write_report_observation_does_not_look_like_post_publication_work():
@@ -238,6 +482,33 @@ def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tm
         f"printf '%s\\n' \"$(pwd)\" && sed -n '1,240p' {skill}",
     ):
         assert not check('exec_command',json.dumps({'cmd':command}))
+
+
+def test_skill_read_accepts_newline_reference_batches_but_rejects_mixed_or_quoted_paths(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
+    skill.parent.mkdir(parents=True);skill.write_text('instructions')
+    reference=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-backend-dev/references/report-publication.md'
+    reference.parent.mkdir(parents=True);reference.write_text('instructions')
+    check=OBSERVER['skill_instruction_read']
+    newline_batch=(f"sed -n '1,240p' {skill}\n"
+                   f"sed -n '1,260p' {reference}")
+    arguments=json.dumps({'cmd':newline_batch})
+    assert check('exec_command',arguments)
+    assert 'forbidden_plugin_or_cache_access' not in set(
+        OBSERVER['call_policy_flags']('exec_command',arguments,'general','/fixture'))
+
+    mixed=(f"sed -n '1,240p' {skill}\n"
+           "cat .codex/cortex/t_1/pipeline.md")
+    mixed_arguments=json.dumps({'cmd':mixed})
+    assert not check('exec_command',mixed_arguments)
+    assert 'forbidden_plugin_or_cache_access' in set(
+        OBSERVER['call_policy_flags']('exec_command',mixed_arguments,'general','/fixture'))
+
+    quoted_newline=json.dumps({'cmd':f"sed -n '1,240p' '{skill}\n{reference}'"})
+    assert not check('exec_command',quoted_newline)
+    assert 'forbidden_plugin_or_cache_access' in set(
+        OBSERVER['call_policy_flags']('exec_command',quoted_newline,'general','/fixture'))
 
 
 def test_mixed_skill_read_and_project_discovery_has_scoped_cache_policy(tmp_path,monkeypatch):
@@ -290,6 +561,32 @@ def test_live_config_layers_luna_policy_without_dropping_existing_instructions()
     assert parsed['agents']['default_subagent_model']=='gpt-5.6-luna'
     assert parsed['developer_instructions'].startswith('keep me\n\n')
     assert 'overrides any Cortex recommendation' in parsed['developer_instructions']
+
+
+def test_desktop_launcher_and_observer_require_explicit_spawn_route_fields():
+    instructions=OBSERVER['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'Every spawn_agent call must explicitly include' in instructions
+    assert 'model="gpt-5.6-luna"' in instructions
+    assert 'reasoning_effort="medium" or "high"' in instructions
+    assert 'fork_turns="none"' in instructions
+    assert 'must not inspect installed plugin/cache/candidate paths' in instructions
+
+    base={'message':'gAAAAA'+'x'*100,'task_name':'author_spec',
+          'model':'gpt-5.6-luna','reasoning_effort':'high','fork_turns':'none'}
+    fields=OBSERVER['safe_call_metadata']('spawn_agent',json.dumps(base))
+    row={'thread_id':'parent','role':'coordinator','tool':'spawn_agent','outcome':'success',**fields,
+         'worker_route_evidence':'native_child_and_complete_skill',
+         'spawned_thread_id':'child','native_child_path_verified':True,
+         'validated_parent_edge':True,'worker_skill_receipt':'complete_success',
+         'observed_worker_profile':'technical_writer','observed_worker_model':'gpt-5.6-luna',
+         'observed_worker_effort':'high'}
+    assert OBSERVER['call_policy_violations']([row])==[]
+
+    missing=dict(base);missing.pop('model')
+    missing_fields=OBSERVER['safe_call_metadata']('spawn_agent',json.dumps(missing))
+    missing_row=dict(row);missing_row.pop('requested_model',None);missing_row.update(missing_fields)
+    assert 'worker_assignment_policy_unverified' in {
+        item['violation'] for item in OBSERVER['call_policy_violations']([missing_row])}
 
 
 def test_live_config_replaces_complete_multiline_value_and_preserves_other_bytes():

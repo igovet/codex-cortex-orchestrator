@@ -1,0 +1,14 @@
+{
+  "allow": [
+    {"label": "bounded_report_route", "tool": "mcp__cortex__read_report", "input": {"report_id": "r_fixture", "limit": 4000}},
+    {"label": "workspace_diagnostics", "tool": "exec_command", "input": {"cmd": "git status --short"}},
+    {"label": "static_cache_mention", "tool": "exec_command", "input": {"cmd": "rg -n '.codex/cortex/' scripts"}}
+  ],
+  "deny": [
+    {"label": "absolute_private_read", "tool": "exec_command", "input": {"cmd": "cat PROJECT/.codex/cortex/task/pipeline.md"}},
+    {"label": "relative_private_read", "tool": "exec_command", "input": {"cmd": "cat .codex/cortex/task/pipeline.md"}},
+    {"label": "cd_then_read", "tool": "exec_command", "input": {"cmd": "cd .codex/cortex && cat task/pipeline.md"}},
+    {"label": "expanded_private_root", "tool": "exec_command", "input": {"cmd": "ROOT=.codex/cortex; cat \"$ROOT/task/pipeline.md\""}},
+    {"label": "file_tool_private_read", "tool": "read_file", "input": {"path": ".codex/cortex/task/pipeline.md"}}
+  ]
+}

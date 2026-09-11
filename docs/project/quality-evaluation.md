@@ -1,5 +1,89 @@
 # Format 11 instruction and hook pilot
 
+> **Phase 2 outcome comparison status (2026-09-11): CANCELLED by the user.**
+> This evaluation path is non-blocking and non-scoring for the 1.15.9 stable
+> release. No efficacy comparison, score, promotion, or quality conclusion is
+> claimed; the protocol and prior attempts below remain historical reference.
+
+## Phase 0 contract (`phase01-v1`)
+
+The phase-0 evaluation is a separate protocol from the historical six-configuration
+comparator below. Its frozen manifest is
+[`tests/fixtures/phase01_eval/contract-v1.json`](../../tests/fixtures/phase01_eval/contract-v1.json)
+and its CLI surface is `phase01-contract`, `phase01-prepare`, `phase01-record`,
+and `phase01-compare` in `scripts/cortex_eval.py`. It uses three held-out scenario
+families—false visible requirement (`F-01`), misleading symptom (`D-01`), and
+shared surface (`R-01`)—with baseline and candidate arms and three paired repeats
+per family (18 arm runs, nine pairs).
+
+The scenario workloads are frozen separately in
+[`tests/fixtures/phase01_eval/workloads-v1.json`](../../tests/fixtures/phase01_eval/workloads-v1.json).
+The integrity-checked manifest contains the ordinary product prompt, expected
+user-boundary requirements, independent checks, protected paths, symptom/shared
+resource fixture material, repeat-specific fixture hashes, and complete baseline
+(`cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698`) and candidate
+(`6d67370022e398307af4e7fe4a06cf85c47ca2c4aaa42401baa3377909df65bf`) payload
+identities (manifest/control source revision 8). Verify it before preparing any arm:
+
+```bash
+python3 -B scripts/cortex_eval.py phase01-contract
+python3 -B scripts/cortex_eval.py phase01-workloads
+python3 -B scripts/cortex_eval.py phase01-prepare F-01 <PRIVATE_TRIAL_DIR> \
+  --arm baseline --attempt 1 --payload-sha256 <64-hex> \
+  --baseline-payload-sha256 cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698 \
+  --candidate-payload-sha256 6d67370022e398307af4e7fe4a06cf85c47ca2c4aaa42401baa3377909df65bf \
+  --model-settings-sha256 <64-hex> --host cli
+```
+
+The trial envelope records the manifest hash and verifies the generated prompt
+and repeat fixture hash. Keep the payload argument equal to the selected frozen
+arm identity; a mismatch is a pre-run stop. The manifest is an owner-controlled
+workload definition, not scorer input: blinded packets continue to omit arm,
+configuration, and both payload identity fields.
+
+For a new CLI Phase 2 evaluation cell, add `--evaluation-fresh-store` to the
+start command. It canonicalizes the project, creates only owner-private
+`.codex/cortex` parent directories, rejects any existing/redirected/non-private
+`cortex.sqlite3`, and leaves the database absent for normal runtime
+initialization. It emits only a privacy-safe launcher receipt (opaque run ID,
+project-relative store path and digests); it never deletes, truncates, migrates,
+overwrites, or accepts a store. The flag is opt-in and ignored on `--resume-last`;
+ordinary and explicit resume starts retain their existing behavior.
+The atomic hierarchy commit is the acceptance boundary. Any later operational
+failure in observation/provenance preparation or tmux/Codex launch is a distinct,
+non-qualifying `post_commit_launch_failure`: the accepted `.codex` hierarchy is
+kept, no score or evaluation acceptance follows, and a subsequent attempt must use
+a new disposable workdir. If the provenance artifact itself cannot be written, the
+safe opaque receipt is surfaced in the error where possible; rollback and relabeling
+as fresh-store rejection are forbidden.
+
+Scoring is blind: the score packet is joined by a fixture/repeat key and excludes
+arm, configuration, and payload labels. User-boundary requirement/unsupported-claim,
+debugging discrimination/root-cause, and unsafe fan-out/conflict outcomes are
+scored separately from protocol and invariant conditions. Any audit, protocol,
+protected-fixture, open-session, missing-receipt, or identity failure stops the
+trial; it is not counted as a quality score. Token input, cached input, cache-write
+input, output, reasoning, total, wall time, and observable tool/read/write/
+dispatch/report counts remain separate. Missing or unavailable values are `null`
+with a reason and are never treated as zero. No dollar cost is claimed without a
+pinned rate table.
+
+`phase01-compare` reports paired medians and a coordinator-owned recommendation:
+promotion requires improvement in all three families and at least two of three
+repeats per family, with no critical requirement, false-completion, unsafe-fan-out,
+or duplicate-report regression and no more than 20% median token/wall overhead.
+Complete data that misses the screen is `revise_or_replicate`; incomplete or
+unavailable data is `unverified`. This is an evaluation contract, not automatic
+acceptance or a server/hook gate.
+
+Phase 2 archive identity binds two independent facts: the full normalized payload
+digest and the exact stamped version stored in `.codex-plugin/plugin.json`.
+Preparation, independent audit, both arm preflights, and every per-cell adapter
+command must revalidate those facts. A stopped run with an archive-identity
+contradiction is retained but restarted from 0/12 with a new control; completed
+cells are not transplanted into a rebuilt archive pair because that would break
+the frozen randomized pairing and blindness boundary.
+
 The current pilot freezes baseline commit
 `1a0988bdee5a0fe943e74df1746d2ae8ad1b161b`, payload
 `fd0b4e63ad8eea97cd5bd39ce893675db5e2b0cc6fbcdc2c91fff4a35bf99345`.
@@ -66,9 +150,50 @@ measures the combined replacement and cannot isolate prompt shortening alone. Th
 find defects or nominate a larger comparison, not prove a general quality gain.
 Current measured results and unrun checks belong in [release readiness](../release-readiness.md).
 
-## Completed format 11 pilot (2026-09-06)
+## Risk-triggered consultation overlay
 
-The fixed comparison is complete: four scenarios per configuration, 12 runs and
+The consultation overlay is evaluated separately from the frozen six-configuration
+comparator and from the phase-0 contract. On an unchanged baseline/candidate pair,
+hold out three transition families: material consequential decisions, contradictory
+or hypothesis-bound evidence, and repeated-failure or surprise replanning. Run
+three paired repeats per family with the same prompts, model settings, fixture/tree,
+artifact and host, and score blindly. Include ordinary routine/reversible work and
+active incident recovery as negative controls so optionality and exclusions are
+observable.
+
+Score critical decision defects, requirement coverage, discriminating-check use,
+false consultation activation and missed qualifying transitions separately. Account
+for consultations per transition, input/cached/output/reasoning/total tokens,
+wall time, report bytes, duplicate evidence and recovery delay; unavailable values
+remain null. Compare quality and overhead with the unchanged baseline. A candidate
+may be revised or replicated when any critical or invariant regression appears;
+promotion remains coordinator-owned and requires fewer critical defects without
+new acceptance/protocol regressions, at least 80% specificity on negative controls,
+and no more than one consultation per qualifying transition on median. These are
+evaluation criteria, never a runtime gate, server decision or acceptance rule.
+
+The frozen oracle enforces all 15 case/repeat cells, exactly one opaque pair key
+per cell with two rows, complete diagnostics and explicit availability/null
+semantics, and binding of condition-independent identities to the manifest's
+current digests. `not_observed` is unavailable and cannot carry quality, cost, or
+latency. Manifest policy validation rejects automatic acceptance, live execution,
+non-blind scoring, model-envelope mutations, and other coordinator-ownership
+mutations. Unavailable cells must carry null quality, all cost dimensions, and
+latency; malformed ledger rows are rejected with a structured receipt, and
+booleans cannot stand in for integer or numeric fields.
+
+The offline Phase 4 aggregate contract is documented in
+[phase4-telemetry.md](phase4-telemetry.md). Its reducer preserves null and
+availability exclusions and is verified with synthetic inputs; it does not make
+real-run quality or adaptive-selection claims.
+
+The executable offline Phase 3 fixture, ledger schema, deterministic reset,
+independent oracle, and focused regressions are documented in
+[phase3-consultation-evaluation.md](phase3-consultation-evaluation.md).
+
+## Historical format 11 pilot (2026-09-06; not a release decision)
+
+The historical fixed comparison recorded four scenarios per configuration, 12 runs and
 33 native participants. Every coordinator used Luna/high; every worker used
 Luna/medium or Luna/high. Initial phases were completed and graded before cancellation
 or recovery steering. All three recovery cases included visible manual compaction,
@@ -83,10 +208,11 @@ normal exit, same-task resume and the final product change.
 Total tokens include cached input and all participants; they are not a monetary
 cost estimate. [Per-run and per-participant measurements](hooks-pilot-results.json)
 retain input, cached input, cache writes, output and reasoning output separately.
-The full-hooks median used 45.2% fewer total tokens and 45.3% less time than baseline.
+The retained measurements included a full-hooks median 45.2% fewer total tokens and 45.3% less time than baseline.
 Against compact without hooks, its medians were 5.1% more tokens and 7.9% more time.
 Those differences include model decisions and recovery work; they do not measure
-Python hook overhead or establish causality from four unreplicated pairs.
+Python hook overhead, establish causality from four unreplicated pairs, or support
+an efficacy, scoring, or promotion claim for the stable release.
 
 No requirement loss or false completion was detected by the independent checks and
 review. Protocol defects remain: missing model-facing command receipts, invalid
@@ -174,8 +300,10 @@ python3 -B scripts/cortex_eval.py grade /tmp/cortex-trial-01
 
 For the graph-enabled route add `--codebase-memory` to CLI `start`. It enables only
 the already configured isolated MCP and persists across helper resume. Ordinary
-graph-disabled scenarios remain valid fallback checks. Desktop uses its isolated
-configuration; record the actual tool availability instead of assuming parity.
+graph-disabled scenarios remain valid fallback checks: both isolated helpers
+disable an existing complete `codebase_memory` entry, while absent or incomplete
+entries receive no synthetic override. Desktop uses its isolated configuration;
+record the actual tool availability instead of assuming parity.
 For Desktop steering use the observed-composer procedure in
 [verification](verification.md); never treat a prepared prompt as submitted.
 

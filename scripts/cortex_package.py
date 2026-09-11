@@ -16,7 +16,7 @@ from plugins.cortex.scripts.cortex_runtime.runtime.state import dependency_ident
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT/'plugins/cortex'
-BASE = '1.15.8'
+BASE = '1.15.9'
 
 
 def _assert_no_symlink_tree(path, *, label='candidate'):

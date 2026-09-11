@@ -1,0 +1,14 @@
+{
+  "manifest_version": "phase3-workloads-v1",
+  "suite_version": "phase3-consultation-v1",
+  "cases": [
+    {"case_id": "T-01", "family": "material-consequential-decision", "kind": "qualifying", "repeat_count": 3, "prompt": "$cortex:orchestrator Decide between two materially consequential alternatives using the supplied evidence. State the decision, facts versus hypotheses, one discriminating check, and what would overturn it."},
+    {"case_id": "T-02", "family": "contradictory-hypothesis-bound-evidence", "kind": "qualifying", "repeat_count": 3, "prompt": "$cortex:orchestrator Resolve contradictory or hypothesis-bound evidence. Separate observations from hypotheses, choose a discriminating check, and state the bounded next action and falsifier."},
+    {"case_id": "T-03", "family": "repeated-failure-surprise-replanning", "kind": "qualifying", "repeat_count": 3, "prompt": "$cortex:orchestrator Replan after repeated failure or a surprising result. Preserve the original requirement, identify the failed assumption, select a bounded recovery check, and state when to stop."},
+    {"case_id": "N-01", "family": "routine-reversible-work", "kind": "negative-control", "repeat_count": 3, "prompt": "$cortex:orchestrator Complete this routine, reversible, deterministic task with the supplied acceptance check. Do not invent extra escalation or consultation."},
+    {"case_id": "N-02", "family": "active-incident-recovery", "kind": "negative-control", "repeat_count": 3, "prompt": "$cortex:orchestrator Apply the supplied active-incident recovery procedure and record the bounded result. Follow the existing incident owner and do not add a consultation step."}
+  ],
+  "prompt_policy": "Prompts are condition-independent and contain no arm, condition, randomization label, private assignment, or payload mapping.",
+  "repeat_policy": "Every case has exactly three paired repeats with the same prompt, fixture, host envelope, dependency envelope, and payload identities.",
+  "protected_paths": ["USER-NOTE.txt"]
+}

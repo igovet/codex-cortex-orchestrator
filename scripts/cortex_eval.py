@@ -20,6 +20,60 @@ PILOT_CONFIGURATIONS = ('baseline', 'compact_no_hooks', 'full_hooks')
 PILOT_CASES = ('stable-unique', 'retry-dedup', 'cancel-sort', 'resume-pagination')
 PILOT_BASELINE_COMMIT = '1a0988bdee5a0fe943e74df1746d2ae8ad1b161b'
 PILOT_BASELINE_PAYLOAD = 'fd0b4e63ad8eea97'
+PHASE01_CONTRACT_PATH = ROOT / 'tests/fixtures/phase01_eval/contract-v1.json'
+PHASE01_WORKLOAD_PATH = ROOT / 'tests/fixtures/phase01_eval/workloads-v1.json'
+PHASE01_SUITE_VERSION = 'phase01-v1'
+PHASE01_CONTRACT_SHA256 = 'b24115dd5f4cf1edfdb24858c07ad871b1c370c30fc79f1c1b7e2ba7f02fa7b5'
+PHASE01_WORKLOAD_SHA256 = 'e479f54c682a55146be3cdc9433025ea51dfec17cd8101b58aa4da716058941f'
+PHASE01_ARMS = ('baseline', 'candidate')
+PHASE01_REPEATS = (1, 2, 3)
+PHASE01_SCENARIOS = (
+    dict(scenario_id='F-01', family='false-visible-requirement',
+         primary_metric='unsupported_completion_rate', direction='lower',
+         guardrails=('critical_user_boundary_regressions', 'protocol_pass',
+                      'protected_content_preserved')),
+    dict(scenario_id='D-01', family='misleading-symptom',
+         primary_metric='discriminating_check_rate', direction='higher',
+         guardrails=('root_cause_success', 'failed_fix_count', 'protocol_pass')),
+    dict(scenario_id='R-01', family='shared-surface',
+         primary_metric='unsafe_fanout_conflict_rate', direction='lower',
+         guardrails=('duplicate_dispatch_report_count', 'resource_conflicts',
+                      'protocol_pass')),
+)
+PHASE01_TOKEN_FIELDS = ('input_tokens', 'cached_input_tokens',
+                        'cache_write_input_tokens', 'output_tokens',
+                        'reasoning_output_tokens', 'total_tokens')
+PHASE01_COUNT_FIELDS = ('tool_count', 'read_count', 'write_count',
+                        'dispatch_count', 'report_count')
+PHASE01_SCORE_FIELDS = (
+    'requirement_count', 'satisfied_count', 'critical_omission_count',
+    'completion_claim_count', 'supported_claim_count',
+    'explicitly_unrun_check_count', 'facts_hypotheses_separated',
+    'discriminating_check_before_mutation', 'root_cause_success',
+    'failed_fix_count', 'fanout_count', 'unsafe_fanout_conflict_count',
+    'duplicate_dispatch_report_count', 'protocol_pass', 'claimed_complete',
+    'protected_content_preserved', 'resource_conflicts',
+)
+PHASE01_METRIC_FIELDS = {
+    'F-01': ('completion_claim_count', 'supported_claim_count'),
+    'D-01': ('discriminating_check_before_mutation',),
+    'R-01': ('fanout_count', 'unsafe_fanout_conflict_count'),
+}
+PHASE01_GUARDRAILS = {
+    'F-01': ('critical_omission_count', 'completion_claim_count',
+             'supported_claim_count', 'protected_content_preserved'),
+    'D-01': ('root_cause_success', 'failed_fix_count'),
+    'R-01': ('unsafe_fanout_conflict_count', 'duplicate_dispatch_report_count',
+             'resource_conflicts'),
+}
+PHASE01_DECISION_RULE = (
+    'First reject stopped or protocol-failing arms. Otherwise recommend promotion only when the '
+    'candidate primary metric improves in all three families and at least two of three paired repeats '
+    'per family, with no critical requirement regression, false-completion increase, unsafe-fanout/conflict '
+    'increase, duplicate-report increase, protected-content failure or resource-conflict increase. If the target is unchanged and median total tokens or wall time '
+    'rises above 20 percent, recommend revision or replication. This is a coordinator-owned recommendation, '
+    'not automatic acceptance.'
+)
 
 
 def case(name, split, family, brief, checks, source='def solve(*args):\n    raise NotImplementedError\n', steering=None, initial_checks=None):
@@ -383,6 +437,468 @@ def pilot_compare(records):
     return dict(suite='hooks-pilot-v1',configurations=configurations,runs=matrix)
 
 
+def _validate_phase01_contract(value):
+    """Require the complete frozen manifest to match evaluator semantics."""
+    expected_scenarios = [
+        dict(scenario_id=scenario['scenario_id'], family=scenario['family'], split='holdout',
+             primary_metric=scenario['primary_metric'], direction=scenario['direction'],
+             guardrails=list(scenario['guardrails']))
+        for scenario in PHASE01_SCENARIOS
+    ]
+    expected = {
+        'suite_version': PHASE01_SUITE_VERSION,
+        'scenario_families': expected_scenarios,
+        'arms': list(PHASE01_ARMS),
+        'paired_repeats': len(PHASE01_REPEATS),
+        'blind_scoring': {
+            'join_key': 'blind_join_key',
+            'scorer_inputs': ['suite_version', 'scenario_id', 'family', 'split', 'attempt',
+                              'fixture_sha256', 'starting_tree_sha256', 'scorecard', 'cost', 'stop'],
+            'excluded_from_scorer_inputs': ['arm', 'configuration', 'baseline_payload_sha256',
+                                            'candidate_payload_sha256'],
+            'score_outcomes_separately_from_protocol': True,
+        },
+        'scorecard': {
+            'f': ['requirement_count', 'satisfied_count', 'critical_omission_count',
+                  'completion_claim_count', 'supported_claim_count', 'explicitly_unrun_check_count',
+                  'protected_content_preserved'],
+            'd': ['facts_hypotheses_separated', 'discriminating_check_before_mutation',
+                  'root_cause_success', 'failed_fix_count'],
+            'r': ['fanout_count', 'unsafe_fanout_conflict_count', 'duplicate_dispatch_report_count',
+                  'resource_conflicts'],
+        },
+        'stop_conditions': ['invariant_violation', 'protocol_failure', 'audit_failure',
+                            'protected_fixture_violation', 'command_receipt_missing', 'open_session',
+                            'arm_or_fixture_mismatch', 'host_unavailable'],
+        'cost_accounting': {
+            'token_fields': list(PHASE01_TOKEN_FIELDS),
+            'wall_seconds_source': 'coordinator_task_lifecycle_or_null',
+            'observable_counts': list(PHASE01_COUNT_FIELDS),
+            'currency': 'not_claimed_without_a_pinned_rate_table',
+        },
+        'missingness': 'Unavailable observations are null with unavailable_reason; null is never zero and makes the affected comparison unverified.',
+        'decision_rule': PHASE01_DECISION_RULE,
+    }
+    if value != expected:
+        raise ValueError('phase-0 contract does not match evaluator semantics')
+
+
+def phase01_contract():
+    """Return the checked-in, integrity-locked phase-0 contract."""
+    raw = PHASE01_CONTRACT_PATH.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != PHASE01_CONTRACT_SHA256:
+        raise ValueError('phase-0 contract integrity mismatch')
+    value = json.loads(raw)
+    _validate_phase01_contract(value)
+    return value
+
+
+def phase01_workloads():
+    """Return the integrity-locked, scenario-specific Phase 2 workload manifest."""
+    raw = PHASE01_WORKLOAD_PATH.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != PHASE01_WORKLOAD_SHA256:
+        raise ValueError('phase-0 workload manifest integrity mismatch')
+    value = json.loads(raw)
+    if value.get('manifest_version') != 'phase01-workloads-v1' or value.get('suite_version') != PHASE01_SUITE_VERSION:
+        raise ValueError('invalid phase-0 workload manifest version')
+    if value.get('source_revision') != 8:
+        raise ValueError('phase-0 workload manifest source revision mismatch')
+    identities = value.get('payload_identities')
+    if (not isinstance(identities, dict) or set(identities) != set(PHASE01_ARMS)
+            or identities['baseline'] == identities['candidate']):
+        raise ValueError('phase-0 workload payload identities are invalid')
+    for arm in PHASE01_ARMS:
+        _digest(identities[arm], f'{arm}_payload_sha256', allow_none=False)
+    scenarios = value.get('scenarios')
+    if not isinstance(scenarios, list) or [row.get('scenario_id') for row in scenarios] != ['F-01', 'D-01', 'R-01']:
+        raise ValueError('phase-0 workload scenarios are invalid')
+    protected_sha256 = hashlib.sha256('Protected user content — do not modify.\n'.encode()).hexdigest()
+    for row, frozen in zip(scenarios, PHASE01_SCENARIOS):
+        required = ('scenario_id', 'family', 'prompt', 'expected_user_boundary_requirements',
+                    'independent_checks', 'protected_paths', 'fixture_seed', 'prompt_sha256',
+                    'fixture_sha256_by_repeat')
+        if any(field not in row for field in required):
+            raise ValueError(f"phase-0 workload {row.get('scenario_id')} is incomplete")
+        if row['scenario_id'] != frozen['scenario_id'] or row['family'] != frozen['family']:
+            raise ValueError('phase-0 workload scenario mismatch')
+        if not isinstance(row['prompt'], str) or not row['prompt'].startswith('$cortex:orchestrator '):
+            raise ValueError(f"phase-0 workload {row['scenario_id']} prompt is invalid")
+        if hashlib.sha256((row['prompt'] + '\n').encode()).hexdigest() != row['prompt_sha256']:
+            raise ValueError(f"phase-0 workload {row['scenario_id']} prompt hash mismatch")
+        if row['protected_paths'] != ['USER-NOTE.txt'] or not row['fixture_seed']:
+            raise ValueError(f"phase-0 workload {row['scenario_id']} fixture boundary is invalid")
+        if not isinstance(row['expected_user_boundary_requirements'], list) or not row['expected_user_boundary_requirements']:
+            raise ValueError(f"phase-0 workload {row['scenario_id']} requirements are invalid")
+        if not isinstance(row['independent_checks'], list) or not row['independent_checks']:
+            raise ValueError(f"phase-0 workload {row['scenario_id']} checks are invalid")
+        hashes = row['fixture_sha256_by_repeat']
+        if set(hashes) != {'1', '2', '3'}:
+            raise ValueError(f"phase-0 workload {row['scenario_id']} repeat hashes are incomplete")
+        for repeat in PHASE01_REPEATS:
+            material = json.dumps(dict(scenario_id=row['scenario_id'], family=row['family'],
+                                       fixture_seed=row['fixture_seed'], repeat=repeat,
+                                       protected_sha256=protected_sha256),
+                                  sort_keys=True, separators=(',', ':')).encode()
+            if hashlib.sha256(material).hexdigest() != hashes[str(repeat)]:
+                raise ValueError(f"phase-0 workload {row['scenario_id']} fixture hash mismatch")
+    return value
+
+
+def _phase01_scenario(value):
+    for scenario in PHASE01_SCENARIOS:
+        if value in (scenario['scenario_id'], scenario['family']):
+            return scenario
+    raise ValueError('unknown phase-0 scenario family')
+
+
+def _phase01_workload(value):
+    for workload in phase01_workloads()['scenarios']:
+        if value in (workload['scenario_id'], workload['family']):
+            return workload
+    raise ValueError('unknown phase-0 workload scenario')
+
+
+def _digest(value, name, allow_none=True):
+    if value is None and allow_none:
+        return
+    if not isinstance(value, str) or len(value) != 64 or any(char not in '0123456789abcdef' for char in value):
+        raise ValueError(f'{name} must be a lowercase SHA-256 digest or null')
+
+
+def _phase01_trial_key(record):
+    return (record['scenario_id'], record['attempt'], record['arm'])
+
+
+def _phase01_score_input(record, measured):
+    """Build the scorer packet; arm/configuration identity is deliberately absent."""
+    scorecard = {name: measured.get(name) for name in PHASE01_SCORE_FIELDS
+                 if name not in {'protocol_pass', 'claimed_complete'}}
+    cost = {name: measured.get(name) for name in (*PHASE01_TOKEN_FIELDS, 'wall_seconds', *PHASE01_COUNT_FIELDS)}
+    stop = {name: measured.get(name) for name in ('stop_reason', 'invariant_violation', 'unavailable_reason')}
+    return dict(suite_version=record['suite_version'], scenario_id=record['scenario_id'],
+                family=record['family'], split=record['split'], attempt=record['attempt'],
+                fixture_sha256=record['fixture_sha256'],
+                starting_tree_sha256=record['starting_tree_sha256'], scorecard=scorecard,
+                cost=cost, stop=stop)
+
+
+def phase01_prepare(scenario, directory, arm, attempt, payload_sha256=None,
+                    model_settings_sha256=None, host='cli',
+                    baseline_payload_sha256=None, candidate_payload_sha256=None):
+    """Create one non-overwriting held-out trial envelope and isolated fixture."""
+    selected_scenario = _phase01_scenario(scenario)
+    if arm not in PHASE01_ARMS or attempt not in PHASE01_REPEATS:
+        raise ValueError('phase-0 arm or repeat is invalid')
+    if host not in {'cli', 'desktop'}:
+        raise ValueError('phase-0 host is invalid')
+    _digest(payload_sha256, 'payload_sha256')
+    _digest(model_settings_sha256, 'model_settings_sha256')
+    _digest(baseline_payload_sha256, 'baseline_payload_sha256')
+    _digest(candidate_payload_sha256, 'candidate_payload_sha256')
+    workloads = phase01_workloads()
+    frozen_identities = workloads['payload_identities']
+    if baseline_payload_sha256 is not None and baseline_payload_sha256 != frozen_identities['baseline']:
+        raise ValueError('baseline payload does not match frozen phase-0 identity')
+    if candidate_payload_sha256 is not None and candidate_payload_sha256 != frozen_identities['candidate']:
+        raise ValueError('candidate payload does not match frozen phase-0 identity')
+    if (baseline_payload_sha256 is not None and candidate_payload_sha256 is not None
+            and baseline_payload_sha256 == candidate_payload_sha256):
+        raise ValueError('baseline and candidate payload identities must differ')
+    expected_arm_payload = baseline_payload_sha256 if arm == 'baseline' else candidate_payload_sha256
+    if expected_arm_payload is not None and payload_sha256 is not None and payload_sha256 != expected_arm_payload:
+        raise ValueError('payload does not match the selected frozen phase-0 arm')
+    workload = _phase01_workload(selected_scenario['scenario_id'])
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+    project = directory / 'project'
+    project.mkdir()
+    protected = project / 'USER-NOTE.txt'
+    protected.write_text('Protected user content — do not modify.\n')
+    (project / 'README.md').write_text('# Held-out fixture\nUse the ordinary product prompt; do not modify USER-NOTE.txt.\n')
+    prompt = workload['prompt'] + '\n'
+    (directory / 'prompt.txt').write_text(prompt)
+    fixture_material = json.dumps(dict(scenario_id=workload['scenario_id'], family=workload['family'],
+                                       fixture_seed=workload['fixture_seed'], repeat=attempt,
+                                       protected_sha256=hashlib.sha256(protected.read_bytes()).hexdigest()),
+                                  sort_keys=True, separators=(',', ':')).encode()
+    fixture_sha256 = hashlib.sha256(fixture_material).hexdigest()
+    if fixture_sha256 != workload['fixture_sha256_by_repeat'][str(attempt)]:
+        raise ValueError('phase-0 generated fixture hash does not match frozen workload')
+    starting_tree_sha256 = hashlib.sha256(b'README.md\nUSER-NOTE.txt\n').hexdigest()
+    prompt_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
+    blind_join_key = hashlib.sha256(
+        f'{PHASE01_SUITE_VERSION}:{selected_scenario["scenario_id"]}:{attempt}:{fixture_sha256}:{starting_tree_sha256}:{model_settings_sha256 or "null"}'.encode()
+    ).hexdigest()
+    record = dict(suite_version=PHASE01_SUITE_VERSION, scenario_id=selected_scenario['scenario_id'],
+                  family=selected_scenario['family'], split='holdout', attempt=attempt, arm=arm,
+                  fixture_sha256=fixture_sha256, starting_tree_sha256=starting_tree_sha256,
+                  prompt_sha256=prompt_sha256, protected_sha256=hashlib.sha256(protected.read_bytes()).hexdigest(),
+                  baseline_payload_sha256=payload_sha256 if arm == 'baseline' else None,
+                  candidate_payload_sha256=payload_sha256 if arm == 'candidate' else None,
+                  frozen_baseline_payload_sha256=frozen_identities['baseline'],
+                  frozen_candidate_payload_sha256=frozen_identities['candidate'],
+                  workload_manifest_sha256=PHASE01_WORKLOAD_SHA256,
+                  workload_version=workloads['manifest_version'],
+                  model_settings_sha256=model_settings_sha256, host=host,
+                  blind_join_key=blind_join_key, status='prepared')
+    (directory / 'phase01-trial.json').write_text(json.dumps(record, indent=2) + '\n')
+    return record
+
+
+PHASE01_OBSERVATION_FIELDS = set(PHASE01_TOKEN_FIELDS + PHASE01_COUNT_FIELDS + PHASE01_SCORE_FIELDS + (
+    'wall_seconds', 'wall_source', 'stop_reason', 'invariant_violation',
+    'unavailable_reason', 'scorer_id', 'blindness', 'adjudication_status',
+    'payload_sha256', 'baseline_payload_sha256', 'candidate_payload_sha256',
+    'fixture_sha256', 'starting_tree_sha256', 'prompt_sha256',
+    'model_settings_sha256', 'host', 'blind_join_key', 'frozen_baseline_payload_sha256',
+    'frozen_candidate_payload_sha256', 'workload_manifest_sha256', 'workload_version'))
+
+
+def _phase01_observation(observations):
+    if not isinstance(observations, dict):
+        raise ValueError('phase-0 observations must be an object')
+    observations = dict(observations)
+    tokens = observations.pop('tokens', None)
+    if tokens is not None:
+        if not isinstance(tokens, dict):
+            raise ValueError('phase-0 tokens must be an object')
+        unknown = set(tokens) - set(PHASE01_TOKEN_FIELDS)
+        if unknown:
+            raise ValueError('unknown phase-0 token field')
+        observations.update(tokens)
+    known_envelope = {'suite_version', 'scenario_id', 'family', 'split', 'attempt', 'arm',
+                      'protected_sha256', 'status', 'blind_score'}
+    unknown = set(observations) - PHASE01_OBSERVATION_FIELDS - known_envelope
+    if unknown:
+        raise ValueError(f'unknown phase-0 observation field: {sorted(unknown)[0]}')
+    result = {field: observations.get(field) for field in PHASE01_OBSERVATION_FIELDS}
+    for field in PHASE01_TOKEN_FIELDS + PHASE01_COUNT_FIELDS + ('requirement_count', 'satisfied_count',
+            'critical_omission_count', 'completion_claim_count', 'supported_claim_count',
+            'explicitly_unrun_check_count', 'failed_fix_count', 'fanout_count',
+            'unsafe_fanout_conflict_count', 'duplicate_dispatch_report_count', 'resource_conflicts'):
+        value = result[field]
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f'invalid phase-0 count: {field}')
+    if result['wall_seconds'] is not None and (type(result['wall_seconds']) not in (int, float)
+                                               or not math.isfinite(result['wall_seconds'])
+                                               or result['wall_seconds'] <= 0):
+        raise ValueError('invalid phase-0 wall time')
+    for field in ('facts_hypotheses_separated', 'discriminating_check_before_mutation',
+                  'root_cause_success', 'protocol_pass', 'claimed_complete',
+                  'protected_content_preserved'):
+        if result[field] is not None and type(result[field]) is not bool:
+            raise ValueError(f'invalid phase-0 boolean: {field}')
+    for field in ('payload_sha256', 'baseline_payload_sha256', 'candidate_payload_sha256',
+                  'fixture_sha256', 'starting_tree_sha256', 'prompt_sha256',
+                  'model_settings_sha256', 'blind_join_key'):
+        _digest(result[field], field)
+    if result['host'] is not None and result['host'] not in {'cli', 'desktop'}:
+        raise ValueError('invalid phase-0 host')
+    if result['blindness'] is not None and result['blindness'] is not True:
+        raise ValueError('phase-0 scorer must confirm blindness')
+    return result
+
+
+def phase01_record(directory, observations):
+    """Persist one reviewed score/cost packet; unavailable fields stay null."""
+    directory = Path(directory)
+    trial_path = directory / 'phase01-trial.json'
+    if not trial_path.is_file():
+        raise ValueError('missing phase-0 trial envelope')
+    record = json.loads(trial_path.read_text())
+    if record.get('suite_version') != PHASE01_SUITE_VERSION or record.get('split') != 'holdout':
+        raise ValueError('invalid phase-0 trial envelope')
+    selected_scenario = _phase01_scenario(record.get('scenario_id'))
+    measured = _phase01_observation(observations)
+    for identity in ('scenario_id', 'family', 'attempt', 'arm'):
+        if identity in observations and observations[identity] != record[identity]:
+            raise ValueError(f'phase-0 identity mismatch: {identity}')
+    for field in ('fixture_sha256', 'starting_tree_sha256', 'prompt_sha256', 'model_settings_sha256', 'blind_join_key', 'host'):
+        if measured[field] is not None and measured[field] != record[field]:
+            raise ValueError(f'phase-0 identity mismatch: {field}')
+    if measured['blindness'] is not True:
+        raise ValueError('phase-0 scorer must confirm blindness')
+    payload = measured['payload_sha256']
+    expected_payload = record['baseline_payload_sha256'] if record['arm'] == 'baseline' else record['candidate_payload_sha256']
+    if payload is not None and expected_payload is not None and payload != expected_payload:
+        raise ValueError('phase-0 arm payload mismatch')
+    blind_score = _phase01_score_input(record, measured)
+    identity_fields = ('payload_sha256', 'model_settings_sha256', 'fixture_sha256',
+                       'starting_tree_sha256', 'prompt_sha256', 'host')
+    identity_missing = any(measured[field] is None for field in identity_fields)
+    expected_payload_missing = expected_payload is None
+    stopped = (measured['stop_reason'] is not None or measured['invariant_violation'] is not None
+               or measured['protocol_pass'] is False or identity_missing or expected_payload_missing)
+    if identity_missing and measured['stop_reason'] is None:
+        measured['stop_reason'] = 'arm_identity_missing'
+    elif expected_payload_missing and measured['stop_reason'] is None:
+        measured['stop_reason'] = 'expected_payload_identity_missing'
+    essential = ('protocol_pass', 'claimed_complete', 'wall_seconds', *PHASE01_TOKEN_FIELDS)
+    status = 'stopped' if stopped else ('measured' if all(measured[field] is not None for field in essential) else 'incomplete')
+    result = {**record, **measured, 'blind_score': blind_score, 'status': status}
+    path = directory / 'phase01-result.json'
+    with path.open('x') as stream:
+        json.dump(result, stream, indent=2)
+    return result
+
+
+def _phase01_metric(row, scenario):
+    if any(row.get(field) is None for field in PHASE01_METRIC_FIELDS[scenario['scenario_id']]):
+        return None
+    if scenario['scenario_id'] == 'F-01':
+        claims = row['completion_claim_count']
+        return (max(0, claims - row['supported_claim_count']) / claims) if claims else 0.0
+    if scenario['scenario_id'] == 'D-01':
+        return 1.0 if row['discriminating_check_before_mutation'] is True else 0.0
+    fanout = row['fanout_count']
+    return (row['unsafe_fanout_conflict_count'] / fanout) if fanout else 0.0
+
+
+def _phase01_guardrail_regressions(baseline, candidate, scenario):
+    """Return all frozen guardrail regressions; null never becomes zero."""
+    required = PHASE01_GUARDRAILS[scenario['scenario_id']]
+    if any(baseline.get(field) is None or candidate.get(field) is None for field in required):
+        return None
+    regressions = []
+    if scenario['scenario_id'] == 'F-01':
+        if candidate['critical_omission_count'] > baseline['critical_omission_count']:
+            regressions.append('critical_omission_count')
+        if _phase01_metric(candidate, scenario) > _phase01_metric(baseline, scenario):
+            regressions.append('false_completion_rate')
+        if candidate['protected_content_preserved'] is not True:
+            regressions.append('protected_content_preserved')
+    elif scenario['scenario_id'] == 'D-01':
+        if candidate['root_cause_success'] < baseline['root_cause_success']:
+            regressions.append('root_cause_success')
+        if candidate['failed_fix_count'] > baseline['failed_fix_count']:
+            regressions.append('failed_fix_count')
+    else:
+        if candidate['unsafe_fanout_conflict_count'] > baseline['unsafe_fanout_conflict_count']:
+            regressions.append('unsafe_fanout_conflict_count')
+        if candidate['duplicate_dispatch_report_count'] > baseline['duplicate_dispatch_report_count']:
+            regressions.append('duplicate_dispatch_report_count')
+        if candidate['resource_conflicts'] > baseline['resource_conflicts']:
+            regressions.append('resource_conflicts')
+    return regressions
+
+
+def _phase01_cost(row):
+    if any(row.get(field) is None for field in (*PHASE01_TOKEN_FIELDS, 'wall_seconds')):
+        return None
+    return dict(tokens=row['total_tokens'], wall_seconds=row['wall_seconds'])
+
+
+def phase01_compare(records):
+    """Blindly summarize 3 families × 3 paired repeats; never accept or impute nulls."""
+    expected = {(scenario['scenario_id'], attempt, arm)
+                for scenario in PHASE01_SCENARIOS for attempt in PHASE01_REPEATS for arm in PHASE01_ARMS}
+    indexed = {}
+    for row in records:
+        if not isinstance(row, dict) or row.get('suite_version') != PHASE01_SUITE_VERSION:
+            raise ValueError('unknown phase-0 result')
+        key = (row.get('scenario_id'), row.get('attempt'), row.get('arm'))
+        if key not in expected:
+            raise ValueError('unknown phase-0 trial')
+        if key in indexed:
+            raise ValueError('duplicate phase-0 trial')
+        _phase01_scenario(row['scenario_id'])
+        if row.get('status') in {'measured', 'stopped'}:
+            _phase01_observation(row)
+            # A caller cannot promote a row by forging status='measured' around
+            # an explicit protocol failure or stop reason.
+            row = dict(row)
+            if (row.get('status') == 'measured'
+                    and (row.get('protocol_pass') is False
+                         or any(row.get(field) is not None for field in
+                                ('stop_reason', 'invariant_violation', 'unavailable_reason')))):
+                row['status'] = 'stopped'
+        indexed[key] = row
+    pairs = []
+    identity_fields = ('payload_sha256', 'model_settings_sha256', 'fixture_sha256',
+                       'starting_tree_sha256', 'prompt_sha256', 'host')
+    for scenario in PHASE01_SCENARIOS:
+        for attempt in PHASE01_REPEATS:
+            baseline = indexed.get((scenario['scenario_id'], attempt, 'baseline'))
+            candidate = indexed.get((scenario['scenario_id'], attempt, 'candidate'))
+            pair_status = 'unrun' if baseline is None or candidate is None else 'unverified'
+            pair = dict(scenario_id=scenario['scenario_id'], family=scenario['family'], attempt=attempt,
+                        status=pair_status, baseline_metric=None, candidate_metric=None,
+                        baseline_cost=None, candidate_cost=None, cost_delta=None,
+                        stop_reason=None, guardrail_regressions=[])
+            if baseline is not None and candidate is not None:
+                if baseline.get('blind_join_key') != candidate.get('blind_join_key'):
+                    pair['stop_reason'] = 'blind_join_mismatch'
+                elif any(baseline.get(field) is None or candidate.get(field) is None for field in identity_fields):
+                    pair['stop_reason'] = 'arm_identity_missing'
+                elif any(baseline.get(field) != candidate.get(field) for field in
+                         ('fixture_sha256', 'starting_tree_sha256', 'prompt_sha256', 'model_settings_sha256', 'host')):
+                    pair['stop_reason'] = 'paired_identity_mismatch'
+                elif (baseline.get('baseline_payload_sha256') is not None
+                      and candidate.get('candidate_payload_sha256') is not None
+                      and baseline['baseline_payload_sha256'] == candidate['candidate_payload_sha256']):
+                    pair['stop_reason'] = 'baseline_candidate_payload_not_distinct'
+                elif baseline.get('status') == 'stopped' or candidate.get('status') == 'stopped':
+                    pair['stop_reason'] = baseline.get('stop_reason') or candidate.get('stop_reason') or 'protocol_or_invariant_failure'
+                elif baseline.get('status') != 'measured' or candidate.get('status') != 'measured':
+                    pair['stop_reason'] = 'incomplete_observation'
+                else:
+                    guardrail_regressions = _phase01_guardrail_regressions(baseline, candidate, scenario)
+                    if guardrail_regressions is None:
+                        pair['stop_reason'] = 'missing_guardrail_observation'
+                    elif guardrail_regressions:
+                        pair['guardrail_regressions'] = guardrail_regressions
+                        pair['stop_reason'] = 'guardrail_regression'
+                    else:
+                        pair['baseline_metric'] = _phase01_metric(baseline, scenario)
+                        pair['candidate_metric'] = _phase01_metric(candidate, scenario)
+                        pair['baseline_cost'] = _phase01_cost(baseline)
+                        pair['candidate_cost'] = _phase01_cost(candidate)
+                        if pair['baseline_metric'] is not None and pair['candidate_metric'] is not None and pair['baseline_cost'] is not None and pair['candidate_cost'] is not None:
+                            pair['cost_delta'] = dict(token_ratio=pair['candidate_cost']['tokens'] / pair['baseline_cost']['tokens'],
+                                                      wall_ratio=pair['candidate_cost']['wall_seconds'] / pair['baseline_cost']['wall_seconds'])
+                            pair['status'] = 'measured'
+                        else:
+                            pair['stop_reason'] = 'missing_score_or_cost'
+            pairs.append(pair)
+    families = {}
+    for scenario in PHASE01_SCENARIOS:
+        family_runs = [row for row in pairs if row['scenario_id'] == scenario['scenario_id']]
+        measured = [row for row in family_runs if row['status'] == 'measured']
+        improved = []
+        for row in measured:
+            improved.append((row['candidate_metric'] < row['baseline_metric']) if scenario['direction'] == 'lower'
+                            else (row['candidate_metric'] > row['baseline_metric']))
+        families[scenario['family']] = dict(status='measured' if len(measured) == 3 else 'unverified',
+                                             repeats_present=len(measured), repeats_required=3,
+                                             baseline_metric=(statistics.median(row['baseline_metric'] for row in measured) if measured else None),
+                                             candidate_metric=(statistics.median(row['candidate_metric'] for row in measured) if measured else None),
+                                             improved_repeats=(sum(improved) if measured else None),
+                                             median_token_ratio=(statistics.median(row['cost_delta']['token_ratio'] for row in measured) if measured else None),
+                                             median_wall_ratio=(statistics.median(row['cost_delta']['wall_ratio'] for row in measured) if measured else None),
+                                             guardrail_regressions=sorted({item for row in family_runs for item in row['guardrail_regressions']}))
+    complete = all(value['status'] == 'measured' for value in families.values())
+    guardrail_failure = any(pair['guardrail_regressions'] for pair in pairs)
+    promoted = (complete and not guardrail_failure
+                and all(value['improved_repeats'] >= 2 for value in families.values()))
+    if complete:
+        for value in families.values():
+            if value['median_token_ratio'] > 1.2 or value['median_wall_ratio'] > 1.2:
+                promoted = False
+    decision = 'promote_candidate' if promoted else ('revise_or_replicate' if complete or guardrail_failure else 'unverified')
+    runs = []
+    for pair in pairs:
+        for arm in PHASE01_ARMS:
+            source = indexed.get((pair['scenario_id'], pair['attempt'], arm))
+            runs.append(dict(scenario_id=pair['scenario_id'], family=pair['family'],
+                             attempt=pair['attempt'], arm=arm,
+                             status=pair['status'], metric=(pair['baseline_metric'] if arm == 'baseline' else pair['candidate_metric']),
+                             cost=(pair['baseline_cost'] if arm == 'baseline' else pair['candidate_cost']),
+                             stop_reason=pair['stop_reason']))
+    return dict(suite_version=PHASE01_SUITE_VERSION, arms=list(PHASE01_ARMS), paired_repeats=3,
+                families=families, pairs=pairs, runs=runs, decision=decision,
+                decision_owner='coordinator', acceptance_automatic=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -400,6 +916,14 @@ def main():
     p=commands.add_parser('pilot-adopt');p.add_argument('directory',type=Path);p.add_argument('--configuration',choices=PILOT_CONFIGURATIONS,required=True)
     p=commands.add_parser('pilot-record');p.add_argument('directory',type=Path);p.add_argument('observations',type=Path)
     p=commands.add_parser('pilot-compare');p.add_argument('records',type=Path)
+    commands.add_parser('phase01-contract')
+    commands.add_parser('phase01-workloads')
+    p=commands.add_parser('phase01-prepare');p.add_argument('scenario');p.add_argument('directory',type=Path)
+    p.add_argument('--arm',choices=PHASE01_ARMS,required=True);p.add_argument('--attempt',type=int,choices=PHASE01_REPEATS,required=True)
+    p.add_argument('--payload-sha256');p.add_argument('--model-settings-sha256');p.add_argument('--host',choices=('cli','desktop'),default='cli')
+    p.add_argument('--baseline-payload-sha256');p.add_argument('--candidate-payload-sha256')
+    p=commands.add_parser('phase01-record');p.add_argument('directory',type=Path);p.add_argument('observations',type=Path)
+    p=commands.add_parser('phase01-compare');p.add_argument('records',type=Path)
     args = parser.parse_args()
     if args.command == 'list':
         result = [dict(name=c['name'], split=c['split'], family=c['family'], resume=c['family']=='recovery') for c in CASES]
@@ -413,6 +937,16 @@ def main():
     elif args.command=='pilot-adopt':result=pilot_adopt(args.directory,args.configuration)
     elif args.command=='pilot-record':result=pilot_record(args.directory,json.loads(args.observations.read_text()))
     elif args.command=='pilot-compare':result=pilot_compare(json.loads(args.records.read_text()))
+    elif args.command=='phase01-contract':result=phase01_contract()
+    elif args.command=='phase01-workloads':result=phase01_workloads()
+    elif args.command=='phase01-prepare':
+        frozen = phase01_workloads()['payload_identities']
+        result=phase01_prepare(args.scenario,args.directory,args.arm,args.attempt,args.payload_sha256,
+                               args.model_settings_sha256,args.host,
+                               args.baseline_payload_sha256 or frozen['baseline'],
+                               args.candidate_payload_sha256 or frozen['candidate'])
+    elif args.command=='phase01-record':result=phase01_record(args.directory,json.loads(args.observations.read_text()))
+    elif args.command=='phase01-compare':result=phase01_compare(json.loads(args.records.read_text()))
     else:result = compare(json.loads(args.records.read_text()))
     print(json.dumps(result, indent=2))
 

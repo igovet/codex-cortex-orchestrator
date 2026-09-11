@@ -86,7 +86,7 @@ TOOLS = [
          "including on later assignments in the same worker thread. After an uncertain unkeyed "
          "response, recover the existing draft from list_reports own_drafts before creating another.", {
              "template": string(
-                 "Select the document headings. Coordinators select pipeline for their current pipeline edition. Workers select their assigned report class. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
+                 "Select the document headings. Only the bound coordinator may select pipeline for its current pipeline edition; a worker selecting pipeline is rejected before a draft is created. Workers select their assigned report class. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
                  14, enum=["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis", "pipeline"]),
              "request_key": dict(KEY, description=
                  "Optional explicit idempotency key. Omit for new drafts; the server generates a fresh identity. "
@@ -259,6 +259,7 @@ ERROR_HELP = {
     "task_already_bound": "This coordinator thread already owns a task. Continue its pipeline and reports; a separate task requires a separate coordinator thread.",
     "child_creation": "A worker thread cannot create a task. Use the task inherited from its registered parent.",
     "pipeline_missing": "The task has no pipeline. The coordinator must publish its initial pipeline edition.",
+    "coordinator_pipeline_only": "Only the bound coordinator can create a pipeline draft. Workers must select an ordinary report template for their assigned evidence; no draft was created.",
     "identifier_unavailable": "Short identifier allocation was exhausted. Retry the identical request later; never invent an identifier.",
     "unsupported_storage": "This database format is unsupported. Format 10 requires the separate stopped-access, backup-required cortex_migrate.py operation to format 11. No automatic migration is performed.",
     "storage_busy": "Offline migration owns the storage access lock. Wait until stopped-access maintenance completes.",

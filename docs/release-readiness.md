@@ -1,3 +1,70 @@
+# 1.15.9: Stable release readiness
+
+The current Cortex semantic version is `1.15.9`, with stamped payload
+`1.15.9+codex.sha256.e4f332d43bf38024` as declared by the plugin manifest and
+resolved by the package validator. The final consecutive real CLI/Desktop
+qualification passed on this unchanged candidate (`r_648c4f40dcf9`), so the
+current orchestrator functionality is stable and release-ready on the basis of
+offline checks, independent reviews, and that clean parity result. The user
+cancelled the Phase 2 outcome comparison; it is non-blocking and non-scoring,
+and no efficacy comparison is claimed. See [project verification](project/verification.md)
+for the bounded evidence record.
+
+## Current 1.15.9 stable release status
+
+| Gate or evidence | Status | Exact retained evidence |
+| --- | --- | --- |
+| Final consecutive real CLI qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on CLI |
+| Final consecutive real Desktop qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on Desktop |
+| Phase 2 outcome evaluation | CANCELLED — non-blocking, non-scoring | User-directed cancellation; no efficacy comparison, score, promotion, or quality conclusion is claimed |
+| Phase 3 validator repairs | READY offline | `r_02db5d25f90e` — final adversarial review PASS |
+| Phase 4 telemetry repairs | READY offline | `r_6b761e716df9` — independent re-review READY |
+| Phase 5 adaptive overlay | READY offline | `r_e95d3d29d46f` — final adversarial re-review PASS |
+
+Both final host runs used the unchanged current candidate with isolated
+preparation, Luna coordination/workers, no Astra, and no stable installation or
+configuration change. Their audits reported zero failures, policy violations,
+open sessions/cells, integrity invalidators, or quality findings. Phase 2 is
+cancelled by the user and must not be restarted or interpreted as an efficacy
+comparison; Phases 3–5 remain offline-ready as recorded above.
+
+Earlier excluded live attempts and constrained control/preflight checks remain
+historical evidence only: they are not relabeled, merged, retried, scored, or
+used as substitutes for the current qualification. Superseded candidate
+identities and earlier failures remain historical diagnostics only.
+
+The private-root preflight now uses validated child/parent provenance when a host
+tool event omits `agent_id`, while preserving coordinator/system compatibility for
+unproven session-scoped events. Worker command-session receipts retain their
+effective working directory so an unidentified `write_stdin` continuation remains
+covered. Focused regressions passed; no separate live preflight-specific scenario
+was run for this repair. The broad host qualification above is separate evidence.
+
+## Historical 1.15.9 candidate (superseded): Permission-safe worker checks and post-wait sequencing
+
+The superseded historical payload was `1.15.9+codex.sha256.3b0e71f080f852ff`. It included the
+permission-safe worker checks and post-wait sequencing repair. Package,
+marketplace, source-sync, and offline regression checks passed; the recorded full
+suite result is 439 passed and 2 skipped. Real CLI and Desktop qualification,
+consecutive parity, matrix/scoring, and model-level compliance remain unrun and
+pending for that historical payload. These results must not be used as current
+live qualification evidence.
+
+## Historical 1.15.9 candidate (superseded): Phase 0–1 evaluation contract and advisory guidance
+
+The superseded `1.15.9+codex.sha256.6d67370022e39830` payload added the versioned
+Phase 0 held-out evaluation contract, optional Phase 1 guidance, and optional
+risk-triggered senior consultation guidance. Its package, marketplace,
+source-sync, focused-test, and full-suite results, along with its fresh consecutive
+CLI/Desktop qualification, apply only to that unchanged historical payload and
+must not be used as current live qualification evidence.
+
+The contract preserves the historical six-configuration comparator and adds
+three held-out families with three paired baseline/candidate repeats, blind
+scoring, explicit stop/null/cost semantics, and coordinator-owned promotion or
+revision decisions. The guidance is advisory only and does not add runtime gates,
+mandatory stages, server enforcement, or automatic acceptance.
+
 # 1.15.7: fresh draft delivery identities
 
 Candidate `1.15.7+codex.sha256.b5503c36f31d590b` removes the need for model-managed

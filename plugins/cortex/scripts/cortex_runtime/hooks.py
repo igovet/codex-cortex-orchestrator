@@ -14,23 +14,33 @@ import time
 import uuid
 
 from .contracts import StoreError
+from .execution_boundary import private_access_denied
 from .hook_storage import HookStorage, fingerprint
 
 EVENTS = frozenset({"UserPromptSubmit", "SessionStart", "SubagentStart", "PreCompact",
                     "PostCompact", "PostToolUse", "PreToolUse", "SubagentStop", "Stop",
                     "Interrupt", "SessionEnd"})
-SELECTED_TOOLS = re.compile(r"^(?:Bash|apply_patch|spawn_agent|Agent|mcp__cortex__.*|mcp__cortex_.*)$")
+SELECTED_TOOLS = re.compile(r"^(?:Bash|exec_command|write_stdin|terminal|read_file|write_file|apply_patch|spawn_agent|Agent|mcp__cortex__.*|mcp__cortex_.*)$")
 BLOCKED_APP_THREAD_MESSAGE_TOOLS = frozenset({
     "mcp__codex_app__send_message_to_thread",
     "send_message_to_thread",
 })
+WORKER_SKILL_SLUGS = frozenset({
+    "accessibility-auditor", "accessibility-fixer", "architect", "backend-dev",
+    "build-verification", "code-reviewer", "data-engineer", "database-architect",
+    "debugger", "devops-engineer", "explorer", "frontend-dev", "fullstack-dev",
+    "general", "mobile-dev", "performance-engineer", "planner", "qa-engineer",
+    "refactorer", "security-auditor", "senior-consultant", "technical-writer",
+    "ux-designer",
+})
 # Hosts that provide an explicit coordinator identity can enforce the project
-# access boundary before dispatch. Tool events without agent_id remain
-# session-scoped observations because the documented host payload cannot
-# distinguish the coordinator from a child worker running under its session.
+# access boundary before dispatch. When agent_id is absent, only a matching
+# parent/child provenance receipt or retained worker command session establishes
+# worker scope; otherwise the event remains a coordinator/system-safe observation.
 COORDINATOR_PROJECT_TOOLS = frozenset({
     "Bash", "exec_command", "write_stdin", "terminal", "read_file", "write_file",
 })
+PROVENANCE_FIELDS = frozenset({"thread_id", "actor_thread_id", "worker_thread_id"})
 MAX_EVENT_BYTES = 4 * 1024 * 1024
 MAX_CONTEXT_CHARACTERS = 3600
 RESPONSE_SHAPE_ALLOWED_KEYS = frozenset({
@@ -55,6 +65,83 @@ APPLY_PATCH_WRAPPER = re.compile(
 
 def _identifier(value):
     return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_:/.-]{1,256}", value))
+
+
+def _assigned_worker_skill(payload):
+    """Resolve only a known worker skill from the host's bounded assignment metadata."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("assigned_skill", "worker_skill", "skill", "agent_type"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value or len(value) > 128:
+            continue
+        value = value.strip()
+        if value.startswith("$"):
+            value = value[1:]
+        if value.startswith("cortex:"):
+            value = value[len("cortex:"):]
+        if value.startswith("worker-"):
+            slug = value[len("worker-"):]
+        else:
+            slug = value.replace("_", "-")
+        if slug in WORKER_SKILL_SLUGS:
+            token = "cortex:worker-" + slug
+            return token, "skills/worker-" + slug + "/SKILL.md"
+    return None
+
+
+def _provenance_agent(payload, session):
+    """Return a child id only when the payload carries its matching parent.
+
+    Host tool events may omit ``agent_id``. A claimed child is not trusted by
+    itself: it must be paired with the active parent in direct or nested
+    provenance, then HookStorage validates the durable binding and task.
+    """
+    if not isinstance(payload, dict):
+        return None
+    sources = [payload]
+    for key in ("provenance", "source"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+            nested = value.get("subagent")
+            if isinstance(nested, dict):
+                sources.append(nested)
+    for source in sources:
+        parent = source.get("parent_thread_id", source.get("parent_session_id"))
+        if parent != session:
+            continue
+        for key in PROVENANCE_FIELDS:
+            candidate = source.get(key)
+            if candidate != session and _identifier(candidate):
+                return candidate
+    return None
+
+
+def _command_session_id(tool_input):
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("session_id", "command_session_id"):
+        value = tool_input.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            value = str(value)
+            if _identifier(value):
+                return value
+    return None
+
+
+def _execution_cwd(tool_input, fallback):
+    """Resolve an explicit command workdir without retaining the raw operand."""
+    if isinstance(tool_input, dict):
+        for key in ("cwd", "workdir", "working_directory", "directory"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value and "\x00" not in value:
+                try:
+                    candidate = Path(value)
+                    return str((candidate if candidate.is_absolute() else Path(fallback) / candidate).resolve(strict=False))
+                except (OSError, RuntimeError, ValueError):
+                    return fallback
+    return fallback
 
 
 def parse_patch(command, cwd):
@@ -313,17 +400,33 @@ class HookHandler:
             return {}
         if agent is not None and not _identifier(agent):
             raise ValueError("invalid worker identity")
+        provenance_agent = None if agent is not None else _provenance_agent(payload, session)
+        command_context = None
+        command_cwd = cwd
+        if (event == "PreToolUse" and payload.get("tool_name") == "write_stdin"
+                and agent is None and provenance_agent is None):
+            command_context = self.storage.command_session_context(
+                session, cwd, _command_session_id(payload.get("tool_input")))
+            if command_context is not None:
+                provenance_agent = command_context["context"]["thread_id"]
+                command_cwd = command_context["cwd"]
         explicit_coordinator = event in {"PreToolUse", "PostToolUse"} and agent == session
-        context_agent = None if explicit_coordinator else agent
+        context_agent = None if explicit_coordinator else (agent or provenance_agent)
         context = (self.storage.register_agent(session, cwd, agent) if event == "SubagentStart" else
                    self.storage.context(session, cwd, context_agent))
         if context is None:
             return {}
+        if (event == "PreToolUse" and payload.get("tool_name") == "write_stdin"
+                and command_context is None):
+            retained_cwd = self.storage.command_session_cwd(
+                context, _command_session_id(payload.get("tool_input")))
+            if retained_cwd is not None:
+                command_cwd = retained_cwd
         self.observation.update(role=context["role"], task_id=context["task_id"], thread_id=context["thread_id"],
                                 parent_thread_id=context["parent_thread_id"], binding_confidence="receipt",
                                 binding_origin=context["binding_origin"], outcome="observed")
         unknown_actor = (event in {"PreToolUse", "PostToolUse", "PreCompact", "PostCompact"}
-                         and agent is None)
+                         and agent is None and provenance_agent is None)
         if unknown_actor:
             self.observation.pop("thread_id", None)
             self.observation.pop("parent_thread_id", None)
@@ -348,6 +451,13 @@ class HookHandler:
                 output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
                                                     "permissionDecisionReason": "Cortex blocks app-thread messaging before dispatch; use the native parent/subagent route."}}
                 metadata["diagnostic_codes"] = ["forbidden_app_thread_message_pre_dispatch"]
+                self.observation["outcome"] = "denied"
+            elif (context["role"] == "worker"
+                  and private_access_denied(tool, payload.get("tool_input"),
+                                            cwd=command_cwd, project_root=context["project_root"])):
+                output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
+                                                   "permissionDecisionReason": "Cortex blocks direct worker access to task-private storage before dispatch; use bounded mcp__cortex__read_report evidence reads."}}
+                metadata["diagnostic_codes"] = ["private_cortex_execution_boundary"]
                 self.observation["outcome"] = "denied"
             elif context["role"] == "coordinator" and agent is not None and tool in COORDINATOR_PROJECT_TOOLS:
                 output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
@@ -383,17 +493,43 @@ class HookHandler:
             self.observation.update(tool_name=payload["tool_name"],
                                     response_shape=_response_shape(payload.get("tool_response")))
             metadata = result_metadata(payload["tool_name"], payload.get("tool_response"), payload.get("tool_input"), cwd)
+            if (context["role"] == "worker" and payload["tool_name"] in {"Bash", "exec_command", "terminal"}
+                    and metadata.get("status") == "running" and metadata.get("command_session_id")):
+                self.storage.remember_command_session(
+                    context, metadata["command_session_id"],
+                    _execution_cwd(payload.get("tool_input"), cwd),
+                )
+            if context["role"] == "worker" and payload["tool_name"] == "write_stdin":
+                command_id = _command_session_id(payload.get("tool_input"))
+                retained_cwd = self.storage.command_session_cwd(context, command_id)
+                if retained_cwd is not None:
+                    metadata["command_cwd_provenance"] = "retained_worker_session"
         elif event in {"SessionStart", "SubagentStart"}:
             snapshot = self.storage.snapshot(context)
             self.observation["source_revision"] = snapshot["source_revision"]
             state_key = snapshot["state_key"]
             if self.storage.claim_hint(context, event, state_key):
-                message = restoration(snapshot) if event == "SessionStart" else (
-                    "This worker has a confirmed Cortex task binding. Load the complete assigned Cortex worker skill, "
-                    "follow the concrete assignment and its constraints, use relevant report references, and publish the saved result. "
-                    "Preserve complete code-mode command results, including the initial skill read, with output and the actual "
-                    "exit_code or running session_id visible by emitting the complete result object (for example, text(result)). "
-                    "The coordinator owns steering and acceptance. A parent session ID is not this worker's identity.")
+                if event == "SessionStart":
+                    message = restoration(snapshot)
+                else:
+                    assigned = _assigned_worker_skill(payload)
+                    skill_instruction = (
+                        f"The assigned Cortex worker skill is the complete `{assigned[0]}` SKILL.md file at "
+                        f"`{assigned[1]}` in the supplied Skills catalogue."
+                        if assigned else
+                        "The assignment must supply the exact assigned Cortex worker skill identity as a `cortex:worker-*` token; resolve its matching "
+                        "`skills/worker-*/SKILL.md` file from the supplied Skills catalogue and do not infer a role."
+                    )
+                    message = (
+                        "This worker has a confirmed Cortex task binding. " + skill_instruction + " Read that complete "
+                        "SKILL.md filesystem file before any Cortex call, tool discovery, project read or project work. "
+                        "Never use ALL_TOOLS to discover skills. Never print filtered tool objects or declarations; for "
+                        "tool discovery emit names only, then emit the exact selected tool's `.description` before calling it. "
+                        "Follow the concrete assignment and its constraints, use relevant report references, and publish the saved result. "
+                        "Preserve complete code-mode command results, including the initial skill read, with output and the actual "
+                        "exit_code or running session_id visible by emitting the complete result object (for example, text(result)). "
+                        "The coordinator owns steering and acceptance. A parent session ID is not this worker's identity."
+                    )
                 output = _context_output(event, message)
                 self.observation["outcome"] = "context"
             else:

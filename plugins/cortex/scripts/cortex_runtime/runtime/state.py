@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 
-BASE_VERSION = "1.15.8"
+BASE_VERSION = "1.15.9"
 
 
 def _safe_existing(path: Path) -> os.stat_result | None:

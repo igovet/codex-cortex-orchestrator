@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from cortex_runtime.contracts import StoreError
+from cortex_runtime.execution_boundary import private_access_denied
 from cortex_runtime.host_source import NativeSource
 from cortex_runtime.hook_storage import HookStorage
 from cortex_runtime.hooks import HookHandler, _response_shape, main, parse_patch, result_metadata
@@ -135,6 +136,19 @@ def test_subagent_lifecycle_requires_explicit_mapping_and_rejects_conflicts(acti
         store.call("list_reports", {}, "child", "other")
 
 
+def test_subagent_bootstrap_delivers_exact_skill_file_and_tool_order(active):
+    _, _, handler, root = active
+    result = handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "cortex:worker-backend-dev" in context
+    assert "skills/worker-backend-dev/SKILL.md" in context
+    assert "Read that complete SKILL.md filesystem file before any Cortex call" in context
+    assert "Never use ALL_TOOLS to discover skills" in context
+    assert "Never print filtered tool objects or declarations" in context
+    assert context.index("emit names only") < context.index("exact selected tool's `.description`")
+    assert context.index("before any Cortex call") < context.index("Follow the concrete assignment")
+
+
 def test_unknown_parent_or_wrong_project_cannot_bind_worker(active):
     store, storage, handler, root = active
     unknown = dict(event(root, "SubagentStart", agent_id="child"), session_id="unknown")
@@ -168,6 +182,78 @@ def test_explicit_coordinator_identity_denies_project_host_tools_before_dispatch
     assert "delegated to a native worker" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
     assert handler.observation["role"] == "coordinator"
     assert handler.observation["outcome"] == "denied"
+
+
+def test_private_execution_boundary_fixture_is_deny_only_and_sanitized(active):
+    fixture = json.loads((Path(__file__).parent / "fixtures/private_boundary/commands.json").read_text())
+    _, _, handler, root = active
+    handler.handle(event(root, "SubagentStart", agent_id="child"))
+    for expected, key in ((False, "allow"), (True, "deny")):
+        for index, row in enumerate(fixture[key]):
+            tool_input = json.loads(json.dumps(row["input"]).replace("PROJECT", str(root)))
+            assert private_access_denied(row["tool"], tool_input, cwd=str(root), project_root=str(root)) is expected
+            if row["tool"] == "exec_command" and expected:
+                blocked = handler.handle(event(root, "PreToolUse", tool_name=row["tool"],
+                                               tool_use_id=f"boundary-{key}-{index}", agent_id="child",
+                                               tool_input=tool_input))
+                assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+                assert "task-private storage" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+                assert str(root) not in json.dumps(blocked)
+
+
+def test_private_execution_boundary_resolves_symlink_routes(active):
+    _, _, handler, root = active
+    handler.handle(event(root, "SubagentStart", agent_id="child"))
+    private = root / ".codex" / "cortex" / "task"
+    private.mkdir(parents=True)
+    link = root / "workspace-alias"
+    link.symlink_to(root / ".codex" / "cortex", target_is_directory=True)
+    command = {"cmd": f"cat {link}/task/pipeline.md"}
+    assert private_access_denied("exec_command", command, cwd=str(root), project_root=str(root))
+    assert private_access_denied("exec_command", {"cmd": "cat workspace-alias"}, cwd=str(root), project_root=str(root))
+    blocked = handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="boundary-link",
+                                   agent_id="child", tool_input=command))
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_private_boundary_uses_validated_parent_provenance_without_agent_id(active):
+    _, _, handler, root = active
+    handler.handle(event(root, "SubagentStart", agent_id="child"))
+    private = root / ".codex" / "cortex" / "task" / "pipeline.md"
+    worker_event = event(root, "PreToolUse", tool_name="exec_command", tool_use_id="provenance-worker",
+                         thread_id="child", parent_thread_id="parent",
+                         tool_input={"cmd": f"cat {private}"})
+    blocked = handler.handle(worker_event)
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # A session-scoped event with no validated child provenance remains
+    # coordinator/system-compatible and is not globally overblocked.
+    assert handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="provenance-parent",
+                                tool_input={"cmd": f"cat {private}"})) == {}
+    assert handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="provenance-wrong",
+                                thread_id="child", parent_thread_id="other",
+                                tool_input={"cmd": f"cat {private}"})) == {}
+
+
+def test_private_boundary_reuses_worker_command_cwd_for_unidentified_write_stdin(active):
+    store, _, handler, root = active
+    handler.handle(event(root, "SubagentStart", agent_id="child"))
+    shell_cwd = root / ".codex" / "cortex"
+    shell_cwd.mkdir(parents=True, exist_ok=True)
+    started = event(root, "PostToolUse", tool_name="exec_command", tool_use_id="running-shell",
+                    agent_id="child", tool_input={"cmd": "pwd", "workdir": str(shell_cwd)},
+                    tool_response={"session_id": 17})
+    assert handler.handle(started) == {}
+    # The receipt survives a fresh hook process, not only the in-memory handler.
+    handler = HookHandler(HookStorage(Store(store.directory, initialize=False)))
+    followup = event(root, "PreToolUse", tool_name="write_stdin", tool_use_id="stateful-private",
+                     tool_input={"session_id": 17, "chars": "cat task/pipeline.md"})
+    blocked = handler.handle(followup)
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert handler.observation["role"] == "worker"
+    # An unknown command session has no worker provenance and remains a
+    # session-scoped observation rather than turning into a coordinator denial.
+    assert handler.handle(event(root, "PreToolUse", tool_name="write_stdin", tool_use_id="stateful-unknown",
+                                tool_input={"session_id": 99, "chars": "cat task/pipeline.md"})) == {}
 
 
 def test_recovery_reminds_coordinator_of_project_boundary(active):

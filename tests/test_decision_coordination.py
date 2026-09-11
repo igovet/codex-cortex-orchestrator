@@ -75,6 +75,25 @@ def test_worker_message_allows_one_reply_to_that_worker_after_wait():
     assert violation in flags([wait,{**inbound,'target_agent':'/root/other'},reply])
 
 
+@pytest.mark.parametrize('wait_outcome', ['pending', 'timeout'])
+def test_pending_or_timeout_wait_requires_repeat_and_rejects_unsolicited_message(wait_outcome):
+    wait = row('wait_agent', 'parent', 'coordinator', outcome=wait_outcome)
+    status = row('list_agents', 'parent', 'coordinator')
+    repeated = row('wait_agent', 'parent', 'coordinator', outcome='success')
+    message = row('send_message', 'parent', 'coordinator', target_thread_id='worker')
+    violation = 'coordinator_unsolicited_message_after_wait'
+    assert flags([wait, status, repeated]) == set()
+    assert violation in flags([wait, status, message])
+    assert violation in flags([wait, status, repeated, message])
+
+
+def test_reconciled_terminal_result_allows_intentional_followup():
+    wait = row('wait_agent', 'parent', 'coordinator')
+    history = [wait] + published()
+    followup = row('followup_task', 'parent', 'coordinator', target_thread_id='worker', timestamp='3')
+    assert 'coordinator_unsolicited_message_after_wait' not in flags(history + [followup])
+
+
 def test_coordinator_can_read_needed_evidence_pages_and_user_sources():
     read = row('mcp__cortex__read_report', 'parent', 'coordinator', document_kind='report', page='start', requested_limit=4000)
     assert not flags([read])
@@ -85,7 +104,10 @@ def test_coordinator_can_read_needed_evidence_pages_and_user_sources():
 
 
 def test_routing_does_not_force_model_from_profile():
-    assert not flags([row('spawn_agent', 'parent', 'coordinator', assigned_profile='architect', model='gpt-5.6-luna')])
+    assert not flags([row('spawn_agent', 'parent', 'coordinator', assigned_profile='architect',
+                          model='gpt-5.6-luna', reasoning_effort='high',
+                          requested_model='gpt-5.6-luna', requested_reasoning_effort='medium',
+                          fork_turns='none')])
 
 
 def test_followup_metadata_never_contains_message():
@@ -100,7 +122,8 @@ def test_standard_skill_loading_does_not_allow_plugin_exploration(tmp_path,monke
     for suffix in ('skills/worker-general/SKILL.md','skills/context-compaction/SKILL.md',
                    'skills/cortex-control/references/index.md'):
         path=cache/suffix;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('instructions')
-        assert not check('exec_command',json.dumps({'cmd':'cat '+str(path)}),'coordinator',str(tmp_path))
+        assert 'forbidden_plugin_or_cache_access' in check(
+            'exec_command',json.dumps({'cmd':'cat '+str(path)}),'coordinator',str(tmp_path))
         assert 'forbidden_plugin_or_cache_access' in check('exec_command',json.dumps({'cmd':'cat '+str(path)+'; ls '+str(cache)}),'general',str(tmp_path))
     for suffix in ('skills/worker-general/SKILL.md','agents/general.toml','profiles.json','scripts/cortex_server.py'):
         path='/home/test/.codex/plugins/cache/cortex/cortex/build/'+suffix
@@ -135,6 +158,16 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
     assert OBSERVER['skill_instruction_read']('exec_command',json.dumps({'cmd':command(skill).replace('python3 - ', 'python3 -B - ')}))
     worker_arguments=json.dumps({'cmd':command(worker_skill,'skill_path','END')})
     assert OBSERVER['worker_skill_read']('exec_command',worker_arguments)
+    assert 'forbidden_plugin_or_cache_access' in check(
+        'exec_command',worker_arguments,'coordinator','/fixture')
+    reference=skill.parent/'references/pipeline-publication.md'
+    reference.parent.mkdir();reference.write_text('reference')
+    reference_arguments=json.dumps({'cmd':command(reference,'reference_path','REF')})
+    assert OBSERVER['skill_instruction_read']('exec_command',reference_arguments)
+    assert 'forbidden_plugin_or_cache_access' in check(
+        'exec_command',reference_arguments,'coordinator','/fixture')
+    assert 'forbidden_plugin_or_cache_access' not in check(
+        'exec_command',worker_arguments,'general','/fixture')
 
     negatives=(
         command(skill).replace('from pathlib import Path', 'import pathlib').replace('Path(', 'pathlib.Path('),
@@ -245,7 +278,40 @@ def test_successful_mcp_receipt_does_not_hide_or_inherit_consumer_failure():
     assert 'mcp_tool_error_observed' not in flags([wrapper,call])
     unresolved,_=OBSERVER['classify_host_failures']([wrapper,call])
     assert len(unresolved)==2  # The consumer's failed processing remains visible.
-    assert 'mcp_tool_error_observed' in flags([{**call,'host_receipt_outcome':'error'}])
+    failed_external={**call,'host_receipt_outcome':'error'}
+    assert 'mcp_tool_error_observed' not in flags([failed_external])
+    assert OBSERVER['orchestration_policy_violations'](
+        OBSERVER['call_policy_violations']([failed_external]))==[]
+
+
+def test_genuine_cortex_mcp_error_remains_acceptance_critical():
+    failed=row('mcp__cortex__create_draft',role='planner',outcome='error',
+               host_receipt_observed=True,host_receipt_outcome='error',
+               server_observed=True)
+    violations=OBSERVER['call_policy_violations']([failed])
+    assert 'mcp_tool_error_observed' in flags([failed])
+    assert OBSERVER['orchestration_policy_violations'](violations)
+
+
+def test_namespaced_cortex_receipt_findings_survive_full_audit_promotion():
+    missing_receipt=row('create_draft',role='planner',outcome='error',
+                        tool_namespace='mcp__cortex',argument_digest='missing',
+                        server_observed=True)
+    external_failure=row('list_projects',role='explorer',outcome='error',
+                         tool_namespace='mcp__codebase_memory',argument_digest='external',
+                         host_receipt_observed=True,host_receipt_outcome='error')
+    violations=OBSERVER['call_policy_violations']([missing_receipt,external_failure])
+    namespaced=[row for row in violations if row['thread_id']=='worker']
+    assert namespaced
+    assert all(item['tool']=='mcp__cortex__create_draft' for item in namespaced)
+    assert all(item['tool_namespace']=='mcp__cortex' for item in namespaced)
+    assert {item['violation'] for item in namespaced} >= {
+        'mcp_tool_error_observed','mcp_call_missing_host_receipt'}
+    promoted=OBSERVER['orchestration_policy_violations'](violations)
+    assert promoted
+    assert not any(item['thread_id']=='worker' and
+                   item['tool_namespace']=='mcp__codebase_memory'
+                   for item in promoted)
 
 
 def test_backend_execution_does_not_hide_a_missing_model_visible_receipt():
@@ -270,7 +336,10 @@ def test_server_event_matches_executed_call_not_an_earlier_skipped_guard():
 
 def test_capacity_failure_is_an_error_and_interrupt_is_not_release():
     assert OBSERVER['observed_outcome']('collab spawn failed: agent thread limit reached','spawn_agent')[:2]==('error','agent_limit_reached')
-    failed=row('spawn_agent','parent','coordinator',outcome='error',error_code='agent_limit_reached')
+    failed=row('spawn_agent','parent','coordinator',outcome='error',error_code='agent_limit_reached',
+               model='gpt-5.6-luna', reasoning_effort='high',
+               requested_model='gpt-5.6-luna', requested_reasoning_effort='medium',
+               fork_turns='none')
     snapshot=row('list_agents','parent','coordinator')
     stopped=row('interrupt_agent','parent','coordinator',outcome='success')
     assert not flags([failed,snapshot])
@@ -435,3 +504,240 @@ def test_generated_skill_loading_boundary_matches_actual_file_end():
     assert 'Call grouping and tab count follow the tool\'s guarantees' in interaction
     assert 'Create one fresh tab' not in interaction
     assert 'Perform state changes separately' not in interaction
+
+
+def test_observer_keeps_ordinary_worker_path_metadata_outside_orchestration_gate():
+    helper=OBSERVER
+    ordinary=helper['path_policy_metadata'](
+        'exec_command',json.dumps({'cmd':'ls -la /tmp/project'}),'general','/tmp/project')
+    assert ordinary['path_target_class']=='worker_workspace_or_external'
+    assert ordinary['path_access_kind']=='ordinary_tooling'
+    assert ordinary['path_policy_decision']=='diagnostic_only'
+    row=dict(thread_id='worker',role='general',tool='exec_command',outcome='success',**ordinary,
+             policy_flags=['forbidden_plugin_or_cache_access'])
+    violations=helper['call_policy_violations']([row])
+    assert helper['worker_policy_violations'](violations)
+    assert helper['orchestration_policy_violations'](violations)==[]
+
+
+def test_observer_classifies_genuine_unauthorized_cache_access_as_acceptance_critical(tmp_path):
+    helper=OBSERVER
+    cache='/home/test/.codex/plugins/cache/cortex/cortex/build/agents/general.toml'
+    arguments=json.dumps({'cmd':'cat '+cache})
+    metadata=helper['path_policy_metadata']('exec_command',arguments,'general',str(tmp_path))
+    assert metadata['path_target_class']=='plugin_or_cache'
+    assert metadata['path_access_kind']=='unauthorized_read_or_probe'
+    assert metadata['path_policy_decision']=='unauthorized_access'
+    row=dict(thread_id='worker',role='general',tool='exec_command',outcome='success',**metadata,
+             policy_flags=['forbidden_plugin_or_cache_access'])
+    violations=helper['call_policy_violations']([row])
+    assert helper['orchestration_policy_violations'](violations)
+
+
+def test_python_audit_comparison_marker_is_static_but_access_remains_forbidden(tmp_path):
+    helper=OBSERVER
+    candidate='/home/test/.cortex-dev/candidates/1.15.9+codex.sha256.0123456789abcdef'
+
+    def metadata(command,workdir=tmp_path):
+        return helper['path_policy_metadata'](
+            'exec_command',json.dumps({'cmd':command}),'build_verification',str(workdir))
+
+    comparison=("PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'\n"
+                "import json\n"
+                "from pathlib import Path\n"
+                "audit=json.loads(Path('/tmp/preserved-audit.json').read_text())\n"
+                f"assert audit['candidate']=={candidate!r}\n"
+                "PY")
+    allowed=metadata(comparison)
+    assert allowed['path_target_class']=='approved_instruction_or_static_mention'
+    assert allowed['path_access_kind']=='static_mention'
+    assert allowed['path_policy_decision']=='allowed'
+    assert helper['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':comparison}),'build_verification',str(tmp_path))==[]
+
+    inline=f"python3 -c 'assert observed == \"{candidate}\"'"
+    assert metadata(inline)['path_policy_decision']=='allowed'
+
+    forbidden=(
+        f"python3 - <<'PY'\nfrom pathlib import Path\n"
+        f"print(Path({candidate!r}).read_text())\nPY",
+        f"python3 - <<'PY'\npath={candidate!r}\nprint(open(path).read())\nPY",
+        f"python3 - <<'PY'\nimport subprocess\nsubprocess.run(['cat',{candidate!r}])\nPY",
+        f"python3 - <<'PY'\n# compare {candidate}\nprint('safe')\nPY",
+    )
+    for command in forbidden:
+        denied=metadata(command)
+        assert denied['path_target_class']=='plugin_or_cache'
+        assert denied['path_access_kind']=='unauthorized_read_or_probe'
+        assert denied['path_policy_decision']=='unauthorized_access'
+
+    # AST coordinates are UTF-8 byte offsets. A non-ASCII direct comparison
+    # must not mask a subsequent private marker in a comment.
+    unicode_comment=(f"python3 -c 'assert \"{'é' * 120}{candidate}\" == \"x\" "
+                     f"# {candidate}'")
+    denied=metadata(unicode_comment)
+    assert denied['path_target_class']=='plugin_or_cache'
+    assert denied['path_access_kind']=='unauthorized_read_or_probe'
+    assert denied['path_policy_decision']=='unauthorized_access'
+
+    private_workdir=tmp_path/'.cortex-dev/candidates/private'
+    assert metadata(inline,private_workdir)['path_policy_decision']=='unauthorized_access'
+
+
+def test_worker_private_cortex_cache_is_blocked_but_bounded_report_read_is_allowed(tmp_path):
+    helper=OBSERVER
+    private_path=str(tmp_path/'.codex/cortex/t_1/pipeline.md')
+    shell=json.dumps({'cmd':'sed -n 1,40p '+private_path})
+    metadata=helper['path_policy_metadata']('exec_command',shell,'general',str(tmp_path))
+    assert metadata['path_target_class']=='cortex_internal'
+    assert metadata['path_access_kind']=='unauthorized_read_or_probe'
+    assert metadata['path_policy_decision']=='unauthorized_access'
+    assert 'path_command_intent_digest' in metadata
+    assert private_path not in json.dumps(metadata)
+    blocked=dict(thread_id='worker',role='general',tool='exec_command',outcome='success',
+                 argument_digest='arg',result_digest='result',exit_code=0,truncated=False,
+                 policy_flags=['forbidden_plugin_or_cache_access'],**metadata)
+    violations=helper['call_policy_violations']([blocked])
+    assert helper['orchestration_policy_violations'](violations)
+    assert violations[0]['path_target_class']=='cortex_internal'
+    assert violations[0]['argument_digest']=='arg'
+    assert private_path not in json.dumps(violations)
+
+    bounded=json.dumps({'report_id':'r_0123456789ab','limit':4000})
+    assert helper['call_policy_flags']('mcp__cortex__read_report',bounded,'general',str(tmp_path))==[]
+
+
+def test_external_worker_diagnostics_remain_outside_private_cache_gate(tmp_path):
+    (tmp_path/'.git').mkdir()
+    helper=OBSERVER
+    assert helper['call_policy_flags'](
+        'mcp__codebase_memory__search_graph',
+        json.dumps({'query':'private module'}),'explorer',str(tmp_path))==[]
+    assert helper['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':'git status --short'}),'explorer',str(tmp_path))==[]
+    assert helper['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':'rg -n private .'}),'explorer',str(tmp_path))==[]
+
+
+def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
+    helper=OBSERVER
+
+    def audit(command):
+        arguments=json.dumps({'cmd':command})
+        metadata=helper['path_policy_metadata']('exec_command',arguments,'explorer',str(tmp_path))
+        flags=helper['call_policy_flags']('exec_command',arguments,'explorer',str(tmp_path))
+        row=dict(thread_id='worker',role='explorer',tool='exec_command',outcome='success',
+                 policy_flags=flags,**metadata)
+        violations=helper['call_policy_violations']([row])
+        return metadata,flags,violations
+
+    pattern,flags,violations=audit("rg -n '.codex/cortex/' scripts")
+    assert pattern['path_target_class']=='approved_instruction_or_static_mention'
+    assert pattern['path_access_kind']=='static_mention'
+    assert pattern['path_policy_provenance']=='observer_literal_marker'
+    assert pattern['path_policy_decision']=='allowed'
+    assert flags==[]
+    assert helper['orchestration_policy_violations'](violations)==[]
+
+    for glob in ('*','?','[abc]','{private,public}'):
+        literal,flags,violations=audit(f"rg -n .codex/cortex/{glob} scripts")
+        assert literal['path_target_class']=='cortex_internal'
+        assert literal['path_policy_decision']=='unauthorized_access'
+        assert flags==['forbidden_plugin_or_cache_access']
+        assert helper['orchestration_policy_violations'](violations)
+
+    for glob in ('*','?','[abc]','{private,public}'):
+        quoted,flags,violations=audit(f"rg -n '.codex/cortex/{glob}' scripts")
+        assert quoted['path_target_class']=='approved_instruction_or_static_mention'
+        assert quoted['path_access_kind']=='static_mention'
+        assert quoted['path_policy_decision']=='allowed'
+        assert flags==[]
+        assert helper['orchestration_policy_violations'](violations)==[]
+
+    # Double-quoted rg/grep patterns are equally static; only unquoted
+    # expansion/glob operands are private-target findings.
+    double_quoted,flags,violations=audit('rg --files -g "!**/.codex/cortex/**" | sed -n "1,120p"')
+    assert double_quoted['path_target_class']=='approved_instruction_or_static_mention'
+    assert double_quoted['path_access_kind']=='static_mention'
+    assert double_quoted['path_policy_decision']=='allowed'
+    assert flags==[]
+    assert helper['orchestration_policy_violations'](violations)==[]
+
+    target,flags,violations=audit("grep -R -n needle .codex/cortex/private")
+    assert target['path_target_class']=='cortex_internal'
+    assert target['path_access_kind']=='unauthorized_read_or_probe'
+    assert target['path_policy_decision']=='unauthorized_access'
+    assert flags==['forbidden_plugin_or_cache_access']
+    assert helper['orchestration_policy_violations'](violations)
+
+
+    ambiguous,flags,violations=audit('rg -n "$PATTERN .codex/cortex/" scripts')
+    assert ambiguous['path_target_class']=='cortex_internal'
+    assert ambiguous['path_policy_decision']=='unauthorized_access'
+    assert flags==['forbidden_plugin_or_cache_access']
+    assert helper['orchestration_policy_violations'](violations)
+
+    direct,flags,violations=audit('cat .codex/cortex/private')
+    assert direct['path_target_class']=='cortex_internal'
+    assert direct['path_policy_decision']=='unauthorized_access'
+    assert flags==['forbidden_plugin_or_cache_access']
+    assert helper['orchestration_policy_violations'](violations)
+
+    # A separated option value is a filesystem operand too; it must not be
+    # mistaken for the search pattern or silently dropped from path analysis.
+    for command in (
+        'grep --exclude-from .codex/cortex/private needle scripts',
+        'grep --exclude-from=.codex/cortex/private needle scripts',
+    ):
+        excluded_file,flags,violations=audit(command)
+        assert excluded_file['path_target_class']=='cortex_internal'
+        assert excluded_file['path_policy_decision']=='unauthorized_access'
+        assert flags==['forbidden_plugin_or_cache_access']
+        assert helper['orchestration_policy_violations'](violations)
+
+
+def test_pipeline_private_exclusion_is_not_a_private_read_but_private_target_is(tmp_path):
+    helper=OBSERVER
+
+    excluded="pwd && rg --files -g '!**/.codex/cortex/**' | sed -n '1,120p'"
+    arguments=json.dumps({'cmd':excluded})
+    metadata=helper['path_policy_metadata']('exec_command',arguments,'explorer',str(tmp_path))
+    assert metadata['path_target_class']=='approved_instruction_or_static_mention'
+    assert metadata['path_access_kind']=='static_mention'
+    assert helper['call_policy_flags']('exec_command',arguments,'explorer',str(tmp_path))==[]
+
+    private="cat .codex/cortex/private | sed -n '1,20p'"
+    private_arguments=json.dumps({'cmd':private})
+    private_metadata=helper['path_policy_metadata']('exec_command',private_arguments,
+                                                     'explorer',str(tmp_path))
+    assert private_metadata['path_target_class']=='cortex_internal'
+    assert private_metadata['path_access_kind']=='unauthorized_read_or_probe'
+    assert 'forbidden_plugin_or_cache_access' in helper['call_policy_flags'](
+        'exec_command',private_arguments,'explorer',str(tmp_path))
+
+
+def test_observer_retains_codebase_memory_and_git_failures_as_worker_diagnostics():
+    helper=OBSERVER
+    memory=dict(thread_id='worker',role='explorer',tool='mcp__codebase_memory__list_projects',
+                outcome='success')
+    git=dict(thread_id='worker',role='explorer',tool='command_execution',outcome='error',
+             error_code='command_exit_128',command_family='git',exit_code=128)
+    rows=[memory,git]
+    assert helper['is_orchestration_call'](memory) is False
+    assert helper['is_orchestration_call'](git) is False
+    assert helper['orchestration_error_history'](rows)==[]
+    unresolved,_=helper['classify_host_failures'](rows)
+    assert unresolved==[git]
+
+
+def test_observer_allows_narrow_skill_read_and_records_safe_path_provenance(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/build/skills/worker-general/SKILL.md'
+    skill.parent.mkdir(parents=True);skill.write_text('instructions')
+    arguments=json.dumps({'cmd':'cat '+str(skill)})
+    metadata=OBSERVER['path_policy_metadata']('exec_command',arguments,'general','/tmp/project')
+    assert metadata['path_target_class']=='approved_instruction_or_static_mention'
+    assert metadata['path_access_kind']=='approved_instruction_read'
+    assert metadata['path_policy_decision']=='allowed'
+    assert 'forbidden_plugin_or_cache_access' not in OBSERVER['call_policy_flags'](
+        'exec_command',arguments,'general','/tmp/project')

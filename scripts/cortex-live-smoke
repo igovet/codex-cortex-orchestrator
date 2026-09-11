@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Transport-only driver for one ordinary interactive Codex session."""
 import argparse
+import ctypes
+import errno
+import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import runpy
@@ -12,13 +16,23 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import tomllib
+import uuid
 
 ROOT=Path(__file__).resolve().parents[1]
 SESSION='cortex-markdown-smoke'
-TARGET=SESSION+':0.0'
 STATE=Path(tempfile.gettempdir())/f'cortex-markdown-smoke-{os.getuid()}'
+TMUX_SESSION_FORMAT='#{pid}|#{session_name}|#{session_id}|#{session_created}|#{pane_id}|#{pane_pid}'
 LIVE_MODEL='gpt-5.6-luna'
 LIVE_COORDINATOR_EFFORT='high'
+PHASE2_CONTROL_SHA256=None
+COMMON_OBSERVER_PATH=None
+POST_COMMIT_FAILURE_SCHEMA='phase2-cli-post-commit-launch-failure-v1'
+LAUNCH_TRANSACTION_SCHEMA='phase2-cli-launch-transaction-v1'
+SESSION_BINDING_SCHEMA='phase2-cli-session-binding-v1'
+SEND_RECEIPT_SCHEMA='phase2-cli-native-user-turn-receipt-v1'
+TRUST_RECEIPT_SCHEMA='phase2-cli-trust-transition-v1'
+PROC_ROOT=Path('/proc')
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
     'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
@@ -31,8 +45,382 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
 )
 
 
+class PostCommitLaunchFailure(RuntimeError):
+    """A launch/observation failure after fresh-store acceptance.
+
+    The atomic project-store commit is the acceptance boundary.  Once it has
+    returned successfully, callers must preserve the accepted store and use a
+    different disposable workdir for another evaluation attempt.
+    """
+
+
+class ObserverEvidenceError(RuntimeError):
+    """A typed refusal when an archived observer cannot supply audit evidence."""
+
+    def __init__(self, code, capability):
+        super().__init__(f'{code}: {capability}')
+        self.code=code
+        self.capability=capability
+
+
+def _observer_namespace(run_name):
+    """Load the sealed common observer for Phase 2, or the local observer ordinarily."""
+    path=(Path(COMMON_OBSERVER_PATH) if _phase2_mode() and COMMON_OBSERVER_PATH is not None
+          else ROOT/'scripts/cortex-desktop-dev')
+    if _phase2_mode() and COMMON_OBSERVER_PATH is None:
+        raise ObserverEvidenceError('missing_required_observer_capability','common_observer')
+    return runpy.run_path(str(path),run_name=run_name)
+
+
+def _post_commit_launch_failure(receipt, operation, error):
+    """Build a safe, opaque diagnostic without exposing paths or exceptions."""
+    run_id = receipt.get('run_id') if isinstance(receipt, dict) else None
+    if not isinstance(run_id, str) or not re.fullmatch(r'[0-9a-f]{32}', run_id):
+        run_id = 'unavailable'
+    return PostCommitLaunchFailure(
+        'post_commit_launch_failure: fresh-store commit accepted; '
+        f'{operation} failed (receipt={run_id}); canonical .codex is preserved; '
+        'no evaluation acceptance follows; use a new disposable workdir for the '
+        'next attempt'
+    )
+
+
+def _atomic_private_json(path, value):
+    """Durably replace one owner-private JSON receipt."""
+    path=Path(path)
+    descriptor, temporary=tempfile.mkstemp(prefix=f'.{path.name}.',dir=path.parent)
+    temporary_path=Path(temporary)
+    try:
+        os.fchmod(descriptor,0o600)
+        with os.fdopen(descriptor,'w',encoding='utf-8',newline='') as stream:
+            json.dump(value,stream,sort_keys=True,separators=(',',':'))
+            stream.write('\n');stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary_path,path)
+        directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
+    except BaseException:
+        try:os.close(descriptor)
+        except OSError:pass
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _phase2_control_failure_path():
+    digest=PHASE2_CONTROL_SHA256
+    if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
+        return None
+    return STATE/f'phase2-control-failure-{digest}.json'
+
+
+def _phase2_workdir_failure_path(workdir):
+    store=Path(workdir)/'.codex/cortex/cortex.sqlite3'
+    digest=hashlib.sha256(f'{workdir}\0{store}'.encode('utf-8')).hexdigest()
+    return STATE/f'phase2-workdir-failure-{digest}.json'
+
+
+def _phase2_control_transaction_path():
+    digest=PHASE2_CONTROL_SHA256
+    if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
+        return None
+    return STATE/f'phase2-control-transaction-{digest}.json'
+
+
+def _phase2_workdir_transaction_path(workdir):
+    store=Path(workdir)/'.codex/cortex/cortex.sqlite3'
+    digest=hashlib.sha256(f'{workdir}\0{store}'.encode('utf-8')).hexdigest()
+    return STATE/f'phase2-workdir-transaction-{digest}.json'
+
+
+def _phase2_session_binding_path(receipt):
+    digest=PHASE2_CONTROL_SHA256
+    if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
+        raise RuntimeError('Phase 2 session binding requires an exact control identity')
+    if not isinstance(receipt,str) or not re.fullmatch(r'[0-9a-f]{64}',receipt):
+        raise RuntimeError('Phase 2 session binding requires an exact session receipt')
+    return STATE/f'phase2-session-binding-{digest}-{receipt}.json'
+
+
+def _phase2_send_receipt_path(data):
+    control=data.get('phase2_control_sha256');receipt=data.get('session_receipt')
+    if (not isinstance(control,str) or not re.fullmatch(r'[0-9a-f]{64}',control)
+            or not isinstance(receipt,str) or not re.fullmatch(r'[0-9a-f]{64}',receipt)):
+        raise RuntimeError('Phase 2 send receipt requires exact control and session identities')
+    return STATE/f'phase2-send-receipt-{control}-{receipt}.json'
+
+
+def _phase2_trust_receipt_path(data):
+    control=data.get('phase2_control_sha256');receipt=data.get('session_receipt')
+    if (not isinstance(control,str) or not re.fullmatch(r'[0-9a-f]{64}',control)
+            or not isinstance(receipt,str) or not re.fullmatch(r'[0-9a-f]{64}',receipt)):
+        raise RuntimeError('Phase 2 trust receipt requires exact control and session identities')
+    return STATE/f'phase2-trust-receipt-{control}-{receipt}.json'
+
+
+def _phase2_session_fields(data):
+    names=('workdir','store','events','started_at','thread_created_since',
+           'tmux_server_pid','tmux_session_name','tmux_session_id','tmux_session_created',
+           'tmux_pane_id','tmux_pane_pid','tmux_pane_start_ticks')
+    return {name:data[name] for name in names}
+
+
+def _capture_phase2_session_binding(data):
+    """Persist the immutable pane receipt once, after tmux returns ownership."""
+    fields=_phase2_session_fields(data)
+    receipt=hashlib.sha256(json.dumps(fields,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    path=_phase2_session_binding_path(receipt)
+    if _read_private_receipt(path) is not None:
+        raise RuntimeError('Phase 2 session binding already exists for this control')
+    binding={'schema_version':SESSION_BINDING_SCHEMA,
+             'control_record_sha256':PHASE2_CONTROL_SHA256,
+             **fields,'session_receipt':receipt}
+    _atomic_private_json(path,binding)
+    data.update(phase2_control_sha256=PHASE2_CONTROL_SHA256,
+                lifecycle_status='started',session_receipt=receipt)
+
+
+def _read_private_receipt(path):
+    try:info=path.lstat()
+    except FileNotFoundError:return None
+    except OSError as exc:raise RuntimeError('Phase 2 launch receipt cannot be inspected') from exc
+    if path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid() or info.st_mode&0o077:
+        raise RuntimeError('Phase 2 launch receipt is untrusted')
+    try:value=json.loads(path.read_text(encoding='utf-8'))
+    except (OSError,ValueError) as exc:raise RuntimeError('Phase 2 launch receipt is invalid') from exc
+    if not isinstance(value,dict):raise RuntimeError('Phase 2 launch receipt is invalid')
+    return value
+
+
+def _refuse_failed_phase2_launch(workdir):
+    """A post-commit failure permanently consumes its control and workdir."""
+    for path,label in ((_phase2_control_failure_path(),'control'),
+                       (_phase2_workdir_failure_path(workdir),'workdir')):
+        if path is None:
+            continue
+        if _read_private_receipt(path) is not None:
+            raise RuntimeError(f'Phase 2 {label} was consumed by a prior post-commit launch failure; use a new control and workdir')
+    control_transaction=_phase2_control_transaction_path()
+    if control_transaction is not None:
+        value=_read_private_receipt(control_transaction)
+        if value is not None and value.get('status')!='launched':
+            raise RuntimeError('Phase 2 control has an incomplete prior launch transaction; use a new control and workdir')
+    if _read_private_receipt(_phase2_workdir_transaction_path(workdir)) is not None:
+        raise RuntimeError('Phase 2 workdir already has a launch transaction; use a new control and workdir')
+
+
+def _prepare_launch_transaction(workdir):
+    """Durably journal both reuse identities before the atomic project commit."""
+    store=Path(workdir)/'.codex/cortex/cortex.sqlite3'
+    path_digest=hashlib.sha256(f'{workdir}\0{store}'.encode('utf-8')).hexdigest()
+    record={
+        'schema_version':LAUNCH_TRANSACTION_SCHEMA,
+        'status':'prepared',
+        'transaction_id':uuid.uuid4().hex,
+        'control_record_sha256':PHASE2_CONTROL_SHA256,
+        'canonical_path_digest':path_digest,
+        'timestamp':time.time(),
+    }
+    paths=[path for path in (_phase2_control_transaction_path(),
+                             _phase2_workdir_transaction_path(workdir)) if path is not None]
+    # Both independent state receipts must exist before project mutation. If
+    # either write fails, the earlier prepared receipt remains fail-closed.
+    for path in paths:_atomic_private_json(path,record)
+    return {'record':record,'state_paths':paths,
+            'marker':Path(workdir)/'.codex/cortex/phase2-launch-transaction.json'}
+
+
+def _update_launch_transaction(transaction, status, *, best_effort=False):
+    record={**transaction['record'],'status':status,'updated_at':time.time()}
+    failures=[]
+    for path in [*transaction['state_paths'],transaction['marker']]:
+        try:_atomic_private_json(path,record)
+        except OSError as exc:failures.append(exc)
+    transaction['record']=record
+    if failures and not best_effort:raise failures[0]
+    return len(failures)
+
+
+def _record_post_commit_failure(workdir, receipt, transaction, stage, error, session_id,
+                                session_identity=None):
+    """Seal a typed unusable-store receipt and stop only our tmux session ID."""
+    cleanup='not-created'
+    if session_id is not None:
+        try:
+            if session_identity is not None:
+                _require_tmux_session_identity(session_id,session_identity)
+            stopped=tmux('kill-session','-t',session_id,check=False)
+        except (OSError,RuntimeError,subprocess.SubprocessError):cleanup='failed'
+        else:cleanup='stopped' if stopped.returncode==0 else 'failed'
+    failure={
+        'schema_version':POST_COMMIT_FAILURE_SCHEMA,
+        'status':'unusable',
+        'outcome':'post_commit_launch_failure',
+        'run_id':receipt['run_id'],
+        'control_record_sha256':PHASE2_CONTROL_SHA256,
+        'canonical_path_digest':receipt['canonical_path_digest'],
+        'failure_stage':stage,
+        'error_type':type(error).__name__,
+        'session_cleanup':cleanup,
+        'timestamp':time.time(),
+    }
+    persistence_failures=_update_launch_transaction(transaction,'failed',best_effort=True)
+    control_path=_phase2_control_failure_path()
+    paths=[control_path or STATE/f"phase2-launch-failure-{receipt['run_id']}.json",
+           _phase2_workdir_failure_path(workdir),
+           Path(workdir)/'.codex/cortex/phase2-launch-failure.json']
+    for path in dict.fromkeys(paths):
+        try:_atomic_private_json(path,failure)
+        except OSError:persistence_failures+=1
+    failure['persistence_failures']=persistence_failures
+    return failure
+
+
 def tmux(*args,check=True):
     return subprocess.run(['tmux',*args],capture_output=True,text=True,check=check)
+
+
+def _tmux_new_session_args(workdir, *command):
+    """Return the one sealed tmux creation argv used before and after commit."""
+    return ('new-session','-d','-P','-F','#{session_id}',
+            '-s',SESSION,'-c',str(workdir),*command)
+
+
+def _tmux_session_identity(session_id):
+    """Read server, session and pane provenance through an exact session query."""
+    rows=tmux('list-panes','-t','='+session_id,'-F',TMUX_SESSION_FORMAT).stdout.splitlines()
+    if len(rows)!=1:
+        raise RuntimeError('tmux did not return exactly one owned session pane')
+    fields=rows[0].split('|')
+    if (len(fields)!=6 or not fields[0].isdigit() or fields[1]!=SESSION
+            or fields[2]!=session_id or not fields[3].isdigit()
+            or not re.fullmatch(r'%[0-9]+',fields[4]) or not fields[5].isdigit()):
+        raise RuntimeError('tmux did not return immutable server/session provenance')
+    return {
+        'server_pid':int(fields[0]),'session_name':fields[1],
+        'session_id':fields[2],'session_created':int(fields[3]),
+        'pane_id':fields[4],'pane_pid':int(fields[5]),
+    }
+
+
+def _require_tmux_session_identity(session_id, expected):
+    """Refuse a restarted server or substituted session/pane before mutation."""
+    current=_tmux_session_identity(session_id)
+    if current!=expected:
+        raise RuntimeError('tmux session identity changed before exact-target operation')
+    return current
+
+
+def _preflight_tmux_launch(workdir):
+    """Create, verify and remove the exact isolated session before store commit."""
+    session_id=None
+    identity=None
+    pending_error=None
+    try:
+        created=tmux(*_tmux_new_session_args(workdir,'/bin/sleep','30'))
+        session_id=created.stdout.strip()
+        if not re.fullmatch(r'\$[0-9]+',session_id):
+            raise RuntimeError('tmux launch preflight did not return the owned session identity')
+        identity=_tmux_session_identity(session_id)
+        tmux('set-option','-t',session_id,'remain-on-exit','on')
+        _require_tmux_session_identity(session_id,identity)
+    except (OSError,RuntimeError,subprocess.SubprocessError) as exc:
+        pending_error=exc
+    if session_id is not None and identity is not None:
+        try:_require_tmux_session_identity(session_id,identity)
+        except (OSError,RuntimeError,subprocess.SubprocessError) as exc:
+            raise RuntimeError('tmux launch preflight refused a substituted session') from exc
+        stopped=tmux('kill-session','-t',session_id,check=False)
+        if stopped.returncode!=0:
+            raise RuntimeError('tmux launch preflight could not clean its owned session') from pending_error
+    if tmux('has-session','-t','='+SESSION,check=False).returncode==0:
+        raise RuntimeError('tmux launch preflight left the exact smoke session active') from pending_error
+    if pending_error is not None:
+        raise RuntimeError('tmux launch preflight failed before fresh-store commit') from pending_error
+
+
+def _proc_start_ticks(pid):
+    try:body=(PROC_ROOT/str(pid)/'stat').read_text()
+    except OSError as exc:raise RuntimeError('Owned tmux pane process identity is unavailable') from exc
+    close=body.rfind(')');fields=body[close+2:].split() if close>=0 else []
+    if len(fields)<=19 or not fields[19].isdigit():
+        raise RuntimeError('Owned tmux pane process identity is malformed')
+    return int(fields[19])
+
+
+def _exact_cleanup_identity(data):
+    server=tmux('display-message','-p','#{pid}').stdout.strip()
+    if not server.isdigit() or int(server)!=data.get('tmux_server_pid'):
+        raise RuntimeError('Exact cleanup refused a replaced tmux server')
+    session_id=data.get('tmux_session_id')
+    format_string='#{session_name}|#{session_id}|#{session_created}|#{pane_id}|#{pane_pid}'
+    rows=tmux('list-panes','-t','='+session_id,'-F',format_string).stdout.splitlines()
+    expected=[data.get('tmux_session_name'),session_id,str(data.get('tmux_session_created')),
+              data.get('tmux_pane_id'),str(data.get('tmux_pane_pid'))]
+    if len(rows)!=1 or rows[0].split('|')!=expected:
+        raise RuntimeError('Exact cleanup refused a replaced session or pane')
+    if _proc_start_ticks(data['tmux_pane_pid'])!=data.get('tmux_pane_start_ticks'):
+        raise RuntimeError('Exact cleanup refused pane PID reuse')
+
+
+def _require_exact_cleanup_args(args,data):
+    expected={
+        'phase2_control_sha256':args.control_sha256,'session_receipt':args.session_receipt,
+        'tmux_server_pid':args.server_pid,'tmux_session_name':args.session_name,
+        'tmux_session_id':args.session_id,'tmux_session_created':args.session_created,
+        'tmux_pane_id':args.pane_id,'tmux_pane_pid':args.pane_pid,
+        'tmux_pane_start_ticks':args.pane_start_ticks,
+    }
+    if any(data.get(key)!=value for key,value in expected.items()):
+        raise RuntimeError('Exact cleanup arguments do not match the sealed session receipt')
+    fields=_phase2_session_fields(data)
+    receipt=hashlib.sha256(json.dumps(fields,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    if receipt!=args.session_receipt:
+        raise RuntimeError('Exact cleanup session receipt is inconsistent')
+
+
+def terminal_snapshot(data):
+    """Return one ownership-bound pane and descendant-process snapshot."""
+    session_id=data.get('tmux_session_id')
+    pane_id=data.get('tmux_pane_id')
+    pane_pid=data.get('tmux_pane_pid')
+    if (not isinstance(session_id,str) or not re.fullmatch(r'\$[0-9]+',session_id)
+            or not isinstance(pane_id,str) or not re.fullmatch(r'%[0-9]+',pane_id)
+            or not isinstance(pane_pid,int) or isinstance(pane_pid,bool) or pane_pid<1):
+        raise RuntimeError('Owned tmux pane receipt is unavailable')
+    # tmux renders control separators in a format string as visible escape
+    # text on supported hosts, so split on a plain character excluded from all
+    # validated identity/status fields.
+    format_string='#{session_id}|#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_dead}|#{pane_dead_status}'
+    rows=tmux('list-panes','-t','='+session_id,'-F',format_string).stdout.splitlines()
+    if len(rows)!=1:
+        raise RuntimeError('Owned tmux pane receipt does not identify exactly one pane')
+    fields=rows[0].split('|')
+    if len(fields)!=6 or fields[:3]!=[session_id,pane_id,str(pane_pid)]:
+        raise RuntimeError('Owned tmux pane receipt changed')
+    current_command,dead_text,status_text=fields[3:]
+    if dead_text not in {'0','1'} or (status_text and not status_text.isdigit()):
+        raise RuntimeError('Owned tmux pane status is malformed')
+    process_result=subprocess.run(['ps','-eo','pid=,ppid=,comm='],capture_output=True,text=True,check=True)
+    processes={}
+    for line in process_result.stdout.splitlines():
+        parts=line.split(None,2)
+        if len(parts)!=3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        processes[int(parts[0])]=(int(parts[1]),parts[2])
+    descendants=[];pending=[pane_pid]
+    while pending:
+        parent=pending.pop()
+        children=sorted(pid for pid,(ppid,_) in processes.items() if ppid==parent)
+        for pid in children:
+            descendants.append({'pid':pid,'ppid':parent,'command':processes[pid][1]})
+            pending.append(pid)
+    return {
+        'schema_version':'cortex-live-terminal-snapshot-v1',
+        'session_id':session_id,'pane_id':pane_id,'pane_pid':pane_pid,
+        'current_command':current_command,'dead':dead_text=='1',
+        'dead_status':int(status_text) if status_text else None,
+        'descendants':sorted(descendants,key=lambda row:row['pid']),
+    }
 
 
 def private():
@@ -57,15 +445,262 @@ def project_store(workdir):
     return project/'.codex/cortex/cortex.sqlite3'
 
 
+def evaluation_storage_directory(workdir):
+    """Bind archived and current runtimes to the same fresh project store.
+
+    Format-10 archived runtimes still honor ``CORTEX_DATA_DIR`` while format 11
+    resolves the project-local directory from native thread state.  The Phase 2
+    compatibility harness supplies the exact project-local directory to both;
+    current runtimes ignore the legacy override, and archived runtimes no longer
+    fall back to an unrelated database under the isolated CODEX_HOME.
+    """
+    store=project_store(workdir)
+    directory=store.parent
+    if not _validate_private_directory(directory.parent,'parent'):
+        raise RuntimeError('evaluation fresh-store parent is unavailable')
+    if not _validate_private_directory(directory,'directory'):
+        raise RuntimeError('evaluation fresh-store directory is unavailable')
+    _absent_path(store,'target')
+    return directory
+
+
+def _private_directory(path, label):
+    """Create or validate one owner-private directory without following links."""
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise RuntimeError(f'evaluation fresh-store {label} cannot be inspected') from exc
+        else:
+            os.chmod(path, 0o700)
+            info = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f'evaluation fresh-store {label} cannot be inspected') from exc
+    if path.is_symlink() or not path.is_dir():
+        raise RuntimeError(f'evaluation fresh-store {label} is not a private directory')
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f'evaluation fresh-store {label} cannot be canonicalized') from exc
+    if resolved != path or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError(f'evaluation fresh-store {label} is not owner-private')
+    return path
+
+
+def _validate_private_directory(path, label):
+    """Validate an existing private directory without creating anything."""
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError(f'evaluation fresh-store {label} cannot be inspected') from exc
+    if path.is_symlink() or not path.is_dir():
+        raise RuntimeError(f'evaluation fresh-store {label} is not a private directory')
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f'evaluation fresh-store {label} cannot be canonicalized') from exc
+    if resolved != path or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError(f'evaluation fresh-store {label} is not owner-private')
+    return True
+
+
+def _absent_path(path, label):
+    """Require a path to be absent, including dangling symlinks, without mutation."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f'evaluation fresh-store {label} cannot be inspected') from exc
+    if path.is_symlink():
+        raise RuntimeError(f'evaluation fresh-store {label} is an unsafe symlink')
+    if path.is_file():
+        raise RuntimeError(f'evaluation fresh-store {label} already exists')
+    raise RuntimeError(f'evaluation fresh-store {label} is not a regular expected target')
+
+
+def _linux_noreplace(stage, target):
+    """Install *stage* once, refusing every existing target (Linux only)."""
+    if platform.system() != 'Linux':
+        raise RuntimeError('evaluation fresh-store requires Linux no-replace support')
+    syscall_numbers = {'x86_64': 316, 'aarch64': 276}
+    number = syscall_numbers.get(platform.machine().lower())
+    if number is None:
+        raise RuntimeError('evaluation fresh-store architecture is unsupported')
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        rc = syscall(ctypes.c_long(number), ctypes.c_int(-100),
+                     os.fsencode(stage), ctypes.c_int(-100), os.fsencode(target),
+                     ctypes.c_uint(1))
+    except (AttributeError, OSError, TypeError) as exc:
+        raise RuntimeError('evaluation fresh-store no-replace support is unavailable') from exc
+    if rc == 0:
+        return
+    code = ctypes.get_errno()
+    if code == errno.EEXIST:
+        raise RuntimeError('evaluation fresh-store target appeared during commit')
+    if code in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EXDEV, errno.EPERM}:
+        raise RuntimeError('evaluation fresh-store no-replace commit is unsupported')
+    raise RuntimeError('evaluation fresh-store no-replace commit failed')
+
+
+def _validate_observation_state():
+    """Check an existing observation directory without creating fresh residue."""
+    if not STATE.exists() and not STATE.is_symlink():
+        return
+    _validate_private_directory(STATE, 'observation')
+
+
+def _validate_git_readiness(workdir):
+    """Perform only read-only checks needed before the fresh-store commit."""
+    if shutil.which('git') is None:
+        raise RuntimeError('evaluation fresh-store Git is unavailable')
+    if not os.access(workdir, os.W_OK | os.X_OK):
+        raise RuntimeError('evaluation fresh-store project is not writable')
+
+
+def _candidate_digest():
+    """Read only the prepared candidate identity; never include its path in evidence."""
+    metadata = Path.home()/'.cortex-dev/.codex/cortex-candidate.json'
+    try:
+        info = metadata.lstat()
+        resolved = metadata.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError('evaluation fresh-store candidate identity is unavailable') from exc
+    if (metadata.is_symlink() or not metadata.is_file() or resolved != metadata
+            or info.st_uid != os.getuid() or info.st_mode & 0o077):
+        raise RuntimeError('evaluation fresh-store candidate identity is not private')
+    try:
+        value = json.loads(metadata.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('evaluation fresh-store candidate identity is invalid') from exc
+    digest = value.get('digest') if isinstance(value, dict) else None
+    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+        raise RuntimeError('evaluation fresh-store candidate identity is invalid')
+    return digest
+
+
+def prepare_evaluation_fresh_store(workdir, pre_commit_checks=None):
+    """Prove a new project-local store before an opt-in CLI evaluation launch.
+
+    The database itself is intentionally never created here: the normal runtime
+    initializer owns creation on the first task operation.
+    """
+    project = Path(workdir)
+    if (not project.is_absolute() or not project.is_dir()
+            or project.resolve(strict=True) != project):
+        raise RuntimeError('evaluation fresh-store workdir must be canonical')
+    store = project/'.codex/cortex/cortex.sqlite3'
+    try:
+        canonical_store = store.resolve(strict=False)
+    except OSError as exc:
+        raise RuntimeError('evaluation fresh-store path cannot be canonicalized') from exc
+    try:
+        canonical_store.relative_to(project)
+    except ValueError as exc:
+        raise RuntimeError('evaluation fresh-store path escapes workdir') from exc
+    _absent_path(store, 'target')
+    # Complete all rejection-prone checks before creating project state.
+    candidate_digest = _candidate_digest()
+    codex_path = project/'.codex'
+    codex_exists = _validate_private_directory(codex_path, 'parent')
+    cortex_path = codex_path/'cortex'
+    cortex_exists = _validate_private_directory(cortex_path, 'directory') if codex_exists else False
+    if cortex_exists:
+        failure_marker=cortex_path/'phase2-launch-failure.json'
+        try:failure_marker.lstat()
+        except FileNotFoundError:pass
+        except OSError as exc:raise RuntimeError('evaluation fresh-store failure marker cannot be inspected') from exc
+        else:raise RuntimeError('evaluation fresh-store workdir is marked unusable after a post-commit failure')
+    transaction=pre_commit_checks() if pre_commit_checks is not None else None
+    # Stage the complete hierarchy outside the project.  A losing no-replace
+    # attempt is intentionally retained: pathname-based recursive cleanup can
+    # delete a substituted directory.  The external stage is also what keeps a
+    # losing race from leaving a project parent behind.
+    if cortex_exists:
+        parent_creation = 'already-present-private-parents'
+    else:
+        if codex_exists:
+            raise RuntimeError('evaluation fresh-store parent already exists without a private cortex directory')
+        try:
+            project_device = os.stat(project).st_dev
+            stage_root = Path(tempfile.gettempdir())
+            if os.stat(stage_root).st_dev != project_device:
+                raise RuntimeError('evaluation fresh-store staging filesystem differs')
+            stage = Path(tempfile.mkdtemp(prefix='.cortex-evaluation-', dir=stage_root))
+            os.chmod(stage, 0o700)
+            staged_target = stage/'cortex'
+            staged_target.mkdir(mode=0o700)
+            os.chmod(staged_target, 0o700)
+            if transaction is not None:
+                _atomic_private_json(staged_target/'phase2-launch-transaction.json',
+                                     {**transaction['record'],'status':'committing'})
+            install_target = codex_path
+            _linux_noreplace(stage, install_target)
+        except BaseException:
+            # Never remove by pathname after a failed race.  The stage is
+            # outside the project and may be retained for bounded recovery.
+            raise
+        parent_creation = 'atomic-private-hierarchy'
+    path_digest = hashlib.sha256(f'{project}\0{store}'.encode('utf-8')).hexdigest()
+    timestamp = time.time()
+    return dict(
+        run_id=(transaction['record']['transaction_id'] if transaction is not None
+                else uuid.uuid4().hex),
+        host_class='cli',
+        project_relative_store='.codex/cortex/cortex.sqlite3',
+        project_relative_path='.codex/cortex/cortex.sqlite3',
+        canonical_path_digest=path_digest,
+        path_digest=path_digest,
+        existed_before=False,
+        freshness_check='absent-before-launch',
+        path_type='absent',
+        path_check='canonical-under-workdir',
+        symlink_check='pass',
+        workdir_check='canonical',
+        privacy_check='owner-private',
+        parent_creation=parent_creation,
+        creation='parent-directories-only',
+        timestamp=timestamp,
+        created_at=timestamp,
+        launcher_digest=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        observer_digest=hashlib.sha256((ROOT/'scripts/cortex-desktop-dev').read_bytes()).hexdigest(),
+        candidate_digest=candidate_digest,
+    )
+
+
+def _write_evaluation_provenance(events, receipt):
+    """Persist only the safe fresh-store receipt in the private event stream."""
+    path = Path(events)/f"launcher-{receipt['run_id']}.jsonl"
+    path.write_text(json.dumps(dict(event_kind='launcher', operation='evaluation_fresh_store',
+                                    outcome='success', **receipt),
+                               sort_keys=True, separators=(',', ':'))+'\n',
+                    encoding='utf-8')
+    os.chmod(path, 0o600)
+
+
 def ensure_git_workspace(workdir):
-    """Give each disposable CLI scenario the repository shape workers expect."""
-    if not (workdir/'.git').exists():
-        subprocess.run(['git','init'],cwd=workdir,check=True,
-                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    subprocess.run(['git','config','user.name','Cortex Live Test'],cwd=workdir,check=True,
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    subprocess.run(['git','config','user.email','cortex-live-test@example.invalid'],cwd=workdir,check=True,
-                   stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    """Require an already initialized repository without mutating user settings."""
+    workdir=Path(workdir)
+    result=subprocess.run(['git','rev-parse','--show-toplevel'],cwd=workdir,
+                          capture_output=True,text=True)
+    try:root=Path(result.stdout.strip()).resolve(strict=True)
+    except (OSError,ValueError):root=None
+    if result.returncode or root!=workdir.resolve(strict=True):
+        raise RuntimeError(
+            'workdir must already be the root of a Git repository; for an isolated '
+            'qualification create a fresh empty directory with mktemp -d and run git init explicitly')
 
 
 def resumed_project_store(workdir,previous):
@@ -87,8 +722,127 @@ def resumed_project_store(workdir,previous):
     return expected
 
 
+def _user_turn_text(record):
+    """Return one supported native user-turn text and its source format."""
+    payload=record.get('payload') if isinstance(record,dict) else None
+    if not isinstance(payload,dict):return None
+    if payload.get('type')=='message' and payload.get('role')=='user':
+        content=payload.get('content')
+        if not isinstance(content,list):return None
+        parts=[]
+        for part in content:
+            if not isinstance(part,dict) or not isinstance(part.get('text'),str):return None
+            parts.append(part['text'])
+        return ''.join(parts),'response-item-message-v1',payload.get('id')
+    if payload.get('type')=='user_message' and isinstance(payload.get('message'),str):
+        return payload['message'],'event-user-message-v1',payload.get('id')
+    return None
+
+
+def _owned_native_rollout_sources(data):
+    """Resolve only rollout files held open by the exact owned Codex process."""
+    _exact_cleanup_identity(data)
+    terminal=terminal_snapshot(data)
+    if terminal['dead'] or terminal['current_command']!='codex':return {}
+    codex=[row for row in terminal['descendants'] if row.get('command')=='codex']
+    if len(codex)!=1:
+        if not codex:return {}
+        raise RuntimeError('Owned tmux session has ambiguous Codex process linkage')
+    pid=codex[0]['pid'];start_ticks=_proc_start_ticks(pid)
+    fd_root=PROC_ROOT/str(pid)/'fd'
+    try:descriptors=list(fd_root.iterdir())
+    except FileNotFoundError:return {}
+    except OSError as exc:raise RuntimeError('Owned Codex file-descriptor linkage is unavailable') from exc
+    source_root=(Path.home()/'.cortex-dev/.codex/sessions').resolve()
+    sources={}
+    for descriptor in descriptors:
+        if not descriptor.name.isdigit():continue
+        try:
+            resolved=descriptor.resolve(strict=True);target_info=descriptor.stat()
+        except OSError:continue
+        if resolved.suffix=='.jsonl' and source_root in resolved.parents:
+            source=sources.setdefault(resolved,{
+                'owned_codex_pid':pid,'owned_codex_start_ticks':start_ticks,
+                'owned_rollout_descriptors':[],
+            })
+            source['owned_rollout_descriptors'].append({
+                'fd':int(descriptor.name),'device':target_info.st_dev,'inode':target_info.st_ino,
+            })
+    if _proc_start_ticks(pid)!=start_ticks:
+        raise RuntimeError('Owned Codex process changed during rollout linkage')
+    if len(sources)>1:
+        raise RuntimeError('Owned Codex process has ambiguous native rollout linkage')
+    for source in sources.values():
+        source['owned_rollout_descriptors'].sort(key=lambda row:row['fd'])
+    return sources
+
+
+def native_user_turn_receipts(data,prompt):
+    """Read exact turns only from the rollout held by this owned tmux session."""
+    owned_sources=_owned_native_rollout_sources(data)
+    if not owned_sources:return []
+    database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
+    if not database.is_file():return []
+    connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
+    try:
+        rows=list(connection.execute(
+            'SELECT id, rollout_path, created_at FROM threads WHERE cwd=? AND created_at>=?',
+            (data['workdir'],int(data.get('thread_created_since',data['started_at']))-2),
+        ))
+    finally:connection.close()
+    expected=prompt.rstrip('\r\n');matches=[]
+    for thread_id,value,created_at in rows:
+        path=Path(value)
+        try:
+            resolved=path.resolve(strict=True);info=path.stat()
+        except OSError:continue
+        if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+                or resolved not in owned_sources):continue
+        source_link=owned_sources[resolved]
+        descriptors=source_link['owned_rollout_descriptors']
+        if not descriptors:raise RuntimeError('Owned native rollout has no stable descriptor identity')
+        flags=os.O_RDONLY|getattr(os,'O_CLOEXEC',0)|getattr(os,'O_NOFOLLOW',0)
+        try:descriptor=os.open(resolved,flags)
+        except OSError as exc:raise RuntimeError('Owned native rollout changed before reading') from exc
+        session_meta=None
+        try:
+            opened=os.fstat(descriptor)
+            if not any(opened.st_dev==row['device'] and opened.st_ino==row['inode']
+                       for row in descriptors):
+                raise RuntimeError('Owned native rollout target changed before reading')
+            with os.fdopen(descriptor,encoding='utf-8') as source:
+                descriptor=None
+                for line_number,line in enumerate(source,1):
+                    try:record=json.loads(line)
+                    except ValueError:continue
+                    if record.get('type')=='session_meta' and isinstance(record.get('payload'),dict):
+                        session_meta=record['payload'];continue
+                    parsed=_user_turn_text(record)
+                    if parsed is None or parsed[0].rstrip('\r\n')!=expected:continue
+                    if (not isinstance(session_meta,dict) or session_meta.get('id')!=thread_id
+                            or session_meta.get('cwd')!=data['workdir']
+                            or session_meta.get('parent_thread_id') not in (None,'')):
+                        continue
+                    line_sha256=hashlib.sha256(line.encode('utf-8')).hexdigest()
+                    matches.append({
+                        'thread_id':thread_id,'thread_created_at':created_at,
+                        'user_turn_id':parsed[2], 'user_turn_source_format':parsed[1],
+                        'user_turn_line':line_number,'user_turn_sha256':line_sha256,
+                        'source_path_sha256':hashlib.sha256(str(resolved).encode()).hexdigest(),
+                        'prompt_sha256':hashlib.sha256(expected.encode()).hexdigest(),
+                        'control_record_sha256':data['phase2_control_sha256'],
+                        'session_receipt':data['session_receipt'],
+                        **source_link,
+                    })
+        finally:
+            if descriptor is not None:os.close(descriptor)
+    if _owned_native_rollout_sources(data)!=owned_sources:
+        raise RuntimeError('Owned native rollout descriptor topology changed before receipt acceptance')
+    return matches
+
+
 def user_prompt_receipts(data,prompt):
-    """Count exact user prompt receipts in every rollout belonging to this run."""
+    """Count exact turns for an ordinary smoke run without Phase 2 ownership claims."""
     database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
     if not database.is_file():return 0
     connection=sqlite3.connect(f'file:{database}?mode=ro',uri=True)
@@ -103,157 +857,615 @@ def user_prompt_receipts(data,prompt):
         path=Path(value)
         if not path.is_file():continue
         for line in path.open(encoding='utf-8'):
-            try:payload=json.loads(line).get('payload',{})
+            try:record=json.loads(line)
             except ValueError:continue
-            if payload.get('type')!='message' or payload.get('role')!='user':continue
-            text=' '.join(part.get('text','') for part in payload.get('content',[]) if isinstance(part,dict))
-            if text.rstrip('\r\n')==expected:count+=1
+            parsed=_user_turn_text(record)
+            if parsed is not None and parsed[0].rstrip('\r\n')==expected:count+=1
     return count
 
 
-def start(args):
-    private()
-    if tmux('has-session','-t','='+SESSION,check=False).returncode==0:
-        raise RuntimeError('Exact smoke session already exists; stop it explicitly first')
-    workdir=args.workdir.resolve(strict=True)
-    if not workdir.is_dir():raise RuntimeError('Workdir must be a directory')
-    ensure_git_workspace(workdir)
-    if args.resume_last:
-        try:previous=json.loads((STATE/'last.json').read_text())
-        except (OSError,ValueError):raise RuntimeError('saved smoke state is unavailable or invalid') from None
-        if not isinstance(previous,dict):raise RuntimeError('saved smoke state is unavailable or invalid')
-        store=resumed_project_store(workdir,previous)
-    else:store=project_store(workdir)
-    capture=STATE/'capture.txt';capture.write_text('');os.chmod(capture,0o600)
-    events=STATE/'events';events.mkdir(mode=0o700,exist_ok=True)
-    for path in events.glob('*.jsonl'):path.unlink()
-    started_at=time.time()
-    created_since=(previous.get('thread_created_since',previous['started_at'])
-                   if args.resume_last else started_at)
-    if args.model not in {None,LIVE_MODEL}:raise RuntimeError('live tests require gpt-5.6-luna')
-    if args.effort not in {None,LIVE_COORDINATOR_EFFORT}:raise RuntimeError('live coordinator reasoning effort must be high')
-    model=LIVE_MODEL;effort=LIVE_COORDINATOR_EFFORT
-    graph_enabled=(getattr(args,'codebase_memory',False)
-                   or (args.resume_last and previous.get('codebase_memory',False)))
-    save(dict(workdir=str(workdir),started_at=started_at,thread_created_since=created_since,
-              trial_started_at=(previous.get('trial_started_at',previous['started_at']) if args.resume_last else started_at),
-              resumed=args.resume_last,events=str(events),
-              original_request_sha256=previous.get('original_request_sha256') if args.resume_last else None,
-              first_submission_at=previous.get('first_submission_at') if args.resume_last else None,
-              store=str(store),codebase_memory=graph_enabled,
-              model=model,effort=effort))
-    tmux('new-session','-d','-s',SESSION,'-c',str(workdir),'bash')
-    tmux('set-option','-t',SESSION,'remain-on-exit','on')
-    sink=' '.join(map(shlex.quote,['python3','-B',str(ROOT/'scripts/cortex-live-capture-sink'),'--path',str(capture)]))
-    tmux('pipe-pane','-t',TARGET,sink)
+def _rendered_screen(data):
+    raw=tmux('capture-pane','-p','-t',data['tmux_pane_id'],'-S','-200').stdout
+    raw=re.sub(r'\x1b\][^\x07]*(?:\x07|\x1b\\)','',raw)
+    return re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',raw)
+
+
+def _has_exact_empty_active_composer(screen):
+    """Accept only the latest rendered input row when it is the exact placeholder."""
+    inputs=[line.strip() for line in screen.splitlines() if line.lstrip().startswith('›')]
+    return bool(inputs) and inputs[-1]=='› Ask Codex to do anything'
+
+
+def _require_empty_composer(data,prompt=None):
+    screen=_rendered_screen(data)
+    if (not _has_exact_empty_active_composer(screen)
+            or screen.lower().rfind('do you trust the contents of this directory?')
+               > screen.rfind('› Ask Codex to do anything')):
+        raise RuntimeError('Phase 2 send requires the exact empty Codex composer; confirm trust before send')
+    return screen
+
+
+def _active_phase2_startup_state(screen):
+    """Classify only the latest active trust prompt or exact empty composer."""
+    active=screen[-1200:]
+    trust_index=active.lower().rfind('do you trust the contents of this directory?')
+    composer_index=active.rfind('› Ask Codex to do anything')
+    compact=re.sub(r'\s+','',active[max(0,trust_index):]).lower()
+    if (trust_index>=0 and trust_index>=composer_index
+            and 'doyoutrustthecontentsofthisdirectory?' in compact
+            and 'pressentertocontinue' in compact):
+        return 'trust'
+    if composer_index>trust_index and _has_exact_empty_active_composer(active):
+        return 'composer'
+    return None
+
+
+PHASE2_STARTUP_TIMEOUT_SECONDS=20
+PHASE2_COMPOSER_SETTLE_SECONDS=2
+PHASE2_COMPOSER_SETTLE_SAMPLES=3
+
+
+def _accept_trust(data):
+    path=_phase2_trust_receipt_path(data)
+    if _read_private_receipt(path) is not None:
+        raise RuntimeError('Phase 2 trust transition receipt already exists')
+    deadline=time.monotonic()+PHASE2_STARTUP_TIMEOUT_SECONDS
+    screen='';composer_since=None;composer_samples=0
+    while time.monotonic()<deadline:
+        screen=_rendered_screen(data)
+        startup_state=_active_phase2_startup_state(screen)
+        if startup_state=='trust':break
+        if startup_state=='composer':
+            now=time.monotonic()
+            if composer_since is None:composer_since=now;composer_samples=1
+            else:composer_samples+=1
+            # Do not seal an early placeholder while Codex is still deciding
+            # whether a trust prompt is required.
+            if (composer_samples>=PHASE2_COMPOSER_SETTLE_SAMPLES
+                    and now-composer_since>=PHASE2_COMPOSER_SETTLE_SECONDS):
+                _require_empty_composer(data)
+                receipt={
+                    'schema_version':TRUST_RECEIPT_SCHEMA,'status':'not-required',
+                    'control_record_sha256':data['phase2_control_sha256'],
+                    'session_receipt':data['session_receipt'],'workdir':data['workdir'],
+                    'observed_at':time.time(),'enter_count':0,
+                }
+                _atomic_private_json(path,receipt);return receipt
+        else:
+            composer_since=None;composer_samples=0
+        time.sleep(.25)
+    else:raise RuntimeError('Phase 2 trust transition found neither trust prompt nor empty composer')
+    receipt={
+        'schema_version':TRUST_RECEIPT_SCHEMA,'status':'enter-requested',
+        'control_record_sha256':data['phase2_control_sha256'],
+        'session_receipt':data['session_receipt'],'workdir':data['workdir'],
+        'observed_at':time.time(),'enter_count':1,
+    }
+    _atomic_private_json(path,receipt)
+    tmux('send-keys','-t',data['tmux_pane_id'],'Enter')
+    deadline=time.monotonic()+10
+    while time.monotonic()<deadline:
+        try:_require_empty_composer(data)
+        except RuntimeError:time.sleep(.25)
+        else:
+            receipt={**receipt,'status':'accepted','accepted_at':time.time()}
+            _atomic_private_json(path,receipt);return receipt
+    raise RuntimeError('Phase 2 trust Enter did not produce the exact empty composer')
+
+
+def _require_trust_receipt(data):
+    receipt=_read_private_receipt(_phase2_trust_receipt_path(data))
+    expected={'control_record_sha256':data.get('phase2_control_sha256'),
+              'session_receipt':data.get('session_receipt'),'workdir':data.get('workdir')}
+    if (not isinstance(receipt,dict) or receipt.get('schema_version')!=TRUST_RECEIPT_SCHEMA
+            or receipt.get('status') not in {'accepted','not-required'}
+            or any(receipt.get(key)!=value for key,value in expected.items())
+            or receipt.get('enter_count') not in {0,1}):
+        raise RuntimeError('Phase 2 exact trust/composer transition is incomplete')
+    _require_empty_composer(data)
+    return receipt
+
+
+def _native_send_receipt(data,prompt,*,wait):
+    attempts=40 if wait else 1
+    for index in range(attempts):
+        matches=native_user_turn_receipts(data,prompt)
+        if len(matches)>1:raise RuntimeError('prompt submission has ambiguous or duplicate native user-turn receipts')
+        if matches:return matches[0]
+        if index+1<attempts:time.sleep(.25)
+    return None
+
+
+def _phase2_mode():
+    return isinstance(PHASE2_CONTROL_SHA256,str) and bool(
+        re.fullmatch(r'[0-9a-f]{64}',PHASE2_CONTROL_SHA256))
+
+
+def _ordinary_send(data,prompt):
+    """Preserve the ordinary one-literal/one-Enter smoke transport."""
+    if data.get('first_submission_at') is not None:
+        raise RuntimeError('ordinary smoke prompt was already submitted; refusing another transport')
+    if not data.get('resumed') and not data.get('original_request_sha256'):
+        observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+        data['original_request_sha256']=observer['original_request_digest'](prompt)
+        data['desktop_editor_source_sha256']=observer['original_request_digest'](prompt)
+        save(data)
+    _require_empty_composer(data,prompt)
+    before=user_prompt_receipts(data,prompt)
+    buffer=SESSION+'-prompt'
+    tmux('set-buffer','-b',buffer,'--',prompt)
+    try:tmux('paste-buffer','-p','-d','-b',buffer,'-t',data['tmux_pane_id'])
+    except BaseException:
+        tmux('delete-buffer','-b',buffer,check=False)
+        raise
+    time.sleep(5);submitted_at=time.time()
+    tmux('send-keys','-t',data['tmux_pane_id'],'Enter')
+    for _ in range(40):
+        if user_prompt_receipts(data,prompt)>before:break
+        time.sleep(.25)
+    else:
+        raise RuntimeError('prompt submission produced no exact user-turn receipt; inspect the composer before any explicit further input')
+    data['first_submission_at']=submitted_at;save(data)
+    print('Submitted the exact literal prompt and observed its user-turn receipt.')
+
+
+def isolated_codebase_memory_configured():
+    """Return whether the disposable profile has a complete graph server entry."""
+    config = Path.home()/'.cortex-dev/.codex/config.toml'
+    try:
+        if config.is_symlink() or not config.is_file():
+            return False
+        parsed = tomllib.loads(config.read_text(encoding='utf-8'))
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        return False
+    server = parsed.get('mcp_servers', {}).get('codebase_memory')
+    return (isinstance(server, dict)
+            and isinstance(server.get('command'), str)
+            and bool(server['command'].strip()))
+
+
+def launch_command(events, resume_last, model, effort, apps_enabled, graph_enabled,
+                   codebase_memory_configured=False, evaluation_workdir=None):
+    """Build the isolated launcher argv without creating a transport session."""
     scrub=['CODEX_APP_TOOLS_PIPE_PATH','CODEX_INTERNAL_ORIGINATOR_OVERRIDE','CODEX_MCP_NODE_PATH','CODEX_CI','CODEX_SHELL','CODEX_PERMISSION_PROFILE','CODEX_SESSION_ID','CODEX_THREAD_ID','CORTEX_DATA_DIR']
-    command=['env',*[part for key in scrub for part in ['-u',key]],'CORTEX_OBSERVATION_DIR='+str(events),str(ROOT/'scripts/cortex-dev')]
-    if args.resume_last:command+=['resume','--last']
+    # Archive extraction intentionally keeps product scripts owner-readable but
+    # non-executable (0600). Invoke the unchanged launcher through an explicit
+    # interpreter; argv construction plus shlex.join keeps the fixed path inert.
+    command=['env',*[part for key in scrub for part in ['-u',key]],
+             'PYTHONDONTWRITEBYTECODE=1','CORTEX_OBSERVATION_DIR='+str(events),
+             '/bin/bash',str(ROOT/'scripts/cortex-dev')]
+    if evaluation_workdir is not None:
+        command.insert(command.index('/bin/bash'),
+                       'CORTEX_DATA_DIR='+str(evaluation_storage_directory(evaluation_workdir)))
+    if resume_last:command+=['resume','--last']
     if model:command+=['--model',model]
     if effort:command+=['-c','model_reasoning_effort='+effort]
     command+=['-c','agents.default_subagent_model='+json.dumps(LIVE_MODEL),
-              '-c','developer_instructions='+json.dumps(LIVE_DEVELOPER_INSTRUCTIONS)]
-    command+=['-c','features.multi_agent_v2=true','-c',
-              'features.apps='+('true' if args.apps_enabled else 'false'),
-              '-c','mcp_servers.codebase_memory.enabled='+('true' if graph_enabled else 'false'),
-              '-c','mcp_servers.node_repl.enabled=false',
-              '-c','sandbox_workspace_write.network_access=true']
-    launch=shlex.join(command)+"; live_status=$?; printf 'Cortex live-dev exit=%s\\n' \"$live_status\"; exit \"$live_status\""
-    tmux('send-keys','-l','-t',TARGET,'--',launch)
-    tmux('send-keys','-t',TARGET,'Enter')
+              '-c','developer_instructions='+json.dumps(LIVE_DEVELOPER_INSTRUCTIONS),
+              '-c','features.multi_agent_v2=true','-c',
+              'features.apps='+('true' if apps_enabled else 'false')]
+    # A disabled override creates an incomplete [mcp_servers.codebase_memory]
+    # table when the isolated baseline config has no server declaration. Keep
+    # the graph-disabled boundary by adding it only for an existing complete
+    # server entry; explicit graph qualification retains the existing override.
+    if graph_enabled or codebase_memory_configured:
+        command+=['-c','mcp_servers.codebase_memory.enabled='+
+                  ('true' if graph_enabled else 'false')]
+    command+=['-c','sandbox_workspace_write.network_access=true']
+    return command
+
+
+def _observer_rows(observer, name, *args):
+    """Call one required observer capability and validate its evidence shape."""
+    capability=observer.get(name)
+    if not callable(capability):
+        raise ObserverEvidenceError('missing_required_observer_capability',name)
+    rows=capability(*args)
+    if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):
+        raise ObserverEvidenceError('malformed_observer_evidence',name)
+    return rows
+
+
+def normalized_observer_events(observer, directory):
+    """Normalize legacy combined events and current split events without loss."""
+    observed_events=observer.get('observed_events')
+    if not callable(observed_events):
+        raise ObserverEvidenceError('missing_required_observer_capability','observed_events')
+    combined=observed_events(directory)
+    if not isinstance(combined,list) or not combined or any(not isinstance(row,dict) for row in combined):
+        raise ObserverEvidenceError('malformed_observer_evidence','observed_events')
+    def valid_combined_row(row):
+        discriminator=row.get('event_kind')
+        if discriminator=='hook':
+            return isinstance(row.get('hook_event'),str) and bool(row['hook_event'])
+        return (discriminator in {None,'mcp','launcher'}
+                and isinstance(row.get('operation'),str) and bool(row['operation']))
+    if any(not valid_combined_row(row) for row in combined):
+        raise ObserverEvidenceError('missing_event_stream_discriminator','observed_events')
+    hook_capability=observer.get('observed_hook_events')
+    if hook_capability is None:
+        # The sealed baseline observer predates the split API and returns both
+        # streams from observed_events. Partition those observed rows; do not
+        # manufacture an empty hook stream.
+        return ([row for row in combined if row.get('event_kind')!='hook'],
+                [row for row in combined if row.get('event_kind')=='hook'])
+    if not callable(hook_capability):
+        raise ObserverEvidenceError('malformed_observer_capability','observed_hook_events')
+    hook_rows=hook_capability(directory)
+    if not isinstance(hook_rows,list) or any(not isinstance(row,dict) for row in hook_rows):
+        raise ObserverEvidenceError('malformed_observer_evidence','observed_hook_events')
+    if any(row.get('event_kind')=='hook' for row in combined):
+        raise ObserverEvidenceError('ambiguous_observer_evidence','observed_events')
+    if any(row.get('event_kind')!='hook' or not isinstance(row.get('hook_event'),str)
+           or not row['hook_event'] for row in hook_rows):
+        raise ObserverEvidenceError('malformed_observer_evidence','observed_hook_events')
+    return combined,hook_rows
+
+
+def normalized_worker_policy_violations(observer, violations):
+    """Map the current helper or derive its exact diagnostic-only projection."""
+    capability=observer.get('worker_policy_violations')
+    if capability is None:
+        return [row for row in violations
+                if row.get('violation')=='forbidden_plugin_or_cache_access'
+                or row.get('path_policy_decision') in {'diagnostic_only','unauthorized_access'}]
+    if not callable(capability):
+        raise ObserverEvidenceError('malformed_observer_capability','worker_policy_violations')
+    rows=capability(violations)
+    if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):
+        raise ObserverEvidenceError('malformed_observer_evidence','worker_policy_violations')
+    return rows
+
+
+def _audit_no_go(error):
+    print(json.dumps(dict(status='NO-GO',eligible=False,
+                          diagnostic_type='phase2-observer-evidence-schema',
+                          code=error.code,capability=error.capability),sort_keys=True))
+    return 1
+
+
+def start(args):
+    workdir=args.workdir.resolve(strict=True)
+    if not workdir.is_dir():raise RuntimeError('Workdir must be a directory')
+    if args.model not in {None,LIVE_MODEL}:raise RuntimeError('live tests require gpt-5.6-luna')
+    if args.effort not in {None,LIVE_COORDINATOR_EFFORT}:raise RuntimeError('live coordinator reasoning effort must be high')
+    evaluation_receipt = None
+    launch_transaction = None
+    owned_session_id = None
+    owned_session_identity = None
+    launch_stage = 'pre-commit'
+    fresh_start = getattr(args,'evaluation_fresh_store',False) and not args.resume_last
+    graph_enabled=False
+    codebase_memory_configured=False
+    command=None
+    if fresh_start:
+        # All checks that can reject are run before the one atomic hierarchy
+        # install; no canonical project mutation precedes this call.
+        def fresh_pre_commit_checks():
+            nonlocal graph_enabled,codebase_memory_configured
+            private()
+            _refuse_failed_phase2_launch(workdir)
+            if tmux('has-session','-t','='+SESSION,check=False).returncode == 0:
+                raise RuntimeError('Exact smoke session already exists; stop it explicitly first')
+            _validate_git_readiness(workdir)
+            ensure_git_workspace(workdir)
+            _preflight_tmux_launch(workdir)
+            graph_enabled=getattr(args,'codebase_memory',False)
+            codebase_memory_configured=(isolated_codebase_memory_configured()
+                                        if not graph_enabled else False)
+            return _prepare_launch_transaction(workdir)
+        # The scoped adapter remains the single fresh entry point:
+        # prepare_evaluation_fresh_store(workdir)
+        evaluation_receipt = prepare_evaluation_fresh_store(workdir, fresh_pre_commit_checks)
+        launch_transaction={
+            'record':{
+                'schema_version':LAUNCH_TRANSACTION_SCHEMA,
+                'status':'prepared',
+                'transaction_id':evaluation_receipt['run_id'],
+                'control_record_sha256':PHASE2_CONTROL_SHA256,
+                'canonical_path_digest':evaluation_receipt['canonical_path_digest'],
+                'timestamp':evaluation_receipt['timestamp'],
+            },
+            'state_paths':[path for path in (_phase2_control_transaction_path(),
+                                             _phase2_workdir_transaction_path(workdir))
+                           if path is not None],
+            'marker':workdir/'.codex/cortex/phase2-launch-transaction.json',
+        }
+    try:
+        if launch_transaction is not None:
+            launch_stage='transaction-commit-receipt'
+            _update_launch_transaction(launch_transaction,'committed')
+        launch_stage='observation-state'
+        private()
+        if tmux('has-session','-t','='+SESSION,check=False).returncode==0:
+            raise RuntimeError('Exact smoke session already exists; stop it explicitly first')
+        # Git initialization/configuration mutates the project and therefore
+        # must occur only after the atomic private hierarchy commit. Any
+        # failure here is classified as post-commit launch failure and keeps
+        # the accepted canonical store intact.
+        if not fresh_start:
+            ensure_git_workspace(workdir)
+        if args.resume_last:
+            try:previous=json.loads((STATE/'last.json').read_text())
+            except (OSError,ValueError):raise RuntimeError('saved smoke state is unavailable or invalid') from None
+            if not isinstance(previous,dict):raise RuntimeError('saved smoke state is unavailable or invalid')
+            store=resumed_project_store(workdir,previous)
+        else:store=project_store(workdir)
+        capture=STATE/'capture.txt';capture.write_text('');os.chmod(capture,0o600)
+        events=STATE/'events';events.mkdir(mode=0o700,exist_ok=True)
+        for path in events.glob('*.jsonl'):path.unlink()
+        if getattr(args,'evaluation_fresh_store',False) and not args.resume_last:
+            launch_stage='provenance'
+            _private_directory(events, 'observation')
+            _write_evaluation_provenance(events,evaluation_receipt)
+        started_at=time.time()
+        created_since=(previous.get('thread_created_since',previous['started_at'])
+                       if args.resume_last else started_at)
+        model=LIVE_MODEL;effort=LIVE_COORDINATOR_EFFORT
+        if not fresh_start:
+            graph_enabled=(getattr(args,'codebase_memory',False)
+                           or (args.resume_last and previous.get('codebase_memory',False)))
+            codebase_memory_configured=(isolated_codebase_memory_configured()
+                                        if not graph_enabled else False)
+        session_data=dict(workdir=str(workdir),started_at=started_at,thread_created_since=created_since,
+                  trial_started_at=(previous.get('trial_started_at',previous['started_at']) if args.resume_last else started_at),
+                  resumed=args.resume_last,events=str(events),
+                  original_request_sha256=previous.get('original_request_sha256') if args.resume_last else None,
+                  first_submission_at=previous.get('first_submission_at') if args.resume_last else None,
+                  store=str(store),codebase_memory=graph_enabled,
+                  model=model,effort=effort,lifecycle_status='starting')
+        save(session_data)
+        launch_stage='tmux-new-session'
+        created=tmux(*_tmux_new_session_args(workdir,'/bin/bash'))
+        owned_session_id=created.stdout.strip()
+        if not re.fullmatch(r'\$[0-9]+',owned_session_id):
+            raise RuntimeError('tmux did not return the owned session identity')
+        identity=_tmux_session_identity(owned_session_id)
+        owned_session_identity=identity
+        pane_pid=identity['pane_pid']
+        session_data.update(tmux_session_id=owned_session_id,
+                            tmux_pane_id=identity['pane_id'],tmux_pane_pid=pane_pid)
+        if (fresh_start and isinstance(PHASE2_CONTROL_SHA256,str)
+                and re.fullmatch(r'[0-9a-f]{64}',PHASE2_CONTROL_SHA256)):
+            session_data.update(tmux_server_pid=identity['server_pid'],tmux_session_name=SESSION,
+                                tmux_session_created=identity['session_created'],
+                                tmux_pane_start_ticks=_proc_start_ticks(pane_pid))
+            _capture_phase2_session_binding(session_data)
+        else:
+            session_data['lifecycle_status']='started'
+        save(session_data)
+        launch_stage='tmux-configuration'
+        _require_tmux_session_identity(owned_session_id,identity)
+        tmux('set-option','-t',owned_session_id,'remain-on-exit','on')
+        _require_tmux_session_identity(owned_session_id,identity)
+        sink=' '.join(map(shlex.quote,['python3','-B',str(ROOT/'scripts/cortex-live-capture-sink'),'--path',str(capture)]))
+        tmux('pipe-pane','-t',identity['pane_id'],sink)
+        _require_tmux_session_identity(owned_session_id,identity)
+        if command is None:
+            command=launch_command(events,args.resume_last,model,effort,args.apps_enabled,
+                                   graph_enabled,codebase_memory_configured,
+                                   workdir if fresh_start else None)
+        launch_stage='tmux-dispatch'
+        launch=shlex.join(command)+"; live_status=$?; printf 'Cortex live-dev exit=%s\\n' \"$live_status\""
+        tmux('send-keys','-l','-t',identity['pane_id'],'--',launch)
+        tmux('send-keys','-t',identity['pane_id'],'Enter')
+        if launch_transaction is not None:
+            launch_stage='transaction-acceptance-receipt'
+            _update_launch_transaction(launch_transaction,'launched')
+    except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
+        if evaluation_receipt is not None:
+            operation='post-commit launch operation'
+            if isinstance(exc, PostCommitLaunchFailure):
+                raise
+            _record_post_commit_failure(workdir,evaluation_receipt,launch_transaction,
+                                        launch_stage,exc,
+                                        owned_session_id,owned_session_identity)
+            raise _post_commit_launch_failure(evaluation_receipt, operation, exc) from None
+        raise
     print('Started '+SESSION+'; candidate target: HOME/.cortex-dev/.codex')
 
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
-    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'));s.add_argument('--apps-enabled',action='store_true',help='Enable app tooling for an isolated capability probe')
-    s=sub.add_parser('send');s.add_argument('--prompt-file',type=Path,required=True)
-    sub.add_parser('enter');sub.add_parser('status');sub.add_parser('audit')
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--evaluation-fresh-store',action='store_true',help='Require a new private project-local store for this CLI evaluation start');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'));s.add_argument('--apps-enabled',action='store_true',help='Enable app tooling for an isolated capability probe')
+    for name in ('send','send-preflight','resolve-send'):
+        s=sub.add_parser(name);s.add_argument('--prompt-file',type=Path,required=True)
+    sub.add_parser('startup-ready');sub.add_parser('accept-trust');sub.add_parser('enter');sub.add_parser('status');sub.add_parser('terminal');sub.add_parser('screen');sub.add_parser('audit')
     for name in ['capture','events','hooks']:
         s=sub.add_parser(name);s.add_argument('--lines',type=int,default=120)
     s=sub.add_parser('calls');s.add_argument('--limit',type=int)
     sub.add_parser('usage')
     s=sub.add_parser('stop');s.add_argument('--interrupt',action='store_true')
+    s=sub.add_parser('stop-exact');s.add_argument('--interrupt',action='store_true')
+    s.add_argument('--control-sha256',required=True);s.add_argument('--session-receipt',required=True)
+    s.add_argument('--server-pid',required=True,type=int);s.add_argument('--session-name',required=True)
+    s.add_argument('--session-id',required=True);s.add_argument('--session-created',required=True,type=int)
+    s.add_argument('--pane-id',required=True);s.add_argument('--pane-pid',required=True,type=int)
+    s.add_argument('--pane-start-ticks',required=True,type=int)
     args=p.parse_args()
     if args.command=='start':return start(args)
     data=state()
-    if args.command=='send':
+    if args.command in {'startup-ready','accept-trust'}:
+        if not _phase2_mode():
+            raise RuntimeError('accept-trust is Phase 2-only; ordinary smoke requires visible trust confirmation and enter')
+        receipt=(_accept_trust(data) if args.command=='startup-ready'
+                 else _require_trust_receipt(data))
+        print(json.dumps(receipt,sort_keys=True,separators=(',',':')));return
+    if args.command in {'send','send-preflight','resolve-send'}:
         prompt=args.prompt_file.read_text().rstrip('\r\n')
         if not prompt.strip() or len(prompt.encode())>32000:raise RuntimeError('Invalid prompt size')
+        if args.command=='send' and not _phase2_mode():
+            return _ordinary_send(data,prompt)
         if not data.get('resumed') and not data.get('original_request_sha256'):
-            observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+            observer=_observer_namespace('observer')
             data['original_request_sha256']=observer['original_request_digest'](prompt)
             # CLI native archives retain the separator newline after the
             # orchestrator token. Reuse the verified delivery provenance path
             # so that exact archive bytes are accepted without accepting edits.
             data['desktop_editor_source_sha256']=observer['original_request_digest'](prompt)
             save(data)
-        before=user_prompt_receipts(data,prompt)
+        if not _phase2_mode():
+            raise RuntimeError('send-preflight and resolve-send require the sealed Phase 2 adapter')
+        request_digest=data.get('original_request_sha256')
+        if not isinstance(request_digest,str) or not re.fullmatch(r'[0-9a-f]{64}',request_digest):
+            raise RuntimeError('Phase 2 send lacks the exact request digest')
+        prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest()
+        receipt_path=_phase2_send_receipt_path(data)
+        receipt=_read_private_receipt(receipt_path)
+        if args.command=='send-preflight':
+            _require_trust_receipt(data)
+            if receipt is not None:raise RuntimeError('Phase 2 send receipt already exists; refusing another transport')
+            if native_user_turn_receipts(data,prompt):
+                raise RuntimeError('Phase 2 send preflight found a preexisting exact user turn')
+            _require_empty_composer(data,prompt)
+            print('Exact empty Codex composer is ready for one Phase 2 transport.')
+            return
+        if args.command=='resolve-send':
+            if (not isinstance(receipt,dict) or receipt.get('schema_version')!=SEND_RECEIPT_SCHEMA
+                    or receipt.get('control_record_sha256')!=data.get('phase2_control_sha256')
+                    or receipt.get('session_receipt')!=data.get('session_receipt')
+                    or receipt.get('request_sha256')!=request_digest
+                    or receipt.get('prompt_sha256')!=prompt_sha256
+                    or receipt.get('status') not in {'enter-requested','accepted'}):
+                raise RuntimeError('Phase 2 send resolution lacks the exact sealed transport intent')
+            native=receipt.get('native_user_turn') if receipt.get('status')=='accepted' else _native_send_receipt(data,prompt,wait=True)
+            if native is None:
+                raise RuntimeError('prompt submission has no exact native user-turn receipt; no input was resent')
+            if receipt.get('status')!='accepted':
+                receipt={**receipt,'status':'accepted','native_user_turn':native,'accepted_at':time.time()}
+                _atomic_private_json(receipt_path,receipt)
+            data['first_submission_at']=receipt['enter_requested_at']
+            data['original_prompt_sha256']=prompt_sha256
+            data['native_user_turn_receipt']=native
+            save(data)
+            print(json.dumps(receipt,sort_keys=True,separators=(',',':')))
+            return
+        if receipt is not None:raise RuntimeError('Phase 2 send receipt already exists; refusing another transport')
+        _require_trust_receipt(data)
+        if native_user_turn_receipts(data,prompt):
+            raise RuntimeError('Phase 2 send found a preexisting exact user turn')
+        _require_empty_composer(data,prompt)
+        receipt={
+            'schema_version':SEND_RECEIPT_SCHEMA,'status':'prepared',
+            'control_record_sha256':data['phase2_control_sha256'],
+            'session_receipt':data['session_receipt'],'workdir':data['workdir'],
+            'request_sha256':request_digest,'prompt_sha256':prompt_sha256,
+            'prepared_at':time.time(),'enter_requested_at':None,'native_user_turn':None,
+        }
+        _atomic_private_json(receipt_path,receipt)
         buffer=SESSION+'-prompt'
         tmux('set-buffer','-b',buffer,'--',prompt)
-        try:tmux('paste-buffer','-p','-d','-b',buffer,'-t',TARGET)
+        try:tmux('paste-buffer','-p','-d','-b',buffer,'-t',data['tmux_pane_id'])
         except BaseException:
             tmux('delete-buffer','-b',buffer,check=False)
             raise
-        time.sleep(5);submitted_at=time.time();tmux('send-keys','-t',TARGET,'Enter')
-        for _ in range(40):
-            if user_prompt_receipts(data,prompt)>before:break
-            time.sleep(.25)
-        else:
+        time.sleep(5);submitted_at=time.time()
+        receipt={**receipt,'status':'enter-requested','enter_requested_at':submitted_at}
+        _atomic_private_json(receipt_path,receipt)
+        tmux('send-keys','-t',data['tmux_pane_id'],'Enter')
+        native=_native_send_receipt(data,prompt,wait=True)
+        if native is None:
             raise RuntimeError('prompt submission produced no exact user-turn receipt; inspect the composer before any explicit further input')
-        data.setdefault('first_submission_at',submitted_at);save(data)
+        # ``start`` deliberately persists this field as null.  Replace that
+        # sentinel only after the exact user-turn receipt has been observed;
+        # ``setdefault`` would retain null and make the successful send
+        # indistinguishable from an uncertain submission.
+        if data.get('first_submission_at') is not None:
+            raise RuntimeError('prompt submission timestamp already exists; refusing ambiguous resubmission')
+        receipt={**receipt,'status':'accepted','native_user_turn':native,'accepted_at':time.time()}
+        _atomic_private_json(receipt_path,receipt)
+        data['first_submission_at']=submitted_at;data['original_prompt_sha256']=prompt_sha256
+        data['native_user_turn_receipt']=native;save(data)
         print('Submitted the exact literal prompt and observed its user-turn receipt.')
-    elif args.command=='enter':tmux('send-keys','-t',TARGET,'Enter');print('Sent one Enter.')
+    elif args.command=='enter':tmux('send-keys','-t',data['tmux_pane_id'],'Enter');print('Sent one Enter.')
     elif args.command=='status':
-        print(tmux('list-panes','-t',SESSION,'-F','#{pane_current_command} dead=#{pane_dead} status=#{pane_dead_status}').stdout.strip())
+        terminal=terminal_snapshot(data)
+        status='' if terminal['dead_status'] is None else str(terminal['dead_status'])
+        print(f"{terminal['current_command']} dead={int(terminal['dead'])} status={status}")
+    elif args.command=='terminal':
+        print(json.dumps(terminal_snapshot(data),sort_keys=True,separators=(',',':')))
+    elif args.command=='screen':
+        print(_rendered_screen(data),end='')
     elif args.command=='capture':
         raw=(STATE/'capture.txt').read_bytes()[-20000:].decode('utf-8',errors='replace')
         raw=re.sub(r'\x1b\][^\x07]*(?:\x07|\x1b\\)','',raw)
         raw=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',raw)
         print('\n'.join(raw.splitlines()[-min(args.lines,500):]))
     elif args.command in {'events','hooks'}:
-        observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_live_observer')
-        rows=(observer['observed_events'](data['events']) if args.command=='events'
-              else observer['observed_hook_events'](data['events']))
+        observer=_observer_namespace('cortex_live_observer')
+        try:mcp_rows,hook_rows=normalized_observer_events(observer,data['events'])
+        except ObserverEvidenceError as exc:return _audit_no_go(exc)
+        rows=mcp_rows if args.command=='events' else hook_rows
         for row in rows[-min(args.lines,500):]:print(json.dumps(row))
     elif args.command=='usage':
-        observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_live_observer')
-        print(json.dumps(observer['participant_token_usage'](data)))
+        observer=_observer_namespace('cortex_live_observer')
+        try:
+            capability=observer.get('participant_token_usage')
+            if not callable(capability):
+                raise ObserverEvidenceError('missing_required_observer_capability','participant_token_usage')
+            host_rows=observer.get('observed_tool_calls',lambda _state: [])(data)
+            roots={row.get('thread_id') for row in host_rows
+                   if row.get('role')=='coordinator' and row.get('parent_thread_id') is None
+                   and isinstance(row.get('thread_id'),str) and row['thread_id']}
+            if len(roots)!=1:
+                raise ObserverEvidenceError('ambiguous_observer_evidence','participant_token_usage')
+            usage=capability({**data,'thread_id':roots.pop()})
+            if not isinstance(usage,dict):
+                raise ObserverEvidenceError('malformed_observer_evidence','participant_token_usage')
+        except ObserverEvidenceError as exc:return _audit_no_go(exc)
+        print(json.dumps(usage))
     elif args.command in {'calls','audit'}:
-        observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='cortex_live_observer')
+        observer=_observer_namespace('cortex_live_observer')
         host_rows=observer['observed_tool_calls'](data)
         if args.command=='calls':
             if args.limit is not None and (args.limit<1 or args.limit>10000):raise RuntimeError('calls limit must be from 1 through 10000')
             selected=host_rows[-args.limit:] if args.limit is not None else host_rows
             for row in selected:print(json.dumps(row))
         else:
-            mcp_rows=observer['observed_events'](data['events'])
+            try:mcp_rows,hook_rows=normalized_observer_events(observer,data['events'])
+            except ObserverEvidenceError as exc:return _audit_no_go(exc)
             failures=[row for row in mcp_rows if row.get('operation')!='initialize' and row.get('outcome')!='success']
-            hook_rows=observer['observed_hook_events'](data['events'])
             hook_failures=[row for row in hook_rows if row.get('outcome')!='success']
             host_failures,resolved_host_failures=observer['classify_host_failures'](host_rows)
             error_history=observer['tool_error_history'](host_rows)
             orchestration_errors=observer['orchestration_error_history'](host_rows)
             policy=observer['call_policy_violations'](host_rows)
             orchestration_policies=observer['orchestration_policy_violations'](policy)
+            try:worker_policies=normalized_worker_policy_violations(observer,policy)
+            except ObserverEvidenceError as exc:return _audit_no_go(exc)
             orchestration_host_failures=[row for row in host_failures if observer['is_orchestration_call'](row)]
             open_sessions=observer['open_command_sessions'](host_rows)
             open_cells=observer['open_exec_cells'](host_rows)
+            classification=observer['classify_audit_findings'](
+                failures=failures,hook_failures=hook_failures,host_failures=host_failures,
+                policy_violations=policy,open_sessions=open_sessions,open_cells=open_cells)
             print(json.dumps(dict(mcp_events=len(mcp_rows),hook_actions=len(hook_rows),host_calls=len(host_rows),
                                   failures=failures,hook_failures=hook_failures,host_failures=host_failures,
                                   tool_error_history=error_history,
                                   orchestration_error_history=orchestration_errors,
                                   orchestration_host_failures=orchestration_host_failures,
                                   resolved_host_failures=resolved_host_failures,
-                                  policy_violations=policy,
+                                  policy_violations=policy,worker_policy_violations=worker_policies,
                                   orchestration_policy_violations=orchestration_policies,
                                   open_sessions=open_sessions,
-                                  open_cells=open_cells)))
-            if failures or hook_failures or orchestration_errors or orchestration_host_failures or orchestration_policies or open_sessions or open_cells:
-                raise RuntimeError('CLI orchestration audit found unsuccessful, forbidden, or non-terminal orchestration outcomes')
+                                  open_cells=open_cells,**classification)))
+            if classification['evidence_integrity_invalidators']:
+                raise RuntimeError('CLI audit found incomplete, unbound, contaminated, or non-terminal evidence')
     else:
-        if args.interrupt:tmux('send-keys','-t',TARGET,'C-c',check=False)
-        tmux('pipe-pane','-t',TARGET,check=False);tmux('kill-session','-t','='+SESSION,check=False)
+        if args.command=='stop-exact':
+            _require_exact_cleanup_args(args,data)
+            _exact_cleanup_identity(data)
+            if args.interrupt:
+                _exact_cleanup_identity(data)
+                tmux('send-keys','-t',data['tmux_pane_id'],'C-c')
+                _exact_cleanup_identity(data)
+            _exact_cleanup_identity(data)
+            tmux('pipe-pane','-t',data['tmux_pane_id'],check=False)
+            tmux('kill-session','-t','='+data['tmux_session_id'])
+        else:
+            if args.interrupt:tmux('send-keys','-t',data['tmux_pane_id'],'C-c',check=False)
+            tmux('pipe-pane','-t',data['tmux_pane_id'],check=False)
+            tmux('kill-session','-t',data['tmux_session_id'],check=False)
         (STATE/'last.json').write_text(json.dumps(data));os.chmod(STATE/'last.json',0o600)
         (STATE/'capture.txt').unlink(missing_ok=True)
         (STATE/'session.json').unlink(missing_ok=True)
@@ -261,6 +1473,6 @@ def main():
         print('Stopped exact smoke session; removed transient capture and event streams.')
 
 if __name__=='__main__':
-    try:main()
+    try:raise SystemExit(main())
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
         raise SystemExit('Live transport failed: '+str(exc)) from None

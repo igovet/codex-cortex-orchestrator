@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS hook_agent_bindings (
  task_id TEXT NOT NULL REFERENCES tasks(id), receipt TEXT NOT NULL UNIQUE,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hook_command_sessions (
+ task_id TEXT NOT NULL REFERENCES tasks(id), worker_thread_id TEXT NOT NULL,
+ parent_thread_id TEXT NOT NULL, command_session_id TEXT NOT NULL,
+ cwd TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(task_id,command_session_id)
+);
+CREATE INDEX IF NOT EXISTS hook_command_sessions_by_parent
+ ON hook_command_sessions(parent_thread_id,command_session_id);
 '''
 
 
@@ -49,6 +57,20 @@ def fingerprint(value):
 class HookStorage:
     def __init__(self, store):
         self.store = store
+        # Hook schemas are normally installed with Store initialization. This
+        # narrow idempotent migration also lets an already-created v11 project
+        # retain command-session provenance after a package update.
+        with self.store.connection() as db:
+            db.executescript("""
+            CREATE TABLE IF NOT EXISTS hook_command_sessions (
+             task_id TEXT NOT NULL REFERENCES tasks(id), worker_thread_id TEXT NOT NULL,
+             parent_thread_id TEXT NOT NULL, command_session_id TEXT NOT NULL,
+             cwd TEXT NOT NULL, created_at TEXT NOT NULL,
+             PRIMARY KEY(task_id,command_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS hook_command_sessions_by_parent
+             ON hook_command_sessions(parent_thread_id,command_session_id);
+            """)
 
     def _context(self, db, session_id, cwd, agent_id=None):
         # A hook's parent session id alone never establishes a child's identity.
@@ -107,6 +129,62 @@ class HookStorage:
     def context(self, session_id, cwd, agent_id=None):
         with self.store.connection() as db:
             return self._context(db, session_id, cwd, agent_id)
+
+    def command_session_context(self, session_id, cwd, command_session_id):
+        """Recover a proven worker context and shell cwd from a running call.
+
+        A command-session id is useful provenance only when it was recorded for
+        this parent/task by a confirmed worker. It can never manufacture a
+        worker binding or authorize a coordinator event.
+        """
+        if not isinstance(command_session_id, str) or not command_session_id:
+            return None
+        with self.store.connection() as db:
+            parent = self._context(db, session_id, cwd)
+            if parent is None:
+                return None
+            row = db.execute(
+                """SELECT worker_thread_id,cwd FROM hook_command_sessions
+                   WHERE task_id=? AND parent_thread_id=? AND command_session_id=?""",
+                (parent["task_id"], session_id, command_session_id),
+            ).fetchone()
+            if row is None:
+                return None
+            worker = self._context(db, session_id, cwd, row["worker_thread_id"])
+            if worker is None or worker["role"] != "worker":
+                return None
+            return dict(context=worker, cwd=row["cwd"])
+
+    def command_session_cwd(self, context, command_session_id):
+        """Return cwd only for the worker that owns the retained session."""
+        if not isinstance(command_session_id, str) or not command_session_id:
+            return None
+        with self.store.connection() as db:
+            self._current(db, context)
+            row = db.execute(
+                """SELECT cwd FROM hook_command_sessions
+                   WHERE task_id=? AND parent_thread_id=? AND worker_thread_id=?
+                     AND command_session_id=?""",
+                (context["task_id"], context["session_id"], context["thread_id"], command_session_id),
+            ).fetchone()
+            return row["cwd"] if row else None
+
+    def remember_command_session(self, context, command_session_id, cwd):
+        """Persist bounded worker command provenance for later write_stdin hooks."""
+        if (context["role"] != "worker" or not isinstance(command_session_id, str)
+                or not command_session_id or not isinstance(cwd, str) or not Path(cwd).is_absolute()):
+            return False
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._current(db, context)
+            db.execute(
+                """INSERT OR REPLACE INTO hook_command_sessions
+                   (task_id,worker_thread_id,parent_thread_id,command_session_id,cwd,created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (context["task_id"], context["thread_id"], context["session_id"], command_session_id, cwd, self.store._now()),
+            )
+            db.commit()
+            return True
 
     def _current(self, db, context):
         current = self._context(db, context["session_id"], context["project_root"], context["agent_id"])
