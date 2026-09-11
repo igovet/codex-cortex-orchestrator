@@ -612,8 +612,11 @@ def test_absent_runtime_gc_archives_exact_state_and_replays(monkeypatch, tmp_pat
 ])
 def test_absent_runtime_gc_refuses_every_unrecognized_state_root_filename(monkeypatch, tmp_path, name):
     state_root = _absent_gc_state(tmp_path)
+    canonical = state_root / f"phase2-control-transaction-{'1' * 64}.json"
     extra = state_root / name
-    extra.write_bytes((state_root / f"phase2-control-transaction-{'1' * 64}.json").read_bytes())
+    if extra.name != canonical.name and extra.exists() and extra.samefile(canonical):
+        pytest.skip("case-distinct state-root filename cannot be represented on this filesystem")
+    extra.write_bytes(canonical.read_bytes())
     extra.chmod(0o600)
     monkeypatch.setattr(phase2_cli_adapter, "_require_absent_tmux",
                         lambda: {"status": "absent", "exit_code": 1})
