@@ -1,36 +1,17 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _policy_text():
-    text = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text()
-    return text.split("### Optional consequential-transition consultation", 1)[1].split(
-        "\nUse one suitable worker", 1
-    )[0]
-
-
-def test_consultation_requires_both_triggers_and_remains_optional():
-    policy = _policy_text()
-    assert "both consequence and uncertainty\napply; otherwise proceed" in policy
-    assert "concurrent when safe" in policy
-    assert "never a block" in policy
-    assert "transfer of planning/acceptance" in policy
-    assert "must consult" not in policy
-    assert "consultation gate" not in policy
-
-
-def test_consultation_policy_covers_exclusions_packet_record_and_evaluation():
-    policy = _policy_text()
-    for phrase in (
-        "routine work, ordinary tests",
-        "unchanged packets",
-        "active incidents",
-        "Record a compact\npacket",
-        "decision change, quality and overhead",
-    ):
-        assert phrase in policy
+def test_consultation_is_conditionally_loaded_and_preserves_report_only_scope():
+    root = ROOT / "plugins/cortex/skills/orchestrator"
+    entry = (root / "SKILL.md").read_text()
+    policy = (root / "references/senior-consultation.md").read_text()
+    assert '(references/senior-consultation.md)' in entry
+    assert 'concrete unresolved uncertainty' in policy
+    assert 'selected published reports' in policy
+    assert 'does not transfer' in policy
+    assert 'repeat consultation only for changed evidence' in policy
 
 
 def test_documented_overlay_has_negative_controls_and_no_runtime_gate():

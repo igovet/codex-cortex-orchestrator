@@ -1,5 +1,10 @@
 # Markdown coordination
 
+Incident work follows [outcome-driven coordination](../../project/incident-outcomes.md).
+Pipeline editions track material decisions rather than each worker completion or wait.
+The optional incident_decision block groups the causal model and next transition;
+existing evidence fields remain available. Runtime quality signals remain advisory.
+
 Cortex keeps one model-authored `pipeline.md` per task. Each new edition is
 prepended, retaining previous editions below. The current edition records active
 requirements, cancelled conditions, decisions, assignments, resource owners,
@@ -45,6 +50,26 @@ claims remain unverified without their observed receipt and exact artifact revis
 Review and verification reuse the identity `(artifact_revision, acceptance_boundary,
 check_identity)`; repeating unchanged work requires new evidence or a concrete rerun
 reason, not a timeout or elapsed time.
+
+The report templates provide an optional structured evidence extension for
+`delivery_state`, `acceptance_boundary`, `causal_model_delta`, `predecessor_rollout`,
+`retry_discriminator`, and `receipt_references`. Runtime helpers emit bounded,
+null-safe missing-field warnings and an exact duplicate reuse diagnostic when there
+is no fresh evidence or rerun reason. Both are advisory metadata: they never add a
+workflow stage, route work, require approval, alter coordinator acceptance, or turn
+successful command results into failures.
+All advisory values, including the legacy `failed_canary`, `review`, and `cost`
+keys, are serialization-safe and bounded recursively: booleans are retained,
+integers stay within the JSON-safe 53-bit range, finite floats are capped at
+`1e308`, strings are capped at 512 characters, and arbitrary-magnitude or
+non-finite numbers are omitted as `null` rather than emitted as invalid JSON.
+
+Passive diagnostic serialization and observation writes use a separate bounded,
+value-free continuity helper. It may emit only a safe error class/code and
+`evidence_admissibility=unverified`; a broken logger is itself non-blocking. The
+helper is never used around storage, authorization, binding, provenance,
+replay/truncation, publication, cleanup, or audit decisions, and cannot convert an
+uncertain action into success.
 
 For a repeated consequential live attempt, the coordinator may record a cross-layer
 acceptance contract and predecessor comparison: outcome/boundary, revision, relevant

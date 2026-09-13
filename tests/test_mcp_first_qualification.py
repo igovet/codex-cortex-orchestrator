@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import runpy
+import sqlite3
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -242,6 +243,17 @@ def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_pat
     outcome, reason = OBSERVER["desktop_supported_outcome_receipt"](
         rows, data, open_sessions=[], open_cells=[])
     assert reason is None and outcome["status"] == "complete"
+    editions=[dict(row) for row in rows]
+    editions[1]['draft_id']='d_initial'
+    editions.append({**editions[1],'draft_id':'d_final'})
+    check=OBSERVER["desktop_supported_outcome_receipt"]
+    assert check(editions,data,open_sessions=[],open_cells=[])[0] is not None
+    for final in ({**editions[-1],'draft_id':'d_initial'},
+                  {**editions[-1],'report_id':'r_999999999999'},
+                  {**editions[-1],'draft_id':None}):
+        assert check([*editions[:-1],final],data,open_sessions=[],open_cells=[])[0] is None
+    assert check([editions[0],editions[1],editions[-1],editions[2]],data,
+                 open_sessions=[],open_cells=[])[0] is None
     policy = [
         {"thread_id": "desktop-root", "tool": "spawn_agent", "violation": "worker_assignment_policy_unverified"},
         {"thread_id": "desktop-worker", "tool": "exec_command", "violation": "worker_skill_load_failed"},
@@ -566,7 +578,7 @@ def test_live_shaped_audit_exit_uses_only_the_finalized_classification():
                        "score_eligible": True,
                        "quality_findings": [{"classification": "product_quality_outcome"}]},
                       outcome, failures=[], host_failures=[], audit_policy=[],
-                      observational_diagnostics=diagnostics) == 0
+                      observational_diagnostics=diagnostics) == 1
     assert audit_exit({"evidence_valid": True, "score_eligible": False,
                        "evidence_integrity_invalidators": [{"reason": "truncated"}],
                        "quality_findings": []}, outcome, failures=[], host_failures=[], audit_policy=[],
@@ -862,6 +874,18 @@ def test_mcp_first_all_tools_catalogue_is_exact_metadata_only_and_precedes_creat
     helper = OBSERVER["approved_tool_catalogue_envelope"]
     assert helper("text(ALL_TOOLS)", [])
     assert helper("text(ALL_TOOLS);", [])
+    assert helper('text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__")))', [])
+    assert helper('const xs = ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__")); text(xs);', [])
+    assert not helper('text(ALL_TOOLS.filter(x => x.name.startsWith(secret)))', [])
+    filtered='text(ALL_TOOLS.filter(x => /create_task|cortex/i.test(x.name+" "+x.description)))'
+    assert helper(filtered, [])
+    for source in (filtered+'; tools.exec_command({})',
+                   filtered.replace('x.name','x["name"]'),
+                   filtered.replace('x.name','x.name()'),
+                   filtered.replace('/create_task|cortex/i','/.* /i'),
+                   filtered.replace('x.description','x.private'),
+                   filtered.replace('x.description','other.description')):
+        assert not helper(source, [])
     for source, nested in (
         ("text(ALL_TOOLS.filter(item => item.name))", []),
         ("text(ALL_TOOLS); await tools.mcp__cortex__create_task({})", []),
@@ -1059,6 +1083,17 @@ def test_current_host_static_bundle_reads_allow_only_exact_skill_or_public_decla
     assert not check("exec_command", command(release / "skills/*/SKILL.md"), coordinator_only=True)
     assert not check("exec_command", json.dumps({"cmd": f"sed -i 1d {skill}"}), coordinator_only=True)
     assert not check("exec_command", command(release / "scripts/cortex_runtime/store.py"), coordinator_only=True)
+    reference=release / "skills/orchestrator/references/worker-routing.md"
+    reference.parent.mkdir()
+    reference.write_bytes((ROOT / "plugins/cortex/skills/orchestrator/references/worker-routing.md").read_bytes())
+    assert check("exec_command", command(reference), coordinator_only=True)
+    assert OBSERVER["active_coordinator_skill_read"]("exec_command", command(reference))
+    assert not OBSERVER["call_policy_flags"]("exec_command", command(reference), "coordinator", str(tmp_path))
+    reference.write_text("tampered instructions")
+    assert not check("exec_command", command(reference), coordinator_only=True)
+    unknown=reference.parent / "private.md"
+    unknown.write_text("not linked")
+    assert not check("exec_command", command(unknown), coordinator_only=True)
 
 
 def test_current_host_bounded_shell_wrapper_allows_only_exact_registered_worker_skill(tmp_path, monkeypatch):
@@ -1096,6 +1131,226 @@ def test_current_host_bounded_shell_wrapper_allows_only_exact_registered_worker_
             "exec_command", arguments, "general", "/fixture")["path_policy_decision"] == "unauthorized_access"
         assert "forbidden_plugin_or_cache_access" in OBSERVER["call_policy_flags"](
             "exec_command", arguments, "general", "/fixture")
+
+
+def test_current_host_functions_exec_static_read_transport_is_exact_for_coordinator_and_worker(
+        tmp_path, monkeypatch):
+    """Require one direct nested read and same-identifier result forwarding."""
+    home = tmp_path / "home"
+    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "1.15.9-test"
+    coordinator_skill = release / "skills" / "orchestrator" / "SKILL.md"
+    worker_skill = release / "skills" / "worker-general" / "SKILL.md"
+    coordinator_skill.parent.mkdir(parents=True)
+    worker_skill.parent.mkdir(parents=True)
+    coordinator_skill.write_bytes((ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_bytes())
+    worker_skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
+    candidate = home / ".cortex-dev" / ".codex" / "cortex-candidate.json"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(json.dumps({"version": "1.15.9-test"}))
+    candidate.chmod(0o600)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    def wrapper(command, binding="result"):
+        nested_arguments = json.dumps({"cmd": command}, separators=(",", ":"))
+        return (f"const {binding} = await tools.exec_command({nested_arguments}); "
+                f"text({binding});")
+
+    for path, coordinator_only, worker_only in (
+            (coordinator_skill, True, False), (worker_skill, False, True)):
+        for binding in ("result", "output", "command_result_1", "_read_result", "$output"):
+            source = wrapper(f"cat {path}", binding)
+            nested = OBSERVER["nested_tool_invocations"](source)
+            assert OBSERVER["bounded_static_read_transport"](source, nested)
+            split=source.replace(f'text({binding});',
+                f'text({binding}.output); text(`exit_code=${{{binding}.exit_code}}`);')
+            assert OBSERVER['bounded_static_read_transport'](split, nested)
+            session=split+f' if({binding}.session_id) text(`session_id=${{{binding}.session_id}}`);'
+            assert OBSERVER['bounded_static_read_transport'](session, nested)
+            nested_arguments = json.dumps({"cmd": f"cat {path}"}, separators=(",", ":"))
+            assert OBSERVER["skill_instruction_read"](
+                "exec_command", nested_arguments,
+                coordinator_only=coordinator_only, worker_only=worker_only)
+            if worker_only:
+                # The manifest-bound worker profile is value-free metadata and
+                # remains recoverable even if the host denies this read before
+                # dispatch; it is not a completion/assignment receipt.
+                assert OBSERVER["worker_skill_profile"](
+                    "exec_command", nested_arguments) == "general"
+
+    coordinator_source = wrapper(f"cat {coordinator_skill}")
+    coordinator_nested = OBSERVER["nested_tool_invocations"](coordinator_source)
+    for source in (
+            coordinator_source.replace("text(result);", "text(result.output);"),
+            coordinator_source.replace("text(result);", "return text(result);"),
+            coordinator_source + " text(result);",
+            coordinator_source.replace("const result", "let result"),
+            coordinator_source.replace(
+                "); text(result);", "); await tools.exec_command({}); text(result);"),
+            "const run = tools.exec_command; const result = await run({}); text(result);",
+    ):
+        assert not OBSERVER["bounded_static_read_transport"](
+            source, OBSERVER["nested_tool_invocations"](source))
+
+    # Every ECMAScript reserved/future-reserved word and strict-invalid binding
+    # name is rejected, while the one-call grammar itself remains unchanged.
+    for binding in (
+            "arguments", "await", "break", "case", "catch", "class", "const",
+            "continue", "debugger", "default", "delete", "do", "else", "enum",
+            "eval", "export", "extends", "false", "finally", "for", "function",
+            "if", "implements", "import", "in", "instanceof", "interface", "let",
+            "new", "null", "package", "private", "protected", "public", "return",
+            "static", "super", "switch", "this", "throw", "true", "try", "typeof",
+            "var", "void", "while", "with", "yield"):
+        source = wrapper(f"cat {coordinator_skill}", binding)
+        assert not OBSERVER["bounded_static_read_transport"](
+            source, OBSERVER["nested_tool_invocations"](source)), binding
+
+    # A denied exact worker read still retains the closed registered profile
+    # marker, while the policy layer continues to report receipt acquisition as
+    # failed until a complete success receipt is observed.
+    denied_worker = {
+        "thread_id": "worker-thread", "parent_thread_id": "child-thread", "role": "general",
+        "tool": "exec_command", "outcome": "error", "worker_skill_receipt_required": True,
+        "skill_instruction_read": True, "worker_skill_profile": "general",
+        "path_policy_provenance": "observer_literal_marker",
+        "path_target_class": "approved_instruction_or_static_mention",
+        "path_access_kind": "approved_instruction_read", "path_policy_decision": "allowed",
+        "execution_status": "denied_before_dispatch", "result_digest": "a" * 12,
+    }
+    assert "worker_skill_load_failed" in {
+        item["violation"] for item in OBSERVER["call_policy_violations"]([denied_worker])
+    }
+    assert not OBSERVER["bounded_static_read_transport"](
+        coordinator_source, [(*coordinator_nested[0][:2], "different")])
+
+    # The binding must be a single safe identifier used exactly once for the
+    # direct call and once for complete forwarding.  Aliases, property access,
+    # returns, extra calls, and non-const/invalid bindings remain fail-closed.
+    output_source = wrapper(f"cat {coordinator_skill}", "output")
+    for source in (
+            output_source.replace("text(output);", "text(result);"),
+            output_source.replace("text(output);", "text(output.value);"),
+            output_source.replace("text(output);", "return text(output);"),
+            output_source.replace("text(output);", "const copy = output; text(copy);"),
+            output_source + " await tools.exec_command({});",
+            output_source.replace("const output", "let output"),
+            output_source.replace("const output", "const output.value"),
+            output_source.replace("const output", "const 1output"),
+            output_source.replace("const output", "const await"),
+    ):
+        assert not OBSERVER["bounded_static_read_transport"](
+            source, OBSERVER["nested_tool_invocations"](source))
+
+
+def test_current_host_functions_exec_static_read_transport_marks_observed_coordinator_wrapper(
+        tmp_path, monkeypatch):
+    """Exercise wrapper promotion only after the exact nested source parses."""
+    home = tmp_path / "home"
+    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "1.15.9-test"
+    skill = release / "skills" / "orchestrator" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_bytes())
+    candidate = home / ".cortex-dev" / ".codex" / "cortex-candidate.json"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(json.dumps({"version": "1.15.9-test"}))
+    candidate.chmod(0o600)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    nested_arguments = json.dumps({"cmd": f"cat {skill}"}, separators=(",", ":"))
+    source = f"const result = await tools.exec_command({nested_arguments}); text(result);"
+    rollout = tmp_path / "coordinator.jsonl"
+    events = tmp_path / "events"
+    events.mkdir()
+
+    def entry(stamp, payload):
+        return json.dumps({"timestamp": stamp, "type": "response_item", "payload": payload})
+
+    rollout.write_text("\n".join([
+        entry("2026-09-13T12:00:00.000Z", {
+            "type": "custom_tool_call", "call_id": "read", "name": "functions.exec",
+            "input": source,
+        }),
+        entry("2026-09-13T12:00:00.100Z", {
+            "type": "custom_tool_call_output", "call_id": "read",
+            "output": "skill text\nexit_status=0",
+        }),
+    ]) + "\n")
+    codex = home / ".cortex-dev" / ".codex"
+    with sqlite3.connect(codex / "state_5.sqlite") as db:
+        db.execute(
+            "CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,"
+            "reasoning_effort TEXT,created_at INTEGER,cwd TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)"
+        )
+        db.execute(
+            "INSERT INTO threads VALUES (?,?,?,?,?,?,?)",
+            ("root", str(rollout), None, "gpt-5.6-luna", "high", 100, "/fixture"),
+        )
+
+    rows = OBSERVER["observed_tool_calls"]({
+        "workdir": "/fixture", "started_at": 100, "thread_created_since": 100,
+        "events": str(events),
+    })
+    wrapper = [row for row in rows if row.get("tool") == "functions.exec"]
+    nested = [row for row in rows if row.get("tool") == "exec_command"]
+    assert len(wrapper) == len(nested) == 1
+    assert wrapper[0]["bounded_metadata_observed"] is True
+    assert wrapper[0]["active_coordinator_skill_read"] is True
+    assert nested[0]["pre_binding_static_read"] is True
+
+
+def test_current_host_worker_wrapper_result_credits_exact_skill_receipt(tmp_path, monkeypatch):
+    """A successful permitted worker read must create the normal receipt."""
+    home = tmp_path / "home"
+    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "1.15.9-test"
+    skill = release / "skills" / "worker-general" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    nested_arguments = json.dumps({"cmd": f"bash -lc 'cat {skill}'"}, separators=(",", ":"))
+    source = f"const output = await tools.exec_command({nested_arguments}); text(output);"
+    child_rollout = tmp_path / "worker.jsonl"
+    events = tmp_path / "events"
+    events.mkdir()
+
+    def entry(stamp, payload):
+        return json.dumps({"timestamp": stamp, "type": "response_item", "payload": payload})
+
+    complete = (ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_text()
+    child_rollout.write_text("\n".join([
+        entry("2026-09-13T12:00:00.000Z", {
+            "type": "custom_tool_call", "call_id": "read", "name": "functions.exec",
+            "input": source,
+        }),
+        entry("2026-09-13T12:00:00.100Z", {
+            "type": "custom_tool_call_output", "call_id": "read",
+            "output": complete + "\nexit_status=0",
+        }),
+    ]) + "\n")
+    database = home / ".cortex-dev" / ".codex" / "state_5.sqlite"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,reasoning_effort TEXT,created_at INTEGER,cwd TEXT)")
+        db.execute("CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)")
+        db.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?,?)", [
+            ("root", str(tmp_path / "root.jsonl"), None, "gpt-5.6-luna", "high", 100, "/fixture"),
+            ("child", str(child_rollout), "general", "gpt-5.6-luna", "medium", 100, "/fixture"),
+        ])
+        db.execute("INSERT INTO thread_spawn_edges VALUES (?,?)", ("root", "child"))
+
+    rows = OBSERVER["observed_tool_calls"]({
+        "workdir": "/fixture", "started_at": 100, "thread_created_since": 100,
+        "events": str(events),
+    })
+    worker_rows = [row for row in rows if row.get("thread_id") == "child"]
+    receipts = [row for row in worker_rows if row.get("worker_skill_assignment_receipt") == "complete_exact_assigned"]
+    assert len(receipts) == 1
+    assert receipts[0]["worker_skill_complete"] is True
+    assert receipts[0]["worker_skill_profile"] == "general"
+    assert receipts[0]["outcome"] == "success"
 
 
 def test_live_owner_identity_is_required_for_native_root_binding_and_rejects_replacement(tmp_path):

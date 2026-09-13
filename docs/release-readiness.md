@@ -1,7 +1,23 @@
 # 1.15.9: Stable release readiness
 
+## Qualified source candidate — 2026-09-13
+
+Current source: `1.15.9+codex.sha256.5fc202ee9d2fc515`. Package and source-only
+sync checks passed; 991 tests passed with no skips (eight aiohttp API-style
+warnings). Real CLI and Desktop were completed in that order on this unchanged
+payload, each with a clean `observational_accept` audit and exit 0. The final
+auditor additionally verifies native completion and rejects actual check failures.
+See [current qualification evidence](project/incident-outcomes.md#current-verification-boundary-2026-09-13).
+Stable installation, commit, push and promotion are separate delivery actions and
+were not performed by this verification. No incident-efficacy comparison is claimed.
+
+## Historical release-readiness record
+
+The former current/latest labels below are retained history, not the status of
+the qualified source candidate above.
+
 The current Cortex semantic version is `1.15.9`, with source payload
-`1.15.9+codex.sha256.90fddea21bf510df` as declared by the plugin manifest and
+`1.15.9+codex.sha256.07c3aeae551a990e` as declared by the plugin manifest and
 resolved by the package validator. The final consecutive real CLI/Desktop
 qualification (`r_648c4f40dcf9`) belongs to superseded payload
 `e4f332d43bf38024`; it is historical evidence and does not qualify this changed
@@ -27,7 +43,7 @@ used its unchanged isolated candidate with Luna coordination/workers and no stab
 installation or configuration change, and are historical-only. Their audits reported
 zero failures, policy violations, open sessions/cells, integrity invalidators, or
 quality findings for that superseded payload; they do not qualify current payload
-`90fddea21bf510df`. Phase 2 is cancelled by the user and must not be restarted or
+`07c3aeae551a990e`. Phase 2 is cancelled by the user and must not be restarted or
 interpreted as an efficacy comparison; Phases 3–5 remain offline-ready as recorded
 above.
 

@@ -1,9 +1,26 @@
 # Verification
 
+## Current source qualification — 2026-09-13
+
+Payload `1.15.9+codex.sha256.5fc202ee9d2fc515` passed package validation,
+source-only sync and 991 tests with isolated dependencies (no skips; eight
+aiohttp API-style warnings). The focused real CLI passed first (91 calls,
+12 MCP events), followed by real Desktop on the unchanged payload (88 calls,
+17 MCP events). Both final audits printed `observational_accept`, exit 0, with
+no execution errors, quality findings, integrity invalidators or open work.
+Native worker reports, exact artifact reconciliation and participant completion
+were observed; unavailable host enforcement remains `unverified`, never asserted.
+The source is qualified, not committed, pushed, promoted or installed into the
+stable user environment by this verification. See the [current evidence and
+retained failures](incident-outcomes.md#current-verification-boundary-2026-09-13).
+
+The sections below preserve earlier qualification history; their former
+"current" and "latest" labels do not supersede the dated result above.
+
 ## Stable release payload — 1.15.9
 
 The current Cortex semantic version is `1.15.9`, with source payload
-`1.15.9+codex.sha256.90fddea21bf510df` as declared by the plugin manifest and
+`1.15.9+codex.sha256.07c3aeae551a990e` as declared by the plugin manifest and
 resolved by the package validator. Final consecutive real CLI and Desktop
 qualification (`r_648c4f40dcf9`) applies only to superseded payload
 `e4f332d43bf38024`; it is historical evidence, not a qualification of this
@@ -126,9 +143,10 @@ the last state. Local repository helpers emit only the first two and reject any
 self-supplied `host_enforced` label because no trusted host-boundary verifier is
 packaged. The repository does not claim token authenticity or filesystem,
 process, or egress containment. Advisory failed-canary, review, and cost metadata
-is bounded/null-safe replanning information only; it has no threshold, routing,
-retry, gate, or acceptance effect. An unchanged state/evidence cursor produces no
-wait message or event.
+uses the same bounded, null-safe, strict-JSON-safe recursive normalization as the
+structured evidence fields; it has no threshold, routing, retry, gate, or
+acceptance effect. An unchanged state/evidence cursor produces no wait message or
+event.
 
 A complete attributable `PreToolUse` receipt with `action_status=denied`,
 `authorization_outcome=PERMISSION_DENIED`,
@@ -492,6 +510,10 @@ objects are invalid and are covered by the package regression.
 
 ## Coordinator project-access boundary — 2026-09-07
 
+Historical boundary: superseded by the outcome-driven incident policy. Coordinators
+may now inspect project evidence; project mutations stay with the incident owner.
+The earlier rejected receipts below remain historical and are not reclassified.
+
 The rejected revision-8 CLI run recorded two `coordinator_forbidden_tool`
 violations: coordinator `functions.exec` wrappers ran `sed` after task creation,
 once before worker dispatch and once during post-report verification. The worker
@@ -770,8 +792,22 @@ that the current capture contains exactly one `Cortex live-dev exit=0`, and that
 the ownership-bound process snapshot has no descendants. Phase 2 collection
 repeats the status and process snapshot before sealing evidence, and `stop`
 rechecks them against the bundle before stopping the exact session. CLI smoke
-also seals a receipt-bound immutable pre-stop bundle (capture, normalized calls,
-events, hooks, and terminal snapshot) before ordinary cleanup. A normal successful
+creates an owner-private `cortex-live-session-binding-v1` receipt for every
+ordinary start from the returned tmux server/session/pane identity and pane
+start tick. The receipt is exposed in the start output and retained in
+`session.json`; `status`, `calls`, `events`, and `audit` do not replace it.
+Before ordinary `send` mutates provenance or pastes the prompt, the helper
+requires that exact ordinary schema/receipt and re-queries the live tmux
+server/session/pane/PID/start-tick identity. It repeats the identity check after
+the five-second settle and immediately before the one Enter, so stale, foreign,
+restarted, cross-mode, or tampered state cannot submit input.
+Normal `stop` verifies the receipt and its immutable binding before sealing an
+immutable pre-stop bundle (capture, normalized calls, and a fresh exact tmux
+server/session/pane/PID/start-tick identity check). It repeats that identity check
+immediately before killing the session; replacement, restart, or PID reuse refuses
+cleanup. Ordinary binding creation is true no-replace with owner-only 0600 bytes,
+so a concurrent creator cannot be overwritten. The bundle also includes events,
+hooks, and the terminal snapshot before ordinary cleanup. A normal successful
 stop refuses to remove the session without that owned-bash marker. Any post-stop
 no-session observation belongs in the bundle's distinct post-stop directory; it
 must never overwrite the sealed pre-stop calls or events files. Source revisions
@@ -949,6 +985,12 @@ skill attachment or exact advertised worker-skill-read evidence must be attribut
 to an opaque route. After that approved load, direct plugin/cache/candidate/registry
 operands remain forbidden; quoted static exclusions are not reads. Keep command
 wrappers bounded and reject any truncation even if covered child commands exited zero.
+When the installed host transports this read through `functions.exec`, the observer
+requires exactly one direct `tools.exec_command` call bound once to a safe
+JavaScript identifier and complete literal `text(<that-same-identifier>);`
+forwarding (for example, `const result = await ...; text(result);`). Aliases,
+property access, extra JavaScript/API/tool calls, partial forwarding, and mixed
+wrappers remain invalid.
 Encrypted assignment content remains opaque. See [host compatibility](host-compatibility.md).
 A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.

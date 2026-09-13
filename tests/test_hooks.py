@@ -2,6 +2,7 @@
 import io
 import json
 from pathlib import Path
+import shlex
 import sqlite3
 
 import pytest
@@ -171,21 +172,21 @@ def test_app_thread_message_tools_are_denied_before_dispatch(active, tool_name):
     _, _, handler, root = active
     blocked = handler.handle(event(root, "PreToolUse", tool_name=tool_name,
                                   tool_use_id="message-call", tool_input={"threadId": "target", "prompt": "blocked"}))
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "before dispatch" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
-    assert handler.observation["outcome"] == "denied"
+    assert "permissionDecision" not in blocked["hookSpecificOutput"]
+    assert "before dispatch" in blocked["hookSpecificOutput"]["additionalContext"]
+    assert handler.observation["outcome"] == "diagnostic"
 
 
-@pytest.mark.parametrize("tool_name", ["Bash", "exec_command", "write_stdin", "read_file", "write_file"])
+@pytest.mark.parametrize("tool_name", ["Bash", "exec_command", "write_stdin", "write_file"])
 def test_explicit_coordinator_identity_denies_project_host_tools_before_dispatch(active, tool_name):
     _, _, handler, root = active
     blocked = handler.handle(event(root, "PreToolUse", tool_name=tool_name,
                                   tool_use_id="coordinator-call", agent_id="parent",
                                   tool_input={"cmd": "pytest -q"}))
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "delegated to a native worker" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "permissionDecision" not in blocked["hookSpecificOutput"]
+    assert "delegated to a native worker" in blocked["hookSpecificOutput"]["additionalContext"]
     assert handler.observation["role"] == "coordinator"
-    assert handler.observation["outcome"] == "denied"
+    assert handler.observation["outcome"] == "diagnostic"
 
 
 def test_private_execution_boundary_fixture_is_deny_only_and_sanitized(active):
@@ -200,8 +201,8 @@ def test_private_execution_boundary_fixture_is_deny_only_and_sanitized(active):
                 blocked = handler.handle(event(root, "PreToolUse", tool_name=row["tool"],
                                                tool_use_id=f"boundary-{key}-{index}", agent_id="child",
                                                tool_input=tool_input))
-                assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
-                assert "task-private storage" in blocked["hookSpecificOutput"]["permissionDecisionReason"]
+                assert "permissionDecision" not in blocked["hookSpecificOutput"]
+                assert "task-private storage" in blocked["hookSpecificOutput"]["additionalContext"]
                 assert str(root) not in json.dumps(blocked)
 
 
@@ -233,15 +234,44 @@ def test_semantic_pre_dispatch_authorization_denies_before_dispatch_and_keeps_wo
         denied = handler.handle(event(root, "PreToolUse", tool_name=tool, tool_use_id=name,
                                      agent_id="parent", tool_input=tool_input))
         detail = denied["hookSpecificOutput"]
-        assert detail["permissionDecision"] == "deny"
-        assert detail["permissionDecisionReason"] == (
-            "Cortex coordinator project access is delegated to a native worker before dispatch.")
-        assert handler.observation["outcome"] == "denied"
+        assert "permissionDecision" not in detail
+        assert "Cortex advisory diagnostic" in detail["additionalContext"]
+        assert "continue host-permitted work" in detail["additionalContext"]
+        assert handler.observation["outcome"] == "diagnostic"
         assert handler.observation["diagnostic_codes"] == ["pre_dispatch_authorization_denied", expected_code]
 
     unknown = handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="unknown-run",
                                    tool_input={"cmd":"true"}))
     assert unknown == {}
+
+
+@pytest.mark.parametrize('tool_name,command_field', [('exec_command','cmd'),('Bash','command')])
+def test_worker_skill_read_pretool_to_result_receipt_allows_exact_leaf_only(active, tool_name, command_field):
+    _, _, handler, root = active
+    skill_root = root / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "candidate"
+    skill = skill_root / "skills" / "worker-backend-dev" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Backend worker\n")
+    manifest = skill_root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name":"cortex","version":"1.15.9+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
+    command = f"bash -lc {shlex.quote(f'cat {skill}')}"
+    pre = handler.handle(event(root, "PreToolUse", tool_name=tool_name, tool_use_id="skill-read",
+                               agent_id="child", agent_type="backend_dev", tool_input={command_field: command}))
+    assert pre == {}
+    assert handler.observation["outcome"] == "observed"
+    post = handler.handle(event(root, "PostToolUse", tool_name=tool_name, tool_use_id="skill-read",
+                                agent_id="child", tool_input={command_field: command},
+                                tool_response={"output":"# Backend worker\n", "exit_code":0}))
+    assert post == {}
+    assert handler.observation["status"] == "exited"
+    assert handler.observation["exit_code"] == 0
+    denied = handler.handle(event(root, "PreToolUse", tool_name=tool_name, tool_use_id="skill-directory",
+                                  agent_id="child", agent_type="backend_dev",
+                                  tool_input={command_field: f"bash -lc {shlex.quote(f'cat {skill.parent}')}"}))
+    assert "permissionDecision" not in denied["hookSpecificOutput"]
+    assert handler.observation["outcome"] == "diagnostic"
 
 
 def test_private_execution_boundary_resolves_symlink_routes(active):
@@ -256,7 +286,7 @@ def test_private_execution_boundary_resolves_symlink_routes(active):
     assert private_access_denied("exec_command", {"cmd": "cat workspace-alias"}, cwd=str(root), project_root=str(root))
     blocked = handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="boundary-link",
                                    agent_id="child", tool_input=command))
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "permissionDecision" not in blocked["hookSpecificOutput"]
 
 
 def test_private_boundary_uses_validated_parent_provenance_without_agent_id(active):
@@ -267,7 +297,7 @@ def test_private_boundary_uses_validated_parent_provenance_without_agent_id(acti
                          thread_id="child", parent_thread_id="parent",
                          tool_input={"cmd": f"cat {private}"})
     blocked = handler.handle(worker_event)
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "permissionDecision" not in blocked["hookSpecificOutput"]
     # A parent/session-only receipt does not establish an attributable actor;
     # retain the long-standing no-classification result rather than guessing a
     # coordinator or worker identity from a shared parent session.
@@ -290,7 +320,7 @@ def test_private_boundary_reuses_worker_command_cwd_for_unidentified_write_stdin
     followup = event(root, "PreToolUse", tool_name="write_stdin", tool_use_id="stateful-private",
                      tool_input={"session_id": 17, "chars": "cat task/pipeline.md"})
     blocked = handler.handle(followup)
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "permissionDecision" not in blocked["hookSpecificOutput"]
     assert handler.observation["role"] == "worker"
     # An unknown command session has no worker provenance and remains a
     # session-scoped observation rather than turning into a coordinator denial.
@@ -315,7 +345,7 @@ def test_patch_mentions_in_content_do_not_block_but_registered_mutation_does(act
     assert handler.handle(patch_event(root, mention)) == {}
     mutation = f"*** Begin Patch\n*** Delete File: {protected}\n*** End Patch"
     blocked = handler.handle(patch_event(root, mutation))
-    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "permissionDecision" not in blocked["hookSpecificOutput"]
     assert "updatedInput" not in json.dumps(blocked)
 
 
@@ -327,9 +357,9 @@ def test_registered_draft_delete_move_and_proven_ownership(active):
     assert handler.handle(patch_event(root, ordinary)) == {}
     for command in (f"*** Begin Patch\n*** Delete File: {path}\n*** End Patch",
                     f"*** Begin Patch\n*** Update File: {path}\n*** Move to: moved.md\n@@\n-old\n+new\n*** End Patch"):
-        assert handler.handle(patch_event(root, command))["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "permissionDecision" not in handler.handle(patch_event(root, command))["hookSpecificOutput"]
     handler.handle(event(root, "SubagentStart", agent_id="child"))
-    assert handler.handle(patch_event(root, ordinary, agent_id="child"))["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "permissionDecision" not in handler.handle(patch_event(root, ordinary, agent_id="child"))["hookSpecificOutput"]
     # Unknown workers cannot inherit parent's ownership or manufacture denials.
     assert handler.handle(patch_event(root, ordinary, agent_id="unknown")) == {}
 
@@ -342,7 +372,7 @@ def test_exact_registered_neighbor_publication_is_protected_without_reading_it(a
     protected = root / ".codex" / "cortex" / row[0] / row[1]
     protected.write_text("damaged report")
     mutation = f"*** Begin Patch\n*** Delete File: {protected}\n*** End Patch"
-    assert handler.handle(patch_event(root, mutation))["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "permissionDecision" not in handler.handle(patch_event(root, mutation))["hookSpecificOutput"]
 
 
 @pytest.mark.parametrize("patch", ["echo .codex/cortex/report.md", "*** Begin Patch\n*** Update File: x\n*** End Patch", "*** Begin Patch\n*** Add File: x\nraw text\n*** End Patch"])

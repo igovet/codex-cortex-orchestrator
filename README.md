@@ -1,3 +1,10 @@
+The [incident coordination guide](docs/project/incident-outcomes.md) describes
+continuous ownership, full-path rehearsal, evidence-based replanning and quiet waits.
+The compact orchestrator loads specialized procedures only when needed.
+Live qualification distinguishes public tool discovery from project actions and
+correlates publication IDs independently of nested governance references.
+Cortex lifecycle policy findings are advisory: hooks do not veto host tool calls.
+
 <table>
   <tr>
     <td width="190" align="center" valign="middle">
@@ -665,13 +672,10 @@ specific expertise, independent evidence or parallel work, not mandatory stages.
 Shared files, browsers, devices, ports and applications have one active owner.
 A timeout does not release that ownership.
 
-After a Cortex task is created, project artifacts belong to the worker for the
-whole mutation and verification boundary. The coordinator must dispatch the
-worker before reading, editing, hashing or checking a project target, even when
-the request is one small file; `functions.exec`, `exec_command` and terminal
-wrappers are not coordinator shortcuts. User-supplied sources and the exact
-Cortex-issued pipeline draft remain coordinator-readable, and the coordinator
-accepts the worker's receipts and report for project evidence.
+The coordinator may inspect project evidence through read-only file access or a
+literal bounded read. Project mutations remain owned by the continuous worker.
+Private Cortex storage still uses the public report interfaces. Reuse the owner's
+verification evidence rather than repeating it for reassurance.
 
 ### Markdown pipeline and readiness
 
@@ -693,6 +697,17 @@ never implies acceptance, and a Git/CI/deployment/production claim without the m
 observed receipt and revision remains unverified. Review or verification reuse has the
 identity `(artifact_revision, acceptance_boundary, check_identity)`; unchanged work
 needs new evidence or a concrete rerun reason before repetition.
+
+Report templates also expose optional structured model-authored evidence fields:
+`delivery_state`, `acceptance_boundary`, `causal_model_delta`,
+`predecessor_rollout`, `retry_discriminator`, and `receipt_references`. The runtime
+can retain bounded/null-safe warnings when one is absent and can diagnose an exact
+duplicate review/verification identity without fresh evidence or a rerun reason.
+These findings are advisory metadata only: they never route work, require approval,
+change coordinator acceptance, or change a successful command exit.
+Scalar advisory values are serialization-safe: booleans are retained, integers are
+limited to the JSON-safe 53-bit range, finite floats are bounded to `1e308`, and
+arbitrary-magnitude or non-finite numbers are omitted and diagnosed as missing.
 
 When a repeated live attempt is consequential, the coordinator may record an adaptive
 cross-layer acceptance contract and predecessor-rollout comparison: outcome/boundary,
@@ -816,7 +831,12 @@ Hooks record observations and diagnose unfinished work. They do not select model
 assign work, approve actions, accept results or force endless continuation. Patch
 checks and the pre-dispatch app-thread-message denial cover only their exact routes;
 text merely mentioning a protected path is not a mutation. Hook coverage is partial,
-and hook failures remain visible. See [lifecycle hooks](docs/features/lifecycle-hooks/index.md)
+and hook failures remain visible. Passive observation, logging, telemetry, and
+diagnostic serialization use a narrow value-free fail-open boundary: a failure may
+emit only a bounded error class/code and continue with `evidence_admissibility` set
+to `unverified`. The boundary never wraps storage, authorization, binding,
+publication, cleanup, or audit work, and never turns a protected or uncertain action
+into success. See [lifecycle hooks](docs/features/lifecycle-hooks/index.md)
 and the [official hook reference](https://learn.chatgpt.com/docs/hooks).
 
 ## Profiles and model routing
@@ -1116,6 +1136,13 @@ The installed interactive transport may place that sole exact worker leaf read i
 one literal `bash -lc` envelope. Cortex unwraps and revalidates the payload with
 the same closed static-read grammar; nested shells, extra commands, directories,
 globs, adjacent cache paths, and writes remain forbidden access.
+When the host serializes this read through `functions.exec`, the observer accepts
+only one direct-call form with a safe JavaScript identifier, for example `const
+result = await tools.exec_command(...); text(result);` or an equivalent
+`const output = ...; text(output);` form. The identifier must be bound once and
+forwarded unchanged exactly once. Aliases, property access, extra
+JavaScript/API/tool calls, missing or partial forwarding, and mixed wrappers
+remain fail-closed.
 For `current_host_mcp_first` only, the exact unsupported-host labels
 `worker_assignment_policy_unverified` and `mcp_first_bootstrap_unverified` are
 always printed as `unsupported_by_current_host`, `not_applicable` diagnostics. The
@@ -1236,7 +1263,7 @@ complete installable payload. Regenerate the suffix whenever that payload change
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
 
-The current source candidate is `1.15.9+codex.sha256.90fddea21bf510df`.
+The current source candidate is `1.15.9+codex.sha256.07c3aeae551a990e`.
 The recorded final CLI/Desktop qualification (`r_648c4f40dcf9`) belongs to the
 superseded `e4f332d43bf38024` payload and is historical evidence only; it does
 not qualify this changed payload. Package, sync, full-suite, and real-host
@@ -1272,11 +1299,25 @@ and Cortex makes no efficacy-comparison claim for this release.
   that a host performed enforcement. Local receipts can be only `policy_declared`
   or `policy_observed`; a supplied `host_enforced` label is unverified until a
   separate trusted host boundary verifies an exact binding.
-- Advisory failed-canary, review, and cost metadata is null-safe replanning input
-  only. It does not select an agent, route work, impose a threshold, retry, or
-  accept a result. Unchanged state/evidence produces no wait message or event.
+- Advisory failed-canary, review, and cost metadata is bounded, null-safe,
+  strict-JSON-safe replanning input only, including nested values. Oversized
+  strings are truncated, out-of-range integers and non-finite/oversized floats
+  are omitted as `null`, and unsupported values are omitted as `null`. It does
+  not select an agent, route work, impose a threshold, retry, or accept a result.
+  Unchanged state/evidence produces no wait message or event.
   When semantic policy and path-boundary diagnostics both apply, they keep one
   stable call identity with two labels, not two synthetic calls.
+- Passive diagnostic failures are a separate execution-continuity lane. The
+  bounded helper may catch only observation, logging, telemetry, or diagnostic
+  serialization failures; it emits value-free type/code metadata when possible and
+  retains `evidence_admissibility=unverified`. Passive telemetry storage and
+  permission errors also continue; real integrity, binding, provenance, replay,
+  truncation, publication, cleanup, and
+  audit failures remain fail-closed and are never demoted.
+- Live acceptance additionally requires native completion of every Desktop
+  participant. An existing output file or successful initial pipeline publication
+  is not completion. Real check failures remain non-accepted in CLI and Desktop
+  audits, without stopping the running orchestration.
 - Preserve help, harvest, refresh, clear, index routing and context rereading.
 - Verify storage integrity without interpreting Markdown completion claims.
 - Never retain compatibility routes, mandatory stages or approval machines; lifecycle hooks remain local storage and integrity helpers.
@@ -1482,7 +1523,9 @@ composer. Compare the passive initialization receipt with the isolated candidate
 and seven-tool catalogue. Workloads begin with `$cortex:orchestrator` followed by
 ordinary product work. `send --prompt-file FILE` pastes once, waits five real
 seconds and sends one named Enter; it requires an ordinary before/after native input
-receipt but no Phase 2 control, session, or trust receipt. The sealed Phase 2 adapter
+receipt plus the immutable ordinary start binding and a current exact tmux
+server/session/pane/PID/start-tick check, but no Phase 2 control or trust receipt.
+The sealed Phase 2 adapter
 injects an explicit control marker and selects the stricter trust/send protocol;
 incidental or missing session fields never switch or weaken either mode.
 Ordinary `send` is also single-use: a non-null first-submission timestamp refuses
@@ -1676,7 +1719,16 @@ session receipt. Collect the sealed evidence bundle from either the proven idle
 composer or the owned idle bash with its successful exit marker, then stop only
 that exact session; use bundle-authorized `stop --interrupt` for the idle composer
 or after a failed run. Ordinary CLI cleanup seals a receipt-bound immutable
-pre-stop capture/calls/events/hooks/terminal bundle; a post-stop no-session probe
+pre-stop capture/calls/events/hooks/terminal bundle. Every ordinary `start` first
+creates an owner-private `cortex-live-session-binding-v1` receipt from the exact
+tmux server/session/pane identity and pane start tick, exposes only its opaque
+receipt in the start result, and retains it in the transient session state.
+Normal `stop` revalidates that binding before sealing; missing, mismatched, stale,
+or foreign receipts refuse cleanup. It also re-queries the current tmux server,
+session, pane, creation time, PID, and pane start tick immediately before sealing
+and again before killing; a restarted, replaced, or reused identity remains
+untouchable. Binding creation uses no-replace semantics, so a concurrent creator
+cannot be overwritten. A post-stop no-session probe
 uses its distinct diagnostic path and never overwrites that bundle. A normal
 successful stop requires the observed owned-bash `Cortex live-dev exit=0` marker.
 Never kill the tmux server.
@@ -1722,3 +1774,19 @@ the same owner and may inspect status or selected evidence internally, but does 
 send `send_message`/`followup_task` solely because the wait produced no evidence.
 Only an inbound same-owner handoff reply, direct user steering/clarification, or an
 intentional follow-up after reconciling terminal worker evidence is a legal transition.
+## Governance and specialist responsibility
+
+The coordinator owns the overall outcome; specialists own bounded assignments.
+Nontrivial changes use independent checking rather than calling developer self-tests
+an independent review. Current minimal/light/full governance is exposed by public
+tools and recovery hints and guides work depth; it is not a runtime prohibition,
+automatic heavy-model route or fixed agent pipeline. See
+[incident coordination](docs/project/incident-outcomes.md).
+
+## Live qualification repair — 2026-09-13
+
+The compact coordinator retains public task binding before project work and the
+initial/final report protocol. The observer recognizes exact linked orchestrator
+reference reads after binding; unlinked or modified cache documents remain invalid.
+Current-candidate live CLI and Desktop acceptance is recorded in
+[incident outcomes](docs/project/incident-outcomes.md), not inferred from unit tests.

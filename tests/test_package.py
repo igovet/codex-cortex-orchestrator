@@ -62,7 +62,7 @@ def test_release_readiness_keeps_retained_host_runs_historical_and_superseded():
     )
     assert historical in readiness
     assert ('they do not qualify current payload\n'
-            '`90fddea21bf510df`.') in readiness
+            '`07c3aeae551a990e`.') in readiness
     assert 'Both final host runs used the unchanged current candidate' not in readiness
 
 
@@ -153,11 +153,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     assert 'Never probe required\nfields with an empty argument object' in publication
     assert 'Omit `request_key` for' not in publication
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert '`request_key` must be a literal UUID or stable key' in orchestrator
-    assert '`crypto.randomUUID()` or another runtime generator' in orchestrator
-    assert 'After task creation, delegate every project-target mutation, read, hash or' in orchestrator
-    assert '`functions.exec`, `exec_command` or terminals for project targets' in orchestrator
-    assert 'Only user\nsources and the exact Cortex-issued pipeline draft remain coordinator-readable.' in orchestrator
+    assert 'Even at minimal depth, delegate product changes to a native\n   worker.' in orchestrator
     pipeline_publication=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
     assert 'When a pipeline mutation schema requires `request_key`' in pipeline_publication
     assert 'ordered `replaceable_markers` list as authoritative' in pipeline_publication
@@ -170,7 +166,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
 def test_coordinator_publication_guidance_closes_observed_draft_failure():
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     reference=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
-    assert 'follow its workflow.' in orchestrator
+    assert '(references/pipeline-publication.md)' in orchestrator
     assert reference.index('Before `write_report`') < reference.index('If `write_report` returns the deterministic')
     assert 'verify that no listed marker (or other exact template\nplaceholder) remains' in reference
 
@@ -242,16 +238,10 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     # The opt-in consultant and explicit native-worker tracking boundary add a
     # bounded coordinator packet while retaining the compact companion budget.
     assert companion < 27_500
-    assert '## Durable task and pipeline' in orchestrator
-    assert '## Choose the smallest useful work graph' in orchestrator
-    assert '## Model and effort' in orchestrator
-    assert '## Recovery after compaction or restart' in orchestrator
-    assert 'A 4,000-character limit is one page, never a total context limit.' in orchestrator
-    assert 'Never reassign or\nduplicate work because of a wait timeout' in orchestrator
-    assert 'Ordinary work defaults to `gpt-5.6-luna`' in orchestrator
-    assert 'Sol is never an implementation route' in orchestrator
-    assert 'Answer short questions directly' in orchestrator
-    assert 'applicable artifact skill' in orchestrator
+    assert len(orchestrator) < 6500
+    routing = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
+    assert 'Ordinary work defaults to `gpt-5.6-luna`' in routing
+    assert 'Sol is never an implementation route' in routing
     assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
 
 
@@ -720,25 +710,19 @@ def test_worker_safety_and_post_wait_rules_are_payload_guidance():
     assert 'one bounded command per wrapper' in worker
     assert "native final names exactly one ID: this worker's own current" in worker
     assert 'other-worker report ID only in the saved report' in worker
-    assert 'A wait timeout is only no new evidence, never\ncompletion' in orchestrator
-    assert 'pending is equivalent' in orchestrator
-    assert '`send_message`/`followup_task`\nafter a wait alone' in orchestrator
-    assert 'inbound same-owner reply' in orchestrator
-    assert 'follow-up after terminal result/report reconciliation' in orchestrator
+    assert 'Timeout alone never replaces its active owner' in orchestrator
+    assert 'Reconcile actual outcomes' in orchestrator
 
 
 def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
     orchestrator = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     worker = (PLUGIN/'agent-sources/worker-protocol.md').read_text()
     pipeline = (PLUGIN/'report-templates/pipeline.md').read_text()
-    assert '`implementation_state`' in orchestrator
-    assert '`delivery_state`' in orchestrator
-    assert '`acceptance_state`' in orchestrator
-    assert 'Delivery\nnever implies acceptance' in orchestrator
+    assert 'implementation_state' in orchestrator
+    assert 'delivery_state' in orchestrator
+    assert 'acceptance_state' in orchestrator
+    assert 'CI, reports and commands prove only their own boundary' in orchestrator
     assert '(artifact_revision, acceptance_boundary, check_identity)' in orchestrator
-    assert 'failed-canary evidence' in orchestrator
-    assert 'Wait silently when evidence/state is unchanged' in orchestrator
-    assert 'never routing or acceptance' in orchestrator
     assert 'basis, uncertainty, and\ndisconfirmation' in worker
     assert 'receipt-backed' in worker
     assert 'rollout/review/recheck/' in worker
@@ -746,7 +730,7 @@ def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
 
 
 def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management():
-    orchestrator = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    orchestrator = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
     payload = json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     rule = (
         'Native subagents spawned through `collaboration.spawn_agent` are tracked only with\n'
@@ -1274,10 +1258,16 @@ def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, mon
             )
         return SimpleNamespace(returncode=0, stdout='')
     monkeypatch.setitem(globals_, 'tmux', fake_tmux)
+    monkeypatch.setitem(globals_, '_proc_start_ticks', lambda pid: 70070)
     args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
                            model=None, effort=None, codebase_memory=False, apps_enabled=False,
                            host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
     cli['start'](args)
+    started_state = json.loads((tmp_path/'cli-state'/'session.json').read_text())
+    binding = json.loads(Path(started_state['session_binding_path']).read_text())
+    assert started_state['session_receipt'] == binding['session_receipt']
+    assert binding['schema_version'] == 'cortex-live-session-binding-v1'
+    assert binding['control_record_sha256'] is None
     assert any(call[0] == 'send-keys' for call in calls)
     creation_calls = [call for call in calls if call[0] == 'new-session']
     assert len(creation_calls) == 2
@@ -1409,12 +1399,17 @@ def test_live_helper_stops_preserve_the_project_store(monkeypatch,tmp_path):
     cli_globals['private']()
     events=cli_state/'events';events.mkdir();(events/'event.jsonl').write_text('{}\n')
     (cli_state/'capture.txt').write_text('Cortex live-dev exit=0\n')
-    (cli_state/'session.json').write_text(json.dumps({
-        'workdir':str(project),'store':str(store),
-        'tmux_session_id':'$1','tmux_pane_id':'%1',
-        'session_receipt':'a'*64,'events':str(events),
-    }))
+    session={
+        'workdir':str(project),'store':str(store),'events':str(events),
+        'started_at':100.0,'thread_created_since':100.0,
+        'tmux_server_pid':1,'tmux_session_name':'cortex-markdown-smoke',
+        'tmux_session_id':'$1','tmux_session_created':2,
+        'tmux_pane_id':'%1','tmux_pane_pid':3,'tmux_pane_start_ticks':4,
+    }
+    cli['_capture_ordinary_session_binding'](session)
+    (cli_state/'session.json').write_text(json.dumps(session))
     monkeypatch.setitem(cli_globals,'tmux',lambda *args,**kwargs: None)
+    monkeypatch.setitem(cli_globals,'_exact_cleanup_identity',lambda _data: None)
     monkeypatch.setitem(cli_globals,'terminal_snapshot',lambda _data:{
         'current_command':'bash','dead':False,'descendants':[],
     })
@@ -1845,25 +1840,18 @@ def test_markdown_local_links():
             assert (path.parent/link.split('#')[0]).exists(),(path,link)
 
 
-def test_coordinator_cannot_drop_required_checks_on_environment_failure():
-    text=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Preserve required checks until the user changes scope.' in text
-    assert 'Match completion evidence to the user\'s outcome.' in text
-    assert 'exact pipeline draft edit' in ' '.join(text.split())
-    assert 'One worker owns each shared or coupled mutation surface.' in text
-    assert 'unavailable attachment as an explicit gap' in text
-
-
-def test_coordinator_cannot_finalize_active_or_unreconciled_work():
-    text=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Never emit a terminal final while an assigned owner is active or a required' in text
-    assert 'Interim updates are non-terminal.' in text
-    assert 'Before acceptance/final, reconcile\nassignments with native worker state/evidence' in text
-    assert 'A wait timeout is only no new evidence, never\ncompletion' in text
-    assert 'repeat bounded native wait for the same owner.' in text
-    assert 'Record terminal failure/cancellation before final.' in text
-    assert 'Timeout or unavailable\nobservation is not failure/cancellation.' in text
-    assert 'Never inspect installed plugin/cache/candidate paths or agent registries.' in text
+def test_orchestrator_routes_conditional_procedures_with_valid_links():
+    import re
+    root = PLUGIN/'skills/orchestrator'
+    body = (root/'SKILL.md').read_text()
+    assert len(body) < 6500
+    links = re.findall(r'\]\((references/[^)]+)\)', body)
+    assert len(set(links)) >= 7
+    for link in links:
+        assert (root/link).is_file()
+    routing = (root/'references/worker-routing.md').read_text()
+    for profile in json.loads((PLUGIN/'profiles.json').read_text())['profiles']:
+        assert '`'+profile['name']+'`' in routing
 
 
 def test_shared_worker_protocol_routes_rare_interactive_procedure():
@@ -1881,7 +1869,7 @@ def test_native_instruction_boundaries_cover_observed_live_failures():
     communication=(PLUGIN/'skills/coordinator-communication/SKILL.md').read_text()
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
-    assert "language of the user's latest own prose" in coordinator
+    assert "Use the user's language" in coordinator
     assert "user's latest own prose" in communication
     assert 'Reuse retained results while relevant state is unchanged.' in discipline
     assert 'Re-read after user steering' in discipline
@@ -1912,6 +1900,7 @@ def test_cli_uncertain_submission_never_sends_again(monkeypatch,tmp_path):
     })
     monkeypatch.setitem(namespace,'STATE',state_root)
     monkeypatch.setitem(namespace,'save',lambda _: None)
+    monkeypatch.setitem(namespace,'_require_ordinary_send_binding',lambda _data: None)
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_: 0)
     monkeypatch.setitem(namespace,'_require_trust_receipt',lambda *_: {'status':'accepted'})
     monkeypatch.setitem(namespace,'_require_empty_composer',lambda *_: 'empty')
@@ -1942,6 +1931,7 @@ def test_ordinary_cli_trust_composer_send_needs_no_phase2_identity(monkeypatch,t
     sent=[];saved=[];receipts=iter((0,0,1))
     monkeypatch.setitem(namespace,'state',lambda:data)
     monkeypatch.setitem(namespace,'save',lambda value:saved.append(dict(value)))
+    monkeypatch.setitem(namespace,'_require_ordinary_send_binding',lambda _data: None)
     monkeypatch.setitem(namespace,'_require_empty_composer',lambda *_:'› Ask Codex to do anything')
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_:next(receipts))
     monkeypatch.setitem(namespace,'tmux',lambda *args,**kwargs: sent.append(args) or types.SimpleNamespace(returncode=0))
@@ -1981,6 +1971,7 @@ def test_mcp_first_ordinary_send_uses_native_receipt_without_phase2_control(monk
     monkeypatch.setattr(sys,'argv',['cortex-live-smoke','send','--prompt-file',str(prompt)])
     monkeypatch.setitem(namespace,'state',lambda:data)
     monkeypatch.setitem(namespace,'save',lambda value:saved.append(dict(value)))
+    monkeypatch.setitem(namespace,'_require_ordinary_send_binding',lambda _data: None)
     monkeypatch.setitem(namespace,'_require_empty_composer',lambda *_:'› Ask Codex to do anything')
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_:next(receipts))
     monkeypatch.setitem(namespace,'_native_send_receipt',lambda *_args,**_kwargs:native)

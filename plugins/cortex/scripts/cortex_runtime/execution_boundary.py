@@ -60,6 +60,7 @@ COMMAND_FIELDS = frozenset({"cmd", "command", "chars"})
 CONTROL = frozenset({";", "&&", "||", "|", "<", ">", ">>", "<<", "&", "(", ")"})
 ACTIVE_SKILL_READ_CAPABILITY = "cortex.skill.read"
 _SKILL_READ_MAX_LINES = 4000
+_SKILL_READ_MAX_BYTES = 256 * 1024
 _REGISTERED_WORKER_SKILL_SLUGS = frozenset({
     "accessibility-auditor", "accessibility-fixer", "architect", "backend-dev",
     "build-verification", "code-reviewer", "data-engineer", "database-architect",
@@ -104,31 +105,54 @@ def active_bundled_skill_read(tool: str, tool_input, *, role: str,
     cache probe.  No directory, glob, alias, second operand, mutation, or
     unassigned worker profile qualifies.
     """
-    if tool != "exec_command" or role not in {"coordinator", "worker"}:
+    if tool not in {"exec_command", "Bash"} or role not in {"coordinator", "worker"}:
         return False
     if expected_skill is not None and (not isinstance(expected_skill, str) or not re.fullmatch(
             r"skills/(?:orchestrator|worker-[a-z][a-z-]*)/SKILL\.md", expected_skill)):
         return False
     command = tool_input.get("cmd", tool_input.get("command")) if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return False
+    # The installed interactive transport may wrap this one literal read in
+    # exactly one bash -lc envelope.  Unwrap only that three-token shape; a
+    # second shell, option, or command remains outside this exception.
+    outer_tokens = _tokens(command)
+    if (outer_tokens and len(outer_tokens) == 3
+            and outer_tokens[0] in {"bash", "/bin/bash"}
+            and outer_tokens[1] == "-lc" and outer_tokens[2]):
+        command = outer_tokens[2]
     if not isinstance(command, str) or any(mark in command for mark in ("\n", "$", "`", "*", "?", "[", "]", "{", "}", "|", ";", "&&", "||", ">", "<")):
         return False
     tokens = _tokens(command)
     if not tokens or any(token in CONTROL for token in tokens):
         return False
-    # One literal `sed -n 1,Np PATH` is bounded.  The selected full skill is
-    # still proven only by its end marker in the observed result.
-    if len(tokens) != 4 or tokens[0] != "sed" or tokens[1] != "-n":
+    # A literal cat of the single skill leaf is bounded by file size. A sed
+    # slice is bounded by line count. In both forms the selected full skill is
+    # proven only by the observed complete-result marker.
+    if len(tokens) == 2 and tokens[0] == "cat":
+        path_token = tokens[1]
+        max_bytes = _SKILL_READ_MAX_BYTES
+    elif len(tokens) == 4 and tokens[0] == "sed" and tokens[1] == "-n":
+        match = re.fullmatch(r"1,([1-9][0-9]{0,3})p", tokens[2])
+        if match is None or int(match.group(1)) > _SKILL_READ_MAX_LINES:
+            return False
+        path_token = tokens[3]
+        max_bytes = None
+    else:
         return False
-    match = re.fullmatch(r"1,([1-9][0-9]{0,3})p", tokens[2])
-    if match is None or int(match.group(1)) > _SKILL_READ_MAX_LINES:
-        return False
-    supplied = Path(tokens[3])
+    supplied = Path(path_token)
     if not supplied.is_absolute() or supplied.is_symlink() or supplied.name != "SKILL.md":
         return False
     try:
         resolved = supplied.resolve(strict=True)
     except (OSError, RuntimeError, ValueError):
         return False
+    if max_bytes is not None:
+        try:
+            if resolved.stat().st_size > max_bytes:
+                return False
+        except OSError:
+            return False
     root = _candidate_skill_root(resolved)
     if root is None:
         return False
@@ -423,6 +447,8 @@ def authorize_host_dispatch_envelope(envelope):
             if not tool.startswith("mcp__cortex__") or target_class != "cortex_api":
                 return _host_dispatch_denied("opaque_or_unknown_nested_operation")
             continue
+        if role == "coordinator" and operation_class == "workspace_observation" and target_class == "workspace":
+            continue
         if role != "worker":
             return _host_dispatch_denied("role_not_granted", CAPABILITY_EXECUTE)
         expected = {
@@ -509,6 +535,25 @@ def authorize_pre_dispatch(tool: str, tool_input, *, actor_kind: str, role: str 
     if internal_host_access_denied(tool, tool_input, cwd=cwd, project_root=project_root):
         return {"allowed": False, "code": PERMISSION_DENIED,
                 "capability": CAPABILITY_INTERNAL, "reason": "internal_operand"}
+    if role == "coordinator" and tool == "read_file":
+        return {"allowed": True, "code": None, "capability": CAPABILITY_OBSERVE,
+                "reason": "coordinator_evidence_read"}
+    if role == "coordinator" and tool == "exec_command" and isinstance(tool_input, dict):
+        command = tool_input.get('cmd', tool_input.get('command'))
+        tokens = _tokens(command) if isinstance(command, str) else None
+        # Only literal project evidence reads. Shell operators and scripts do not
+        # become read-only merely because the first word looks like a reader.
+        if tokens and not any(c in command for c in '\n$`*?[]{}|;&><()'):
+            literal_read = (
+                len(tokens) == 2 and tokens[0] == 'cat' and not tokens[1].startswith('-')
+            ) or (
+                len(tokens) == 4 and tokens[:2] == ['sed', '-n']
+                and re.fullmatch(r'1,[1-9][0-9]{0,3}p', tokens[2]) is not None
+                and not tokens[3].startswith('-')
+            )
+            if literal_read:
+                return {"allowed": True, "code": None, "capability": CAPABILITY_OBSERVE,
+                        "reason": "coordinator_evidence_read"}
     if role != "worker":
         return {"allowed": False, "code": CAPABILITY_NOT_GRANTED,
                 "capability": required, "reason": "role_not_granted"}

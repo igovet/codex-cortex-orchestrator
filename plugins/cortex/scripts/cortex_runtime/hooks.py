@@ -16,6 +16,7 @@ import uuid
 from .contracts import StoreError
 from .execution_boundary import authorize_pre_dispatch, capabilities_for_role
 from .hook_storage import HookStorage, fingerprint
+from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 EVENTS = frozenset({"UserPromptSubmit", "SessionStart", "SubagentStart", "PreCompact",
                     "PostCompact", "PostToolUse", "PreToolUse", "SubagentStop", "Stop",
@@ -378,6 +379,12 @@ def restoration(snapshot):
              "resource owners and unfinished actions. The coordinator decides interpretation and completion."]
     pipeline = snapshot["pipeline"]
     lines.append("Pipeline report: " + (pipeline["id"] if pipeline else "not yet published") + ".")
+    governance = snapshot.get("governance", {})
+    if governance.get("status") == "selected":
+        lines.append(f"Current advisory governance: {governance['mode']}; rationale report: {governance['report_id']}. "
+                     "Restore this depth before selecting work and verification; it grants no permissions or acceptance.")
+    else:
+        lines.append("Advisory governance is unset or unavailable. Use the user's requirements and observed risk; do not stop work for this diagnostic.")
     lines.append(f"Current source revision: {snapshot['source_revision']}; change cursor sequence: {snapshot['change_sequence']}.")
     lines.append(f"Turns awaiting authoritative native source capture: {snapshot['pending_source_turns']}. "
                  "A pending turn is a capture gap, not a count or interpretation of messages.")
@@ -620,6 +627,17 @@ class HookHandler:
                         "observed_events_flushed": True}
         else:
             metadata = {"boundary": event, "observed_events_flushed": True}
+        # Cortex is observational: never turn a policy finding into a host veto.
+        # Preserve the proposed decision for diagnostics without claiming that
+        # an action was prevented or that the host granted permission.
+        decision_output=output.get("hookSpecificOutput", {})
+        if decision_output.get("permissionDecision") == "deny":
+            reason=decision_output.get("permissionDecisionReason", "Cortex policy finding")
+            output={"hookSpecificOutput":{"hookEventName":event,
+                    "additionalContext":"Cortex advisory diagnostic: "+reason+
+                    " This is not a runtime restriction; continue host-permitted work."}}
+            metadata["runtime_enforcement"]="none"
+            self.observation.update(outcome="diagnostic", runtime_enforcement="none")
         metadata.update(actor_scope="session" if unknown_actor else "actor",
                         actor_thread_id=None if unknown_actor else context["thread_id"],
                         parent_session_id=session, binding_origin=context["binding_origin"])
@@ -635,8 +653,8 @@ class HookHandler:
         return output
 
 
-def observe(row):
-    """Optional private hook-only stream; never claim model/tool evidence."""
+def _write_observation(row):
+    """Write one optional private hook-only stream row."""
     location = os.environ.get("CORTEX_OBSERVATION_DIR")
     if not location:
         return
@@ -657,6 +675,16 @@ def observe(row):
             os.write(fd, (json.dumps(dict(row, timestamp_ns=time.time_ns()), sort_keys=True) + "\n").encode())
     finally:
         os.close(fd)
+
+
+def observe(row, *, diagnostic_stream=None):
+    """Optional private hook-only stream; observation failure is non-blocking."""
+    return run_passive_diagnostic(
+        lambda: _write_observation(row),
+        operation="observation",
+        emit=lambda finding: emit_bounded_diagnostic(
+            diagnostic_stream if diagnostic_stream is not None else sys.stderr, finding),
+    )
 
 
 def main(stdin=None, stdout=None, stderr=None):
@@ -699,12 +727,21 @@ def main(stdin=None, stdout=None, stderr=None):
         row = dict(handler.observation if handler else row, outcome="failed",
                    error_type=error_class, error_class=error_class,
                    error_stage=_failure_stage(payload if 'payload' in locals() else None))
-        stderr.write("Cortex hook failed; the event was not fully recorded (" + error_class + ").\n")
+        # Failure reporting is itself passive logging. Preserve the real hook
+        # failure/exit code while keeping a broken stderr stream non-blocking.
+        # The human-readable failure line is itself the best-effort emitter.
+        # Use a value-free passive trigger so even StoreError/PermissionError
+        # from a broken stderr stream cannot escape this legacy return path.
+        run_passive_diagnostic(
+            lambda: (_ for _ in ()).throw(RuntimeError("hook failure logging")),
+            operation="logging",
+            emit=lambda _finding: stderr.write(
+                "Cortex hook failed; the event was not fully recorded (" + error_class + ").\n"),
+        )
         exit_code = 1
     row["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
-    try:
-        observe(row)
-    except Exception:
-        stderr.write("Cortex hook observation receipt could not be saved.\n")
-        exit_code = 1
+    # This stream is passive telemetry, never the hook's authorization response.
+    # Its failure must not change the underlying hook outcome or turn a logging
+    # problem into a host decision.
+    observe(row, diagnostic_stream=stderr)
     return exit_code

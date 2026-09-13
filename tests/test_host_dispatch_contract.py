@@ -18,6 +18,19 @@ from cortex_runtime.execution_boundary import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize('command,allowed', [
+    ('cat README.md', True), ('sed -n 1,40p README.md', True),
+    ('cat README.md; touch changed', False), ('sed -i 1d README.md', False),
+    ('cat /tmp/.codex/cortex/private.md', False), ('cat $(touch changed)', False),
+])
+def test_coordinator_can_read_evidence_but_cannot_mutate(command, allowed, tmp_path):
+    result = authorize_pre_dispatch(
+        'exec_command', {'cmd': command}, actor_kind='native_coordinator',
+        role='coordinator', task_id='task', assignment_id='bound', route='native_hook',
+        capabilities=frozenset(), cwd=str(tmp_path), project_root=str(tmp_path))
+    assert result['allowed'] is allowed
+
+
 def envelope(*, phase="pre_task", calls=None, **changes):
     value = {
         "tool": "functions.exec",
@@ -173,6 +186,41 @@ def test_exact_manifest_bound_active_skill_read_precedes_private_operand_deny(tm
         open_sessions=[], open_cells=[])
     assert audit["evidence_valid"] is False and audit["score_eligible"] is False
     assert audit["evidence_integrity_invalidators"][0]["reason"] == "host_pre_dispatch_bypassed"
+
+
+def test_worker_skill_read_accepts_one_bounded_cat_or_bash_envelope_and_rejects_neighbors(tmp_path):
+    root = tmp_path / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "candidate"
+    skill = root / "skills" / "worker-backend-dev" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("complete worker skill\n")
+    manifest = root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name":"cortex","version":"1.15.9+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    context = dict(actor_kind="native_worker", role="worker", task_id="task", assignment_id="bound",
+                   route="native_hook", capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path),
+                   project_root=str(tmp_path), expected_skill="skills/worker-backend-dev/SKILL.md")
+    commands = (
+        {"cmd": f"cat {skill}"},
+        {"cmd": f"sed -n 1,4000p {skill}"},
+        {"cmd": f"bash -lc 'cat {skill}'"},
+        {"cmd": f"/bin/bash -lc 'sed -n 1,80p {skill}'"},
+    )
+    for tool_input in commands:
+        decision = authorize_pre_dispatch("exec_command", tool_input, **context)
+        assert decision == {"allowed": True, "code": None,
+                            "capability": "cortex.skill.read", "reason": "exact_active_skill_read"}
+    for command in (
+        f"bash -lc 'bash -lc \\\"cat {skill}\\\"'",
+        f"cat {skill} {skill}",
+        f"cat {skill.parent}",
+        f"cat {skill.with_name('README.md')}",
+        f"cat {skill} && echo extra",
+        f"cat {skill} > {tmp_path / 'copy'}",
+        f"sed -n 1,4001p {skill}",
+        f"bash -c 'cat {skill}'",
+    ):
+        decision = authorize_pre_dispatch("exec_command", {"cmd": command}, **context)
+        assert decision["allowed"] is False and decision["code"] == PERMISSION_DENIED
 
 
 def test_worker_execution_is_not_pre_dispatch_denied_for_missing_skill_receipt():

@@ -92,9 +92,12 @@ observation only with a complete receipt. It never authorizes filters, queries, 
 content extraction, mutation, nested calls, or mixed wrappers.
 
 The private-path boundary evaluates the manifest-bound active skill exception before
-the general cache deny. It permits only one bounded literal `sed` read of the exact
-active coordinator `skills/orchestrator/SKILL.md`, or a native-child worker's exact
-registered `skills/worker-*/SKILL.md`; directories, globs, aliases, other profiles,
+the general cache deny. It permits only one bounded literal `sed` or `cat` read of the
+exact active coordinator `skills/orchestrator/SKILL.md`, or a native-child worker's
+exact registered `skills/worker-*/SKILL.md`; the worker read may use one literal
+`bash -lc` envelope whose sole payload is reparsed by that same grammar. Direct
+dispatch therefore reaches the registered leaf and can produce its complete result
+receipt; directories, globs, aliases, other profiles, nested shells, extra commands,
 registries, runtime/state files, and every mutation remain denied. A complete result
 receipt is distinct from a server event. Where the current host has no separate event,
 observational evidence requires that result receipt plus one later non-replayed

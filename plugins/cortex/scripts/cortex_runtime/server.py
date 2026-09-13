@@ -15,6 +15,7 @@ from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP
 from .host_source import original_request, pending_requests
 from .store import Store, private_directory
 from .project_storage import ProjectResolver, project_store_directory
+from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 PLUGIN = Path(__file__).resolve().parents[2]
 VERSION = json.loads((PLUGIN / '.codex-plugin/plugin.json').read_text())['version']
@@ -55,7 +56,8 @@ def safe_observation_fields(operation,arguments,result=None):
                            page='continuation' if arguments.get('cursor') else 'start')
     if operation=='read_draft':return common|dict(
         draft_id=arguments.get('draft_id'),page='continuation' if arguments.get('cursor') else 'start')
-    if operation=='create_draft':return common|dict(template=arguments.get('template'))
+    if operation=='create_draft':return common|dict(template=arguments.get('template'),
+                                                   draft_id=result.get('draft_id'))
     if operation=='write_report':
         return common|dict(draft_id=arguments.get('draft_id'),report_id=result.get('report_id'),
                            summary_characters=len(arguments.get('summary','')))
@@ -63,35 +65,41 @@ def safe_observation_fields(operation,arguments,result=None):
     return common
 
 
-def observe(operation, outcome, replayed=False, meta=None, arguments=None, result=None):
-    """Optional bounded passive observation; no payloads, hooks or workflow checks."""
+def _write_observation(operation, outcome, replayed=False, meta=None, arguments=None, result=None):
+    """Write one optional bounded passive observation."""
     location = os.environ.get('CORTEX_OBSERVATION_DIR')
     if not location:
         return
-    try:
-        root = private_directory(location)
-        path = root / f'{os.getpid()}.jsonl'
-        row = dict(pid=os.getpid(), time_ns=time.time_ns(), operation=operation,
-                   outcome=outcome, replayed=replayed, version=VERSION,
-                   catalogue_digest=CATALOGUE_DIGEST)
-        if operation == 'initialize':
-            row['plugin_path'] = str(PLUGIN)
-        elif operation in BY_NAME:
-            try:
-                thread,parent=thread_context(meta)
-                row.update(thread_id=thread,parent_thread_id=parent,
-                           context_source='MCP _meta',turn_metadata_type='object')
-            except StoreError as exc:
-                row['context_error']=str(exc)
-            row.update(safe_observation_fields(operation,arguments,result))
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    root = private_directory(location)
+    path = root / f'{os.getpid()}.jsonl'
+    row = dict(pid=os.getpid(), time_ns=time.time_ns(), operation=operation,
+               outcome=outcome, replayed=replayed, version=VERSION,
+               catalogue_digest=CATALOGUE_DIGEST)
+    if operation == 'initialize':
+        row['plugin_path'] = str(PLUGIN)
+    elif operation in BY_NAME:
         try:
-            if os.fstat(fd).st_size < 256_000:
-                os.write(fd, (json.dumps(row)+'\n').encode())
-        finally:
-            os.close(fd)
-    except (OSError, StoreError):
-        pass  # Observation never governs execution or changes a committed write.
+            thread,parent=thread_context(meta)
+            row.update(thread_id=thread,parent_thread_id=parent,
+                       context_source='MCP _meta',turn_metadata_type='object')
+        except StoreError as exc:
+            row['context_error']=str(exc)
+        row.update(safe_observation_fields(operation,arguments,result))
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        if os.fstat(fd).st_size < 256_000:
+            os.write(fd, (json.dumps(row)+'\n').encode())
+    finally:
+        os.close(fd)
+
+
+def observe(operation, outcome, replayed=False, meta=None, arguments=None, result=None):
+    """Optional bounded passive observation; failures never alter request outcome."""
+    return run_passive_diagnostic(
+        lambda: _write_observation(operation, outcome, replayed, meta, arguments, result),
+        operation="observation",
+        emit=lambda finding: emit_bounded_diagnostic(sys.stderr, finding),
+    )
 
 
 def recover_gateway_if_explicitly_enabled() -> None:

@@ -18,6 +18,7 @@ import threading
 import uuid
 
 from .contracts import StoreError, validate
+from .governance import governance_snapshot
 
 APPLICATION_ID = 1129467218
 SCHEMA = '''
@@ -406,7 +407,8 @@ class Store:
                         db.execute("UPDATE binding_receipts SET state=?,updated_at=? WHERE thread_id IN (SELECT thread_id FROM thread_bindings WHERE task_id=?)",(args["state"],self._now(),task))
                     pending_thread=parent or thread
                     pending_turns=db.execute("SELECT count(*) FROM hook_pending_sources WHERE thread_id=?",(pending_thread,)).fetchone()[0]
-                    result.update(binding=self._binding(db,thread),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns))
+                    result.update(binding=self._binding(db,thread),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns),
+                                  governance=governance_snapshot(db,task))
                     if operation=="list_reports":
                         result.update(self._discovery(db,task,thread,args))
                     db.commit()

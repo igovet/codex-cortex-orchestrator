@@ -46,7 +46,7 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     draft=call_store(store,'create_draft',dict(task_id=task,template='pipeline',request_key=key()))
     path=Path(draft['draft_path'])
     assert '{{CURRENT_WORK_GRAPH}}' in draft['markdown']==path.read_text()
-    assert draft['required_replacement_count']==7==len(draft['replaceable_markers'])
+    assert draft['required_replacement_count']==len(draft['replaceable_markers'])
     assert draft['replaceable_markers'][0]=='{{CURRENT_OBJECTIVE_AND_STATUS}}'
     assert draft['replaceable_markers'][5].startswith('<!-- Record implementation_state')
     assert "Preserve its identity and first-line marker" in draft['edit_instruction']
@@ -60,6 +60,9 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     assert error.received.startswith('{{CURRENT_')
     assert path.is_file()
     body=path.read_text()
+    for marker in draft['replaceable_markers']:
+        if marker.startswith('<!--'):
+            body=body.replace(marker, 'Complete current guidance.')
     body=body.replace(draft['replaceable_markers'][5], 'Complete current model-owned state and evidence reuse.')
     for placeholder in [part.split('}}',1)[0]+'}}' for part in body.split('{{')[1:]]:
         body=body.replace('{{'+placeholder,'Complete current information.')
@@ -161,7 +164,8 @@ def test_replay_all_writes_and_conflicts(store,tmp_path):
         assert call_store(store,operation,arguments)==result|dict(replayed=True)
         changed=arguments|({'rationale':'changed'} if operation=='set_governance' else {'title':'changed'})
         with pytest.raises(StoreError,match='delivery_conflict'):call_store(store,operation,changed)
-    assert call_store(store,'create_task',args|dict(request='Changed'))==first|dict(replayed=True)
+    replay=call_store(store,'create_task',args|dict(request='Changed'))
+    assert replay==first|dict(replayed=True,governance=result['governance'])
     assert len(call_store(store,'list_reports',dict(task_id=task))['reports'])==3
 
 

@@ -147,6 +147,31 @@ def test_coordinator_can_read_needed_evidence_pages_and_user_sources():
     assert 'oversized_report_page' in flags([{**read, 'requested_limit': 4001}])
     assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"sed -n 1,80p user-source.txt"}', 'coordinator', '/tmp/project')
     assert 'coordinator_forbidden_tool' in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"python3 change.py"}', 'coordinator', '/tmp/project')
+    assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags'](
+        'exec_command', '{"cmd":"cmp -- EXPECTED.txt RESULT.md"}', 'coordinator', '/tmp/project')
+
+
+def test_compound_source_reads_are_not_mistaken_for_mutations():
+    check=OBSERVER['coordinator_source_read']
+    for command in (
+        "sed -n '1,240p' README.md && printf '\\n--- input ---\\n' && sed -n '1,240p' EXPECTED.txt && printf 'files' && rg --files",
+        "sed -n '1,240p' pipeline.md && rg -n '\\{\\{|<!--' pipeline.md || true",
+        "rg --files | head -80",
+        "cat README.md; cmp -- EXPECTED.txt RESULT.md",
+        "cmp -- EXPECTED.txt RESULT.md; cmp_status=$?; sha256sum EXPECTED.txt RESULT.md; printf 'git status:\\n'; git status --short; exit $cmp_status",
+    ):
+        assert check('exec_command',json.dumps({'cmd':command})),command
+    for command in (
+        'cat README.md && touch changed', 'cat README.md > changed',
+        'cat README.md &', 'cat $(touch changed)', 'cat `touch changed`',
+        "sed -n '1p;w changed' README.md", "sed -n '1e touch changed' README.md",
+        "sed -i '1p' README.md", 'rg --pre=touch README.md',
+        'rg --pre touch README.md', 'cat README.md\ntouch changed',
+        'cmp a b; status=$?; touch changed; exit $status',
+        'cmp a b; status=$?; cat README.md; exit $other',
+        'cmp a b; PATH=$?; cat README.md; exit $PATH',
+    ):
+        assert not check('exec_command',json.dumps({'cmd':command})),command
 
 
 def test_one_coordinator_private_probe_retains_two_policy_labels_on_one_operation(tmp_path):

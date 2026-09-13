@@ -69,8 +69,8 @@ python3 scripts/phase2_cli_runner.py \
   --baseline-commit 17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9 \
   --baseline-version 1.15.6+codex.sha256.cc786ae2fbd04cf1 \
   --baseline-payload-sha256 cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698 \
-  --candidate-version 1.15.9+codex.sha256.90fddea21bf510df \
-  --candidate-payload-sha256 90fddea21bf510df773b1a5a4075550ca13f2fbcd5e1ff2137b4d700f26a4e8d \
+  --candidate-version 1.15.9+codex.sha256.07c3aeae551a990e \
+  --candidate-payload-sha256 07c3aeae551a990e8fe2ac6471705deeaa431841e13351e8c475439c653a33d6 \
   --coordinator-model gpt-5.6-luna --coordinator-effort high \
   --worker-model gpt-5.6-luna --worker-effort medium \
   --cell-timeout-seconds 1800 --wait-timeout-ms 600000
@@ -213,6 +213,16 @@ adapter rejects `begin-cell` before that completed transition and rejects any
 later rotation of the receipt or its bound pane fields. The required order is
 therefore exactly `start` (ready-for-begin), `begin-cell`, `send`; `begin-cell` is not a
 pre-launch operation.
+
+Direct ordinary `cortex-live-smoke start` uses the same owner-bound tmux and
+pane-start identity, but writes the separate owner-private
+`cortex-live-session-binding-v1` receipt because ordinary runs have no Phase 2
+control record. Its opaque session receipt is printed once at startup and is
+revalidated before ordinary send input and again before ordinary pre-stop
+sealing; ordinary send also requires the current exact tmux
+server/session/pane/PID/start-tick identity. It does not authorize a Phase 2
+cell or relax any adapter gate. Cross-mode, stale, foreign, missing, or tampered
+ordinary receipts fail before prompt submission.
 
 The adapter records a new one-time nonce with the current canonical workdir,
 project store, session timestamps, session receipt, control hash, and arm in the

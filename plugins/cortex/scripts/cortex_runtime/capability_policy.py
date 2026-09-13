@@ -8,7 +8,10 @@ filesystem, process, or egress enforcement.
 from __future__ import annotations
 
 import hashlib
+from itertools import islice
 import json
+import math
+from collections.abc import Mapping
 import re
 from pathlib import Path
 
@@ -53,6 +56,17 @@ _SEMANTIC_IDENTITY_KEYS = _BINDING_KEYS | frozenset({
 _IDENTITY_OPERATION_KEYS = frozenset({"namespace", "verb", "resource_class", "scope", "effect", "version"})
 _IDENTITY_RESOURCE_KEYS = frozenset({"resource_class", "scope"})
 _POLICY_LABELS = frozenset({"semantic_policy", "path_boundary", "evidence_binding"})
+ADVISORY_EVIDENCE_FIELDS = (
+    "delivery_state", "acceptance_boundary", "causal_model_delta",
+    "predecessor_rollout", "retry_discriminator", "receipt_references",
+)
+_ADVISORY_MAX_DEPTH = 3
+_ADVISORY_MAX_ITEMS = 32
+_ADVISORY_MAX_TEXT = 512
+_ADVISORY_MAX_INTEGER = (1 << 53) - 1
+_ADVISORY_MAX_FLOAT = 1e308
+_REVIEW_IDENTITY_FIELDS = ("artifact_revision", "acceptance_boundary", "check_identity")
+_REVIEW_MAX_CHECKS = 128
 
 
 def manifest_path() -> Path:
@@ -275,15 +289,173 @@ def quiet_wait_delta(previous: dict | None, current: dict) -> dict | None:
     return {"state": current["state"], "evidence_cursor": current["evidence_cursor"]}
 
 
-def advisory_replanning_metadata(*, failed_canary=None, review=None, cost=None) -> dict:
-    """Bounded null-safe metadata: informational only, never a gate or route choice."""
-    def bounded(value):
-        return value if isinstance(value, (str, int, float, bool)) or value is None else None
+def _bounded_advisory_value(value, depth=0):
+    """Copy small JSON-like advisory values without retaining unbounded model data."""
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        return value if abs(value) <= _ADVISORY_MAX_INTEGER else None
+    if type(value) is float:
+        return value if math.isfinite(value) and abs(value) <= _ADVISORY_MAX_FLOAT else None
+    if isinstance(value, str):
+        return value[:_ADVISORY_MAX_TEXT]
+    if depth >= _ADVISORY_MAX_DEPTH:
+        return None
+    if isinstance(value, dict):
+        result = {}
+        for key, item in islice(value.items(), _ADVISORY_MAX_ITEMS):
+            if not isinstance(key, str) or not key or len(key) > _ADVISORY_MAX_TEXT:
+                continue
+            result[key[:_ADVISORY_MAX_TEXT]] = _bounded_advisory_value(item, depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_bounded_advisory_value(item, depth + 1)
+                for item in islice(value, _ADVISORY_MAX_ITEMS)]
+    return None
+
+
+def _has_advisory_value(value):
+    """Treat null/empty values as absent while preserving false and zero as data."""
+    return value is not None and value != "" and value != [] and value != {} and value != ()
+
+
+def _has_justification(value):
+    """Recognize a non-empty fresh-evidence or rerun-reason explanation."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list, tuple, set)):
+        return bool(value)
+    return value is not None and value is not False and value != 0
+
+
+def structured_advisory_evidence(fields=None, **values) -> dict:
+    """Return model-authored evidence fields and retained warning metadata.
+
+    This is deliberately a document/guidance helper rather than a write contract.
+    Missing fields are reported as advisory diagnostics and cannot affect routing,
+    acceptance, or command status.
+    """
+    # Select six allowlisted keys directly. In particular, do not call
+    # ``dict(fields)``: a caller may provide a very large mapping, and this
+    # helper's boundedness must apply before any top-level materialization.
+    supplied = {}
+    if isinstance(fields, Mapping):
+        for key in ADVISORY_EVIDENCE_FIELDS:
+            try:
+                supplied[key] = fields[key]
+            except (KeyError, IndexError, TypeError):
+                pass
+    for key in ADVISORY_EVIDENCE_FIELDS:
+        if key in values and values[key] is not None:
+            supplied[key] = values[key]
+    result = {key: _bounded_advisory_value(supplied.get(key))
+              for key in ADVISORY_EVIDENCE_FIELDS}
+    missing = [key for key in ADVISORY_EVIDENCE_FIELDS
+               if not _has_advisory_value(result[key])]
+    result.update(
+        missing_fields=missing,
+        diagnostics=[
+            {"code": "missing_advisory_evidence_field", "field": key,
+             "severity": "advisory", "advisory_only": True}
+            for key in missing
+        ],
+        advisory_only=True,
+        automatic_routing=False,
+        acceptance_gate=False,
+    )
+    return result
+
+
+def _review_identity(value):
+    if not isinstance(value, dict):
+        return None
+    identity = []
+    for key in _REVIEW_IDENTITY_FIELDS:
+        item = value.get(key)
+        # Identity comparison must stay exact. Oversized or structured values
+        # are not truncated into a possible false duplicate; they are simply
+        # outside this bounded diagnostic's comparison surface.
+        if type(item) is not str or not item or len(item) > _ADVISORY_MAX_TEXT:
+            return None
+        identity.append(item)
+    return tuple(identity)
+
+
+def duplicate_review_reuse_diagnostic(previous_checks, current_check, *,
+                                      fresh_evidence=None, rerun_reason=None,
+                                      max_checks=_REVIEW_MAX_CHECKS) -> dict | None:
+    """Detect one exact review/verification reuse without turning it into a gate.
+
+    Only complete identities are comparable. The scan is capped at 128 records
+    (and a caller may choose a smaller bound); malformed, null, justified, and
+    nonmatching entries are ignored. The returned finding is informational only.
+    """
+    if type(max_checks) is not int or max_checks < 1:
+        return None
+    identity = _review_identity(current_check)
+    if identity is None or _has_justification(fresh_evidence) or _has_justification(rerun_reason):
+        return None
+    if isinstance(previous_checks, dict):
+        candidates = [previous_checks]
+    elif isinstance(previous_checks, (list, tuple)):
+        candidates = islice(previous_checks, min(max_checks, _REVIEW_MAX_CHECKS))
+    else:
+        return None
+    if not any(_review_identity(candidate) == identity for candidate in candidates):
+        return None
     return {
-        "failed_canary": bounded(failed_canary),
-        "review": bounded(review),
-        "cost": bounded(cost),
+        "code": "duplicate_review_reuse",
+        "identity": dict(zip(_REVIEW_IDENTITY_FIELDS, identity)),
+        "severity": "advisory",
         "advisory_only": True,
         "automatic_routing": False,
         "acceptance_gate": False,
     }
+
+
+def advisory_replanning_metadata(*, failed_canary=None, review=None, cost=None,
+                                 evidence=None, delivery_state=None,
+                                 acceptance_boundary=None,
+                                 causal_model_delta=None,
+                                 predecessor_rollout=None,
+                                 retry_discriminator=None,
+                                 receipt_references=None,
+                                 previous_checks=None, current_check=None,
+                                 fresh_evidence=None, rerun_reason=None,
+                                 incident_decision=None, incident_trace=None) -> dict:
+    """Bounded null-safe metadata: informational only, never a gate or route choice."""
+    result = {
+        # Keep the public legacy keys and ordinary scalar values intact while
+        # applying the same bounded, strict-JSON-safe normalization used by the
+        # structured evidence extension, including nested containers.
+        "failed_canary": _bounded_advisory_value(failed_canary),
+        "review": _bounded_advisory_value(review),
+        "cost": _bounded_advisory_value(cost),
+        "advisory_only": True,
+        "automatic_routing": False,
+        "acceptance_gate": False,
+    }
+    direct_values = {
+        "delivery_state": delivery_state,
+        "acceptance_boundary": acceptance_boundary,
+        "causal_model_delta": causal_model_delta,
+        "predecessor_rollout": predecessor_rollout,
+        "retry_discriminator": retry_discriminator,
+        "receipt_references": receipt_references,
+    }
+    if evidence is not None or any(value is not None for value in direct_values.values()):
+        overrides = {key: value for key, value in direct_values.items()
+                     if value is not None}
+        result["evidence"] = structured_advisory_evidence(evidence, **overrides)
+    duplicate = duplicate_review_reuse_diagnostic(
+        previous_checks, current_check, fresh_evidence=fresh_evidence,
+        rerun_reason=rerun_reason,
+    )
+    if duplicate is not None:
+        result["diagnostics"] = [duplicate]
+    if incident_decision is not None:
+        result['incident_decision'] = _bounded_advisory_value(incident_decision)
+    if incident_trace is not None:
+        from .incident_quality import evaluate_trace
+        result['incident_quality'] = evaluate_trace(incident_trace)
+    return result

@@ -30,6 +30,7 @@ COMMON_OBSERVER_PATH=None
 POST_COMMIT_FAILURE_SCHEMA='phase2-cli-post-commit-launch-failure-v1'
 LAUNCH_TRANSACTION_SCHEMA='phase2-cli-launch-transaction-v1'
 SESSION_BINDING_SCHEMA='phase2-cli-session-binding-v1'
+ORDINARY_SESSION_BINDING_SCHEMA='cortex-live-session-binding-v1'
 SEND_RECEIPT_SCHEMA='phase2-cli-native-user-turn-receipt-v1'
 TRUST_RECEIPT_SCHEMA='phase2-cli-trust-transition-v1'
 HOST_DISPATCH_ENVELOPE_CAPABILITY='functions-exec-pre-dispatch-v1'
@@ -41,19 +42,21 @@ PROC_ROOT=Path('/proc')
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
     'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
-    'gpt-5.6-luna with medium or high reasoning effort, except the explicitly '
-    'assigned senior-consultant may use gpt-5.6-sol or gpt-6-astra with low, '
-    'medium, or high effort; pass that model explicitly '
+    'gpt-5.6-luna with medium or high reasoning effort; pass that model explicitly '
     'when inherited context could preserve another model. Every opaque worker '
     'route must retain one attributable complete native skill attachment or exact '
     'advertised assigned worker-SKILL read receipt before any worker project action; '
-    'a coordinator read never satisfies it. The coordinator must not use '
-    'functions.exec, exec_command, terminal, or another shell route to inspect '
-    'installed plugin/cache/candidate paths or agent registries before or after '
-    'task creation. From the first '
-    'worker action, workers must not inspect those paths. Use one bounded '
+    'a coordinator read never satisfies it. Both roles may read their exact advertised '
+    'SKILL.md and its declared instruction references with bounded literal shell reads '
+    'and complete receipts. This does not permit directory scans or private '
+    'plugin/cache/candidate/registry probing. Discover deferred tools by exact name '
+    'or namespace only; for Cortex use text(ALL_TOOLS.filter(x => '
+    'x.name.startsWith("mcp__cortex__"))). Broad description searches can truncate. Use one bounded '
     'command per wrapper with complete exit/result receipt; nested success never '
-    'excuses truncation. '
+    'excuses truncation. For coordinator source inspection use a single literal '
+    'cat, sed -n, or rg command; do not combine commands with separators, pipes, '
+    'redirection, or banner printing. A wait timeout alone is not a reason to '
+    'message an active worker; continue waiting silently. '
     'For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
@@ -222,6 +225,13 @@ def _phase2_session_binding_path(receipt):
     return STATE/f'phase2-session-binding-{digest}-{receipt}.json'
 
 
+def _ordinary_session_binding_path(receipt):
+    """Return the owner-private binding path for an ordinary live session."""
+    if not isinstance(receipt,str) or not re.fullmatch(r'[0-9a-f]{64}',receipt):
+        raise RuntimeError('Ordinary session binding requires an exact session receipt')
+    return STATE/f'session-binding-{receipt}.json'
+
+
 def _phase2_send_receipt_path(data):
     control=data.get('phase2_control_sha256');receipt=data.get('session_receipt')
     if (not isinstance(control,str) or not re.fullmatch(r'[0-9a-f]{64}',control)
@@ -257,7 +267,69 @@ def _capture_phase2_session_binding(data):
              **fields,'session_receipt':receipt}
     _atomic_private_json(path,binding)
     data.update(phase2_control_sha256=PHASE2_CONTROL_SHA256,
-                lifecycle_status='started',session_receipt=receipt)
+                lifecycle_status='started',session_receipt=receipt,
+                session_binding_schema=SESSION_BINDING_SCHEMA,
+                session_binding_path=str(path))
+
+
+def _capture_ordinary_session_binding(data):
+    """Persist one owner-bound receipt without inventing a Phase 2 control."""
+    fields=_phase2_session_fields(data)
+    receipt=hashlib.sha256(json.dumps(fields,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    path=_ordinary_session_binding_path(receipt)
+    binding={'schema_version':ORDINARY_SESSION_BINDING_SCHEMA,
+             'control_record_sha256':None,
+             **fields,'session_receipt':receipt}
+    # O_EXCL in the immutable writer is the creation boundary.  Do not add a
+    # check-then-replace sequence here: a concurrent creator must either win
+    # with identical bytes or fail closed without being overwritten.
+    _immutable_private_json(path,binding)
+    data.update(lifecycle_status='started',session_receipt=receipt,
+                session_binding_schema=ORDINARY_SESSION_BINDING_SCHEMA,
+                session_binding_path=str(path))
+
+
+def _require_session_binding(data):
+    """Verify the immutable owner-bound receipt before ordinary pre-stop sealing."""
+    receipt=data.get('session_receipt')
+    if not isinstance(receipt,str) or not re.fullmatch(r'[0-9a-f]{64}',receipt):
+        raise RuntimeError('Normal stop lacks an exact session receipt for pre-stop evidence')
+    try:
+        fields=_phase2_session_fields(data)
+    except (KeyError,TypeError):
+        raise RuntimeError('Normal stop lacks complete owner-bound session metadata') from None
+    expected=hashlib.sha256(json.dumps(fields,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    if receipt!=expected:
+        raise RuntimeError('Normal stop session receipt changed after start')
+    control=data.get('phase2_control_sha256')
+    phase2=isinstance(control,str) and bool(re.fullmatch(r'[0-9a-f]{64}',control))
+    if control is not None and not phase2:
+        raise RuntimeError('Normal stop session control binding is malformed')
+    path=(_phase2_session_binding_path(receipt) if phase2
+          else _ordinary_session_binding_path(receipt))
+    if data.get('session_binding_path')!=str(path):
+        raise RuntimeError('Normal stop session binding path changed after start')
+    binding=_read_private_receipt(path)
+    expected_binding={'schema_version':SESSION_BINDING_SCHEMA if phase2 else ORDINARY_SESSION_BINDING_SCHEMA,
+                      'control_record_sha256':control if phase2 else None,
+                      **fields,'session_receipt':receipt}
+    if binding!=expected_binding:
+        raise RuntimeError('Normal stop session binding changed after start')
+    return binding
+
+
+def _require_ordinary_send_binding(data):
+    """Validate the ordinary start receipt and current pane before input."""
+    if _phase2_mode() or data.get('phase2_control_sha256') is not None:
+        raise RuntimeError('Ordinary send cannot use a Phase 2 control binding')
+    if data.get('session_binding_schema')!=ORDINARY_SESSION_BINDING_SCHEMA:
+        raise RuntimeError('Ordinary send lacks the exact ordinary session binding')
+    binding=_require_session_binding(data)
+    if (binding.get('schema_version')!=ORDINARY_SESSION_BINDING_SCHEMA
+            or binding.get('control_record_sha256') is not None):
+        raise RuntimeError('Ordinary send binding is not an ordinary receipt')
+    _exact_cleanup_identity(data)
+    return binding
 
 
 def _read_private_receipt(path):
@@ -1016,8 +1088,12 @@ def native_user_turn_receipts(data,prompt):
                     # mandatory and malformed state fails closed.
                     control=data.get('phase2_control_sha256')
                     session_receipt=data.get('session_receipt')
-                    phase2_binding_active=(_phase2_mode() or control is not None
-                                           or session_receipt is not None)
+                    # The ordinary receipt is deliberately not a Phase 2
+                    # control binding.  Only the explicit Phase 2 mode or a
+                    # control field selects the strict native receipt shape;
+                    # an ordinary session receipt may still accompany the
+                    # current-host MCP-first observation.
+                    phase2_binding_active=(_phase2_mode() or control is not None)
                     if phase2_binding_active:
                         if (not isinstance(control,str) or not re.fullmatch(r'[0-9a-f]{64}',control)
                                 or not isinstance(session_receipt,str)
@@ -1062,16 +1138,26 @@ def _rendered_screen(data):
 
 
 def _has_exact_empty_active_composer(screen):
-    """Accept only the latest rendered input row when it is the exact placeholder."""
+    """Accept the latest placeholder or the current host's empty input row."""
     inputs=[line.strip() for line in screen.splitlines() if line.lstrip().startswith('›')]
-    return bool(inputs) and inputs[-1]=='› Ask Codex to do anything'
+    if not inputs:return False
+    if inputs[-1]=='› Ask Codex to do anything':return True
+    # The placeholder can be absent in Codex 0.154.0. Require the model/status
+    # footer after that empty row so a menu marker is not mistaken for input.
+    return inputs[-1]=='›' and bool(re.search(
+        r'(?m)^\s*›\s*\n\s*\n?\s*gpt-[^\n]+ · [^\n]+',screen))
+
+
+def _empty_composer_index(screen):
+    rows=list(re.finditer(r'(?m)^\s*›(?: Ask Codex to do anything)?[ \t]*$',screen))
+    return rows[-1].start() if rows else -1
 
 
 def _require_empty_composer(data,prompt=None):
     screen=_rendered_screen(data)
     if (not _has_exact_empty_active_composer(screen)
             or screen.lower().rfind('do you trust the contents of this directory?')
-               > screen.rfind('› Ask Codex to do anything')):
+               > _empty_composer_index(screen)):
         raise RuntimeError('Phase 2 send requires the exact empty Codex composer; confirm trust before send')
     return screen
 
@@ -1080,7 +1166,7 @@ def _active_phase2_startup_state(screen):
     """Classify only the latest active trust prompt or exact empty composer."""
     active=screen[-1200:]
     trust_index=active.lower().rfind('do you trust the contents of this directory?')
-    composer_index=active.rfind('› Ask Codex to do anything')
+    composer_index=_empty_composer_index(active)
     compact=re.sub(r'\s+','',active[max(0,trust_index):]).lower()
     if (trust_index>=0 and trust_index>=composer_index
             and 'doyoutrustthecontentsofthisdirectory?' in compact
@@ -1176,12 +1262,17 @@ def _ordinary_send(data,prompt):
     """Preserve the ordinary one-literal/one-Enter smoke transport."""
     if data.get('first_submission_at') is not None:
         raise RuntimeError('ordinary smoke prompt was already submitted; refusing another transport')
+    # Ordinary transport has its own start-created receipt.  It must never
+    # borrow the Phase 2 control/session binding, and the live pane identity
+    # is revalidated before any provenance mutation or prompt input.
+    _require_ordinary_send_binding(data)
     if not data.get('resumed') and not data.get('original_request_sha256'):
         observer=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
         data['original_request_sha256']=observer['original_request_digest'](prompt)
         data['desktop_editor_source_sha256']=observer['original_request_digest'](prompt)
         save(data)
     _require_empty_composer(data,prompt)
+    _require_ordinary_send_binding(data)
     before=user_prompt_receipts(data,prompt)
     buffer=SESSION+'-prompt'
     tmux('set-buffer','-b',buffer,'--',prompt)
@@ -1190,6 +1281,7 @@ def _ordinary_send(data,prompt):
         tmux('delete-buffer','-b',buffer,check=False)
         raise
     time.sleep(5);submitted_at=time.time()
+    _require_ordinary_send_binding(data)
     tmux('send-keys','-t',data['tmux_pane_id'],'Enter')
     for _ in range(40):
         if user_prompt_receipts(data,prompt)>before:break
@@ -1374,6 +1466,9 @@ def current_host_audit_exit_code(classification, observational, *, failures,
         return 1
     invalidators=classification['evidence_integrity_invalidators']
     if not isinstance(invalidators,list) or invalidators:
+        return 1
+    if any(row.get('classification')=='product_quality_outcome'
+           for row in classification.get('quality_findings',[])):
         return 1
     return 0
 
@@ -1580,16 +1675,14 @@ def start(args):
                             tmux_session_id=owned_session_id,
                             tmux_session_created=identity['session_created'],
                             tmux_pane_id=identity['pane_id'],tmux_pane_pid=pane_pid)
-        # A pane start tick is required by either strict owner-bound control:
-        # current-host MCP-first root provenance or an active Phase 2 binding.
-        # Keep ordinary, route-free, no-control launches free of a /proc probe;
-        # they retain enough owner identity for exact cleanup without turning a
-        # synthetic/unobservable transport PID into a post-commit failure.
-        if (session_data.get('bootstrap_route')==MCP_FIRST_BOOTSTRAP_ROUTE
-                or _phase2_mode()):
-            session_data['tmux_pane_start_ticks']=_proc_start_ticks(pane_pid)
+        # The immutable session receipt is also required by ordinary pre-stop
+        # sealing.  Capture the pane start identity for every route so an
+        # ordinary receipt cannot be replayed after pane-PID reuse.
+        session_data['tmux_pane_start_ticks']=_proc_start_ticks(pane_pid)
         if fresh_start and _phase2_mode():
             _capture_phase2_session_binding(session_data)
+        elif not _phase2_mode():
+            _capture_ordinary_session_binding(session_data)
         else:
             session_data['lifecycle_status']='started'
         save(session_data)
@@ -1621,7 +1714,8 @@ def start(args):
                                         owned_session_id,owned_session_identity)
             raise _post_commit_launch_failure(evaluation_receipt, operation, exc) from None
         raise
-    print('Started '+SESSION+'; candidate target: HOME/.cortex-dev/.codex')
+    print('Started '+SESSION+'; session receipt='+session_data['session_receipt']+
+          '; candidate target: HOME/.cortex-dev/.codex')
 
 
 def main():
@@ -1898,6 +1992,11 @@ def main():
             # for an explicit failure/interrupt collection path instead.
             raise RuntimeError('Normal stop requires owned bash Cortex live-dev exit=0 or verified idle-composer completion evidence')
         if args.command=='stop':
+            _require_session_binding(data)
+            # The persisted receipt proves what start observed, not what is
+            # currently running. Re-query the live owner/session/pane and
+            # start-tick immediately before sealing and again before kill.
+            _exact_cleanup_identity(data)
             data['pre_stop_evidence']=seal_pre_stop_evidence(data,terminal_evidence)
         if args.command=='stop-exact':
             _require_exact_cleanup_args(args,data)
@@ -1912,6 +2011,8 @@ def main():
         else:
             if args.interrupt:tmux('send-keys','-t',data['tmux_pane_id'],'C-c',check=False)
             tmux('pipe-pane','-t',data['tmux_pane_id'],check=False)
+            if args.command=='stop':
+                _exact_cleanup_identity(data)
             tmux('kill-session','-t',data['tmux_session_id'],check=False)
         (STATE/'last.json').write_text(json.dumps(data));os.chmod(STATE/'last.json',0o600)
         (STATE/'capture.txt').unlink(missing_ok=True)

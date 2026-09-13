@@ -19,6 +19,13 @@ pages as needed to restore exact requirements and make the next decision. Restor
 response-language preference before replying; an English recovery summary does not
 change it.
 
+Restore the current advisory governance from public response metadata, not an old
+replayed operation receipt or a remembered mode. Read its rationale report when
+needed, then apply its depth to remaining assignments and checks. Unavailable
+governance is diagnostic; user requirements and observed risk still govern work.
+The coordinator owns the causal model across specialist handoffs; preserve separate
+implementation and independent verification responsibilities.
+
 Reconstruct active and cancelled conditions, decisions, assignments, resource owners,
 open actions, required checks, worker handles, source revisions, artifact revisions
 and report pointers. Reconcile active workers before overlapping work. Apply queued

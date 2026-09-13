@@ -213,14 +213,19 @@ OUTPUTS = {
         next_cursor=NEXT)),
 }
 BINDING=object_schema(dict(receipt=output_string("Durable host-thread binding receipt."),thread_id=output_string("Host supplied calling thread."),parent_thread_id=dict(type=["string","null"]),state=output_string("Explicit Cortex participation state.",enum=["cortex","normal"])))
+GOVERNANCE=object_schema(dict(
+    status=output_string("Current task-wide advisory projection. Unset means no selection; unavailable means diagnostic lookup failure, never a prohibition.",enum=["selected","unset","unavailable"]),
+    mode=dict(type=["string","null"],enum=["minimal","light","full",None],description="Latest selected depth, independent of normal/cortex participation. Apply it to work depth and evidence, not permissions or automatic model escalation."),
+    governance_id=dict(type=["string","null"],pattern=r"^g_[0-9a-f]{12}$"),
+    report_id=dict(type=["string","null"],pattern=r"^r_[0-9a-f]{12}$",description="Public report with the selected rationale. Current even when replaying an older delivery; read it for a consequential depth decision.")))
 CAPTURE=object_schema(dict(status=output_string("Capture coverage of this operation; not proof all requirements were applied.",enum=["complete","partial","unavailable","not_attempted"]),reason=dict(type=["string","null"]),revision=dict(type="integer",minimum=0),pending_turns=dict(type="integer",minimum=0,description="Unresolved native user-turn signals; these contain no archived text and do not advance source revision.")))
 OBSERVATION=object_schema(dict(source=output_string("Receipt provenance, not model verification.",enum=["hook"]),event_name=output_string("Observed lifecycle event."),actor_scope=output_string("Confirmed actor or parent session only.",enum=["actor","session"]),actor_thread_id=dict(type=["string","null"]),parent_session_id=dict(type=["string","null"]),binding_origin=dict(type=["string","null"]),tool_name=dict(type=["string","null"]),exit_code=dict(type=["integer","null"]),command_session_id=dict(type=["string","null"]),status=output_string("Explicit observed command/result state.",enum=["failed","exited","running","unverified","completed"]),truncated=dict(type=["boolean","null"]),error=dict(type=["boolean","null"]),changed_paths=dict(type="array",maxItems=16,items=output_string("Exact known changed path.",maxLength=4096)),changed_paths_total=dict(type="integer",minimum=0),changed_paths_complete=dict(type="boolean")))
 OUTPUTS["list_reports"]["properties"].update(changes=dict(type="array",items=object_schema(dict(sequence=dict(type="integer"),kind=output_string("Change kind."),reference=dict(type=["string","null"]),created_at=output_string("UTC timestamp."),observation=dict(anyOf=[OBSERVATION,dict(type="null")])))),changes_next=dict(type=["integer","null"]),own_drafts=dict(type="array",items=object_schema(dict(draft_id=DRAFT,draft_path=output_string("Owned unfinished draft path."),kind=output_string("Draft kind."),template=output_string("Draft template."),created_at=output_string("Creation timestamp.")))),drafts_next=dict(type=["string","null"]))
 OUTPUTS["list_reports"]["required"]=list(OUTPUTS["list_reports"]["properties"])
 for item in TOOLS:
     result=OUTPUTS[item["name"]]
-    result["properties"].update(binding=BINDING,source_capture=CAPTURE)
-    result["required"].extend(["binding","source_capture"])
+    result["properties"].update(binding=BINDING,source_capture=CAPTURE,governance=GOVERNANCE)
+    result["required"].extend(["binding","source_capture","governance"])
     item["outputSchema"] = result
 BY_NAME = {item["name"]: item for item in TOOLS}
 

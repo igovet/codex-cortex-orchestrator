@@ -72,21 +72,21 @@ ADVISORY_POLICY_FLAGS={
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
     'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
-    'gpt-5.6-luna with medium or high reasoning effort, except the explicitly '
-    'assigned senior-consultant may use gpt-5.6-sol or gpt-6-astra with low, '
-    'medium, or high effort. Every spawn_agent call must explicitly include '
+    'gpt-5.6-luna with medium or high reasoning effort. Every spawn_agent call must explicitly include '
     'model="gpt-5.6-luna", reasoning_effort="medium" or "high", and '
-    'fork_turns="none"; the consultant exception must include its selected '
-    'model and effort explicitly. The coordinator must not use functions.exec, '
+    'fork_turns="none". The coordinator must not use functions.exec, '
     'exec_command, terminal, or another shell route for generic installed '
     'plugin/cache/candidate/registry probing before or after task creation. Before '
     'the public task receipt, the sole static exception is an exact read-only '
     'advertised coordinator SKILL.md or public plugin declaration (.mcp.json or '
     '.codex-plugin/plugin.json), with a fixed literal file, bounded reader, and '
     'complete receipt: never a directory, glob, runtime/state file, registry, or '
-    'mutation. The exact value-free text(ALL_TOOLS) envelope is separately '
-    'permitted only as bounded public catalogue metadata with its complete receipt; '
-    'never a query, path, content extraction, mutation, nested call, or mixed wrapper. '
+    'mutation. Both roles may read their exact advertised SKILL.md and its declared '
+    'instruction references with bounded literal reads and complete receipts. '
+    'Discover deferred tools by exact name or namespace only; for Cortex use '
+    'text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__"))). '
+    'Broad description searches can truncate. Public catalogue reads cannot mix '
+    'paths, content extraction, mutations or nested tool calls. '
     'Use only the exact '
     'advertised assigned worker-SKILL read or native attachment receipt and live '
     'tool schemas. Each opaque worker route must retain one attributable complete '
@@ -97,7 +97,10 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'and wait for its complete native receipt before any project-target action; no '
     'functions.exec, nested shell, terminal, file, patch, or private probe may substitute. '
     'Use one bounded command per wrapper with complete exit/result receipt; nested '
-    'success never excuses truncation. For this live test, this '
+    'success never excuses truncation. For coordinator source inspection use a single literal '
+    'cat, sed -n, or rg command; do not combine commands with separators, pipes, '
+    'redirection, or banner printing. A wait timeout alone is not a reason to '
+    'message an active worker; continue waiting silently. For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
 )
@@ -399,7 +402,7 @@ def participant_token_usage(state):
     participants=[];seen=set();latest=None;coordinator_durations=[]
     boundary=float(state.get('trial_started_at',state.get('thread_created_since',state.get('started_at',0))))-2
     for thread in threads:
-        totals={field:0 for field in TOKEN_FIELDS};responses=0;parent=None;completed_turns=set();durations=[]
+        totals={field:0 for field in TOKEN_FIELDS};responses=0;parent=None;completed_turns=set();started_turns=set();durations=[]
         path=Path(thread['rollout_path'])
         if path.is_file():
             with path.open(encoding='utf-8') as source:
@@ -412,6 +415,10 @@ def participant_token_usage(state):
                         if isinstance(provenance,dict):
                             parent=(((provenance.get('subagent') or {}).get('thread_spawn') or {})
                                     .get('parent_thread_id'))
+                    if (entry.get('type')=='event_msg' and isinstance(payload,dict)
+                            and payload.get('type')=='task_started'
+                            and isinstance(payload.get('turn_id'),str)):
+                        started_turns.add(payload['turn_id'])
                     if (entry.get('type')=='event_msg' and isinstance(payload,dict)
                             and payload.get('type')=='task_complete'
                             and payload.get('turn_id') not in completed_turns
@@ -431,7 +438,8 @@ def participant_token_usage(state):
         if role=='coordinator':coordinator_durations.extend(durations)
         participants.append(dict(thread_id=thread['id'],parent_thread_id=parent,role=role,
                                  model=thread['model'],reasoning_effort=thread['reasoning_effort'],
-                                 responses=responses,tokens=totals if responses else None))
+                                 responses=responses,tokens=totals if responses else None,
+                                 terminal=bool(started_turns) and started_turns<=completed_turns))
     complete=bool(participants) and all(row['tokens'] is not None for row in participants)
     aggregate=({field:sum(row['tokens'][field] for row in participants) for field in TOKEN_FIELDS}
                if complete else None)
@@ -506,6 +514,20 @@ def safe_receipt_provenance(raw):
     return exit_code,'Warning: truncated output' in rendered
 
 
+def public_result_objects(result):
+    """Decode only public result roots, never IDs nested in advisory metadata."""
+    if not isinstance(result,dict):return []
+    roots=[result]
+    if isinstance(result.get('structuredContent'),dict):
+        roots.append(result['structuredContent'])
+    for block in result.get('content',[]) if isinstance(result.get('content'),list) else []:
+        if not isinstance(block,dict) or block.get('type')!='text':continue
+        try:value=json.loads(block.get('text',''))
+        except (TypeError,ValueError):continue
+        if isinstance(value,dict):roots.append(value)
+    return roots
+
+
 def mcp_receipt_metadata(item):
     """Classify the host's completed MCP receipt independently of wrappers."""
     if not isinstance(item,dict) or item.get('type')!='McpToolCall':return None
@@ -528,7 +550,9 @@ def mcp_receipt_metadata(item):
         # `write_report` returns the public report identity in its result, not
         # in the request. Retain only that bounded identity for exact later
         # event correlation; a missing or ambiguous value remains unbound.
-        ids=set(re.findall(r'\\?"report_id\\?"\s*:\s*\\?"(r_[0-9a-f]{12})\\?"',rendered))
+        ids={root['report_id'] for root in public_result_objects(result)
+             if isinstance(root.get('report_id'),str)
+             and re.fullmatch(r'r_[0-9a-f]{12}',root['report_id'])}
         if len(ids)==1:metadata['report_id']=ids.pop()
     if server=='cortex' and tool=='read_report' and outcome=='success':
         structured=result.get('structuredContent') if isinstance(result,dict) else None
@@ -542,9 +566,10 @@ def mcp_receipt_metadata(item):
                 if (not isinstance(artifact,dict) or set(artifact) != {'reference','version'}
                         or not isinstance(artifact['reference'],str)
                         or not isinstance(artifact['version'],str)
-                        or not re.fullmatch(r'[0-9a-f]{64}',artifact['version'])):
+                        or not re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}',artifact['version'])):
                     parsed=[];break
-                parsed.append((hashlib.sha256(artifact['reference'].encode()).hexdigest()[:12],artifact['version']))
+                parsed.append((hashlib.sha256(artifact['reference'].encode()).hexdigest()[:12],
+                               artifact['version'].removeprefix('sha256:')))
             if parsed:
                 bindings=sorted(set(parsed));break
         if bindings:metadata['reported_artifact_bindings']=bindings
@@ -705,15 +730,30 @@ def approved_tool_catalogue_envelope(source, nested):
 
     ``functions.exec`` may expose the public tool catalogue before the first
     direct MCP call.  That observation is not a general JavaScript or wrapper
-    privilege: it is exactly the host's bounded ``text(ALL_TOOLS)`` envelope,
-    with no nested member calls or caller-supplied operands.  Keep this grammar
-    deliberately small so paths, queries, content extraction, mutations and
+    privilege: only the bounded catalogue or a literal word filter over its
+    public names/descriptions qualifies. Keep this grammar
+    deliberately small so paths, dynamic queries, content extraction, mutations and
     mixed wrappers remain ordinary pre-binding host actions.
     """
     if not isinstance(source,str) or nested:
         return False
     compact=re.sub(r'\s+',' ',source).strip()
-    return compact in {'text(ALL_TOOLS)','text(ALL_TOOLS);'}
+    binding=re.fullmatch(r'const ([A-Za-z_][A-Za-z0-9_]*) = (ALL_TOOLS\.filter\(.*\)); text\(\1\);?',compact)
+    if binding:
+        compact='text('+binding.group(2)+')'
+    if compact in {'text(ALL_TOOLS)','text(ALL_TOOLS);'}:return True
+    if re.fullmatch(
+        r'''text\(\s*ALL_TOOLS\.filter\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*=>\s*'''
+        r'''\1\.name\.startsWith\((["'])mcp__cortex__\2\)\s*\)\s*\)\s*;?''',compact):
+        return True
+    # Current host discovery commonly filters the advertised names/descriptions.
+    # Accept only literal word alternatives over those two fields: no arbitrary
+    # callbacks, regex operators, computed properties, calls or extra statements.
+    return len(source)<=2048 and re.fullmatch(
+        r'''text\(\s*ALL_TOOLS\.filter\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*=>\s*'''
+        r'''/[A-Za-z_][A-Za-z0-9_]*(?:\|[A-Za-z_][A-Za-z0-9_]*)*/i?\.test\(\s*'''
+        r'''\1\.name\s*\+\s*(["']) \2\s*\+\s*\1\.description\s*\)\s*\)\s*\)\s*;?''',
+        compact) is not None
 
 
 def observed_cell_ids(raw):
@@ -942,6 +982,49 @@ def bounded_static_read_wrapper(command):
     return None
 
 
+def bounded_static_read_transport(source, nested):
+    """Recognize the sole installed-host functions.exec static-read envelope.
+
+    The current host forwards one nested ``tools.exec_command`` result through
+    ``text(<same-identifier>)``.  Keep this a syntax-only, value-free
+    exception: exactly one direct call, one ``const`` binding to a safe
+    JavaScript identifier, and one complete forwarding statement using that
+    same identifier are required.  The nested command still goes through
+    ``skill_instruction_read`` and its manifest checks; this helper only
+    prevents an unrelated wrapper from borrowing that nested row's
+    classification.
+    """
+    if not isinstance(source, str) or not isinstance(nested, list) or len(nested) != 1:
+        return False
+    if not isinstance(nested[0], tuple) or len(nested[0]) != 3 or nested[0][0] != 'exec_command':
+        return False
+    match = re.fullmatch(
+        r'\s*const\s+(?P<binding>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*'
+        r'await\s+tools\.exec_command\((?P<arguments>.*)\)\s*;\s*'
+        r'(?:text\((?P=binding)\)\s*;|'
+        r'text\((?P=binding)\.output\)\s*;\s*'
+        r'text\(`exit_code=\$\{(?P=binding)\.exit_code\}`\)\s*;'
+        r'(?:\s*if\s*\((?P=binding)\.session_id\)\s*'
+        r'text\(`session_id=\$\{(?P=binding)\.session_id\}`\)\s*;)?)\s*',
+        source, re.DOTALL,
+    )
+    if match is None or match.group('arguments') != nested[0][2]:
+        return False
+    # Reject JavaScript keywords/literals even though they lexically resemble
+    # identifiers; accepting one would make the transport grammar ambiguous.
+    return match.group('binding') not in {
+        # ECMAScript keywords/literals, strict-mode future-reserved words, and
+        # the two names forbidden as bindings by the strict-mode grammar.
+        'arguments', 'await', 'break', 'case', 'catch', 'class', 'const',
+        'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum',
+        'eval', 'export', 'extends', 'false', 'finally', 'for', 'function',
+        'if', 'implements', 'import', 'in', 'instanceof', 'interface', 'let',
+        'new', 'null', 'package', 'private', 'protected', 'public', 'return',
+        'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof',
+        'var', 'void', 'while', 'with', 'yield',
+    }
+
+
 def python_skill_read_paths(command):
     """Return literal skill paths from a tiny static pathlib read program.
 
@@ -1048,10 +1131,19 @@ def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False):
             if len(relative.parts)<4 or relative.parts[1]!='skills':return False
             skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
             if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
-            if coordinator_only and (skill_name!='orchestrator' or resource!=Path('SKILL.md')):return False
+            if coordinator_only:
+                if skill_name not in {'orchestrator','tool-discipline','content-safety',
+                                      'coordinator-communication','context-compaction'}:return False
+                if resource!=Path('SKILL.md'):
+                    entry=ROOT/'plugins/cortex/skills'/skill_name/'SKILL.md'
+                    if (len(resource.parts)!=2 or resource.parts[0]!='references'
+                            or resource.as_posix() not in re.findall(r'\]\((references/[^)]+)\)',entry.read_text())):
+                        return False
             if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
             source=ROOT/'plugins/cortex/skills'/skill_name/resource
         if not source.is_file() or not path.is_file():return False
+        if coordinator_only and not declaration and (resource!=Path('SKILL.md') or skill_name!='orchestrator'):
+            if path.is_symlink() or path.read_bytes()!=source.read_bytes():return False
         try:path.resolve().relative_to(expected.resolve())
         except ValueError:return False
         advertised=True
@@ -1140,8 +1232,8 @@ def active_coordinator_skill_read(tool,arguments):
     if not skill_instruction_read(tool,arguments,coordinator_only=True):return False
     command=shell_command_text(arguments)
     if not isinstance(command,str):return False
-    matches=re.findall(r'(/[A-Za-z0-9_./+@=-]+/skills/orchestrator/SKILL\.md)(?![A-Za-z0-9_.-])',command)
-    if len(set(matches))!=1:return False
+    matches=re.findall(r'(/[A-Za-z0-9_./+@=-]+/skills/(?:orchestrator|tool-discipline|content-safety|coordinator-communication|context-compaction)/(?:SKILL\.md|references/[A-Za-z0-9_-]+\.md))(?![A-Za-z0-9_.-])',command)
+    if not 1<=len(matches)<=4 or len(set(matches))!=len(matches):return False
     metadata=Path.home()/'.cortex-dev/.codex/cortex-candidate.json'
     try:
         info=metadata.lstat()
@@ -1151,9 +1243,11 @@ def active_coordinator_skill_read(tool,arguments):
     except (OSError,ValueError):return False
     version=value.get('version') if isinstance(value,dict) else None
     if not isinstance(version,str) or not version:return False
-    expected=(Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'/version
-              /'skills/orchestrator/SKILL.md')
-    return Path(matches[0])==expected and expected.is_file() and not expected.is_symlink()
+    base=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'/version/'skills'
+    return all(Path(path).is_relative_to(base) and Path(path).is_file()
+               and not Path(path).is_symlink()
+               and Path(path).read_bytes()==(ROOT/'plugins/cortex/skills'/Path(path).relative_to(base)).read_bytes()
+               for path in matches)
 
 
 PRIVATE_CORTEX_MARKER=re.compile(
@@ -1975,7 +2069,8 @@ def canonical_mcp_call_key(row):
     report=row.get('report_id') or row.get('requested_report_id')
     draft=row.get('draft_id')
     template=row.get('template')
-    identity=(('task_id',task) if isinstance(task,str) and task else
+    identity=(('draft_id',draft) if tool=='mcp__cortex__write_report' and isinstance(draft,str) and draft else
+              ('task_id',task) if isinstance(task,str) and task else
               ('report_id',report) if isinstance(report,str) and report else
               ('draft_id',draft) if isinstance(draft,str) and draft else
               ('template',template) if isinstance(template,str) and template else None)
@@ -2111,17 +2206,58 @@ def draft_call_metadata(tool,arguments):
 
 def coordinator_source_read(tool,arguments):
     """Recognize a single bounded read command used for a user-provided source."""
+    if tool == 'read_file':
+        return True  # Independent path classification still rejects private operands.
     if tool!='exec_command':return False
     try:command=json.loads(arguments).get('cmd')
     except (AttributeError,ValueError):
         match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*(["\'])(.*?)\1',arguments,re.S)
         command=match.group(2) if match else None
-    if not isinstance(command,str) or re.search(r'[;|><`]|\$\(',command):return False
-    try:tokens=shlex.split(command)
+    if not isinstance(command,str):return False
+    status_envelope=re.fullmatch(
+        r'(.+?);\s*([A-Za-z_][A-Za-z0-9_]*)=\$\?;\s*(.+);\s*exit \$\2',command)
+    if status_envelope and status_envelope[2] not in {'HOME','PATH','CODEX_HOME','SHELL','IFS','ENV','BASH_ENV'}:
+        command=status_envelope[1]+'; '+status_envelope[3]
+    if re.search(r'[`$\n\r]',command):return False
+    try:
+        lexer=shlex.shlex(command,posix=True,punctuation_chars=';&|<>')
+        lexer.whitespace_split=True;lexer.commenters=''
+        shell_tokens=list(lexer)
     except ValueError:return False
+    groups=[];tokens=[]
+    for token in shell_tokens:
+        if token in {'&&','||',';','|'}:
+            if not tokens:return False
+            groups.append(tokens);tokens=[]
+        elif token and all(char in ';&|<>' for char in token):
+            return False  # Redirection, background dispatch or unsupported syntax.
+        else:tokens.append(token)
+    if not tokens:return False
+    groups.append(tokens)
+    if len(groups)>12:return False
+    return all(_coordinator_read_tokens(tokens) for tokens in groups)
+
+
+def _coordinator_read_tokens(tokens):
+    """Closed read/compare command set; shell syntax was parsed separately."""
     if not tokens:return False
     if any(token in {'&&','||','&'} for token in tokens):return False
-    if tokens[0]=='sed':return '-n' in tokens and not any(token.startswith('-i') for token in tokens)
+    if tokens[0]=='PYTHONDONTWRITEBYTECODE=1':tokens=tokens[1:]
+    if not tokens:return False
+    if tokens[:2] in (['git','status'],['git','diff'],['git','log'],['git','show']):
+        return not any(token.startswith(('--output','--ext-diff','--textconv')) for token in tokens)
+    if tokens[0] in {'sha256sum','nl','cmp','pwd'}:return True
+    if tokens[0] in {'echo','true'}:return True
+    if tokens[0]=='printf':return len(tokens)>1 and tokens[1]!='-v'
+    if tokens[:3]==['python3','-m','unittest'] or tokens[:4]==['python3','-B','-m','unittest']:
+        return True
+    if tokens[0] == 'cat':
+        return len(tokens)>=2 and not any(token.startswith('-') and token!='--' for token in tokens[1:])
+    if tokens[0]=='sed':
+        return (len(tokens)>=4 and tokens[1]=='-n'
+                and re.fullmatch(r'[0-9]+(?:,[0-9]+)?[pl]',tokens[2]) is not None
+                and not any(token.startswith('-') for token in tokens[3:]))
+    if tokens[0]=='rg' and any(token=='--pre' or token.startswith('--pre=') for token in tokens):return False
     return tokens[0] in {'head','tail','rg','grep','wc','stat'}
 
 
@@ -2669,7 +2805,15 @@ def observed_tool_calls(state):
                             common['role'] in {'coordinator','runtime'}
                             and skill_instruction_read(name,nested_arguments,coordinator_only=True))
                         flags=call_policy_flags(name,arguments if name=='apply_patch' else nested_arguments,common['role'],state['workdir'])
-                        if instruction_read:row['skill_instruction_read']=True
+                        if instruction_read:
+                            row['skill_instruction_read']=True
+                            # Keep the non-secret registered leaf/profile marker
+                            # even when the host denies the read before dispatch.
+                            # This is needed to reconcile an exact worker read;
+                            # it never creates a completion receipt by itself.
+                            if common['role'] not in {'coordinator','runtime'}:
+                                profile=worker_skill_profile(name,nested_arguments)
+                                if profile:row['worker_skill_profile']=profile
                         if coordinator_instruction_read:row['pre_binding_static_read']=True
                         if (common['role']=='coordinator'
                                 and active_coordinator_skill_read(name,nested_arguments)):
@@ -2705,11 +2849,14 @@ def observed_tool_calls(state):
                     # fully static observation.  Multiple nested members,
                     # generic wrappers, and anything without the exact parser
                     # proof remain blocked.
+                    bounded_static_transport=bounded_static_read_transport(arguments,nested)
                     nested_static=[row for row in selected
                                    if row.get('nested') is True
-                                   and row.get('pre_binding_static_read') is True]
+                                   and (row.get('pre_binding_static_read') is True
+                                        or row.get('worker_skill_profile') is not None)]
                     nested_operands=[row for row in selected if row.get('nested') is True]
-                    if len(nested_static)==1 and len(nested_operands)==1:
+                    if (bounded_static_transport and len(nested_static)==1
+                            and len(nested_operands)==1):
                         nested_row=nested_static[0]
                         for row in selected:
                             row.setdefault('pre_binding_static_read',True)
@@ -2717,6 +2864,8 @@ def observed_tool_calls(state):
                             row.setdefault('bounded_wrapper',True)
                             row.setdefault('active_coordinator_skill_read',
                                            nested_row.get('active_coordinator_skill_read'))
+                            row.setdefault('worker_skill_profile',
+                                           nested_row.get('worker_skill_profile'))
                             for key in ('path_target_class','path_access_kind','path_policy_decision'):
                                 row.setdefault(key,nested_row.get(key))
                     direct_bootstrap=[row for row in selected
@@ -2772,6 +2921,12 @@ def observed_tool_calls(state):
                         if row.get('host_receipt_outcome')=='error':
                             outcome='error'
                             code=row.get('host_error_code') or code
+                        # Preserve the underlying nested result before the
+                        # wrapper accounting labels it covered_by_wrapper or
+                        # covered_by_nested.  Skill completion is a receipt
+                        # property of that one successful read, not of the
+                        # transport's bookkeeping label.
+                        observed_result_outcome=outcome
                         if wrapper_syntax_error and row.get('nested'):
                             row['outcome']='not_dispatched'
                             row['completed_timestamp']=entry.get('timestamp')
@@ -2805,13 +2960,16 @@ def observed_tool_calls(state):
                             row['bounded_metadata_observed']=True
                         if row.get('catalogue_discovery') is True:
                             row['host_receipt_observed']=(outcome in {'success','covered_by_command_execution'})
+                            row['truncated']=safe_receipt_provenance(payload.get('output',''))[1]
                         exit_code,truncated=safe_receipt_provenance(payload.get('output',''))
                         if exit_code is not None:row['exit_code']=exit_code
                         if truncated:row['truncated']=True
+                        worker_read=(row.get('worker_skill_profile') is not None
+                                     or worker_skill_read(row['tool'],arguments))
                         if (row.get('skill_instruction_read') and row.get('role') not in {'coordinator','runtime',None}
-                                and worker_skill_read(row['tool'],arguments)
+                                and worker_read
                                 and '<!-- END OF COMPLETE CORTEX WORKER SKILL -->' in rendered_output
-                                and outcome=='success'):
+                                and observed_result_outcome=='success'):
                             row['worker_skill_complete']=True
                             profile=worker_skill_profile(row['tool'],arguments)
                             if profile:row['worker_skill_profile']=profile
@@ -2927,6 +3085,17 @@ def observed_tool_calls(state):
         if len(executions)==1 and executions[0].get('semantic_nonfailure'):
             row['semantic_result']='no_match'
             row['semantic_nonfailure']=True
+        if (len(executions)==1 and row.get('bounded_metadata_observed') is True
+                and row.get('active_coordinator_skill_read') is True
+                and executions[0].get('outcome')=='success'):
+            # This is the native receipt of that same exact static read, not
+            # a second pre-binding action. Identity and execution interval must
+            # both match; ambiguous executions cannot inherit the proof.
+            for key in ('pre_binding_static_read','skill_instruction_read',
+                        'active_coordinator_skill_read','bounded_wrapper',
+                        'bounded_metadata_observed','path_target_class',
+                        'path_access_kind','path_policy_decision'):
+                if key in row:executions[0][key]=row[key]
     semantic_no_match_wrappers={
         (row.get('thread_id'),row.get('wrapper_argument_digest'),row.get('timestamp'))
         for row in ordered if row.get('tool')=='exec_command'
@@ -3209,9 +3378,21 @@ def desktop_supported_outcome_receipt(rows, state, *, open_sessions, open_cells)
              and row.get('host_receipt_outcome')=='success'
              and isinstance(row.get('report_id'),str)
              and row.get('replayed') is not True and row.get('truncated') is not True]
-    if len(reports)!=1:return None,'desktop_coordinator_report_missing_or_ambiguous'
+    if not reports:return None,'desktop_coordinator_report_missing_or_ambiguous'
+    if len(reports)>1:
+        # A newest-first pipeline keeps one report identity across editions.
+        # Distinct successful drafts prove new publications, not a replay of
+        # the initial receipt. The final edition must follow worker activity.
+        drafts=[row.get('draft_id') for row in reports]
+        if (len({row['report_id'] for row in reports})!=1
+                or any(not isinstance(draft,str) or not draft for draft in drafts)
+                or len(set(drafts))!=len(drafts)
+                or rows.index(reports[-1])<=max(
+                    index for index,row in enumerate(rows)
+                    if row.get('thread_id') in workers)):
+            return None,'desktop_coordinator_report_missing_or_ambiguous'
     return {'status':'complete','thread_id':expected_root,'worker_thread_id':workers.pop(),
-            'report_id':reports[0]['report_id'],'artifact_path':expected['path'],
+            'report_id':reports[-1]['report_id'],'artifact_path':expected['path'],
             'artifact_sha256':expected['sha256'],'host_enforcement_state':'unverified'},None
 
 
@@ -3253,6 +3434,17 @@ def desktop_current_host_partition(rows, state, host_failures, policy_violations
             diagnostic(row,'unsupported_current_host_worker_receipt');continue
         retained_policy.append(row)
     return retained_host,retained_policy,diagnostics,outcome,None
+
+
+def desktop_final_acceptance(outcome, classification, participants):
+    """Evidence quality and native lifecycle completion are separate requirements."""
+    return (outcome is not None and classification.get('evidence_valid') is True
+            and classification.get('score_eligible') is True
+            and not classification.get('evidence_integrity_invalidators')
+            and not any(row.get('classification')=='product_quality_outcome'
+                        for row in classification.get('quality_findings',[]))
+            and bool(participants)
+            and all(row.get('terminal') is True for row in participants))
 
 
 def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violations,
@@ -4480,12 +4672,14 @@ def main():
                 host_failures=host_failures,policy_violations=audit_policy,
                 open_sessions=open_sessions,open_cells=open_cells,
                 foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology)
+            participants=participant_token_usage(state).get('participants',[])
+            accepted=desktop_final_acceptance(desktop_outcome,classification,participants)
             observational=({'status':'observational_accept','host_enforcement_state':'unverified',
                             'outcome_receipt':desktop_outcome}
-                           if desktop_outcome is not None and classification['evidence_valid'] else
+                           if accepted else
                            {'status':'BLOCK','host_enforcement_state':'unverified',
                             'reason':desktop_outcome_reason or 'desktop_audit_incomplete'})
-            audit_exit_code=0 if observational['status']=='observational_accept' and classification['score_eligible'] else 1
+            audit_exit_code=0 if accepted else 1
             print(json.dumps(dict(mcp_events=len(rows),hook_actions=len(hook_rows),host_calls=len(host_rows),threads=len(threads),foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology,operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,hook_failures=hook_failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=audit_policy,observational_diagnostics=observational_diagnostics,worker_policy_violations=worker_policies,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells,observational_qualification=observational,audit_exit_code=audit_exit_code,**classification)))
             if classification['evidence_integrity_invalidators']:
                 raise RuntimeError('Desktop audit found incomplete, unbound, contaminated, or non-terminal evidence')

@@ -73,7 +73,11 @@ other policy row or supported-evidence requirement.
 Generic `pre_binding_host_action` is never demoted by the outcome partition because
 it has no strict actor/profile/path proof and may describe an unsafe dispatch. The
 only coordinator setup exception is an observer-proven, manifest-bound, bounded,
-read-only literal `skills/orchestrator/SKILL.md` read with its active-skill marker;
+read-only literal `skills/orchestrator/SKILL.md` or its declared instruction-reference
+read with its active-skill marker and exact installed-candidate identity;
+the same exact read-only proof covers its bundled communication, tool-discipline,
+content-safety and recovery companions. Up to four literal instruction leaves may
+be read in one bounded shell command; no arbitrary skill or cache path qualifies.
 the separate registered-worker static-SKILL predicate can retain independently
 complete, read-only denied records as diagnostics. Neither exception admits a
 directory, glob, different skill, unknown provenance, private/project target,

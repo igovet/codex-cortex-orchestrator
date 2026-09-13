@@ -169,6 +169,27 @@ def test_desktop_observation_is_scoped_to_submitted_task_tree(tmp_path,monkeypat
         'root-a']
     usage_result=OBSERVER['participant_token_usage'](state)
     assert {row['thread_id'] for row in usage_result['participants']}=={'root-a','child-a'}
+    assert not any(row['terminal'] for row in usage_result['participants'])
+    def lifecycle(thread, kind, turn):
+        with paths[thread].open('a') as target:
+            target.write(json.dumps({'type':'event_msg','payload':{
+                'type':kind,'turn_id':turn,'duration_ms':1000}})+'\n')
+    lifecycle('root-a','task_started','root-turn')
+    lifecycle('child-a','task_started','child-turn')
+    lifecycle('root-a','task_complete','root-turn')
+    participants=OBSERVER['participant_token_usage'](state)['participants']
+    quality={'evidence_valid':True,'score_eligible':True,
+             'evidence_integrity_invalidators':[],'quality_findings':[]}
+    accept=OBSERVER['desktop_final_acceptance']
+    assert not accept({'status':'complete'},quality,participants)
+    lifecycle('child-a','task_complete','child-turn')
+    participants=OBSERVER['participant_token_usage'](state)['participants']
+    assert accept({'status':'complete'},quality,participants)
+    assert not accept({'status':'complete'},dict(quality,quality_findings=[
+        {'classification':'product_quality_outcome'}]),participants)
+    lifecycle('root-a','task_started','followup')
+    assert not accept({'status':'complete'},quality,
+                      OBSERVER['participant_token_usage'](state)['participants'])
 
 
 def test_task_scope_rejects_rows_with_any_conflicting_native_identity():
@@ -580,6 +601,39 @@ def test_write_report_result_receipt_extracts_exact_publication_identity():
     assert OBSERVER['event_call_candidate']([row],0,event=event) is row
 
 
+def test_pipeline_editions_have_distinct_call_keys_and_sha256_prefix_is_normalized():
+    base={'thread_id':'parent','tool':'mcp__cortex__write_report','report_id':'r_0123456789ab'}
+    first=dict(base,draft_id='d_0123456789ab')
+    second=dict(base,draft_id='d_deadbeefdead')
+    for row in (first,second):row['canonical_call_key']=OBSERVER['canonical_mcp_call_key'](row)
+    assert first['canonical_call_key']!=second['canonical_call_key']
+    event=dict(second,operation='write_report')
+    assert OBSERVER['event_call_candidate']([first,second],0,event=event) is second
+    receipt=OBSERVER['mcp_receipt_metadata']({
+        'type':'McpToolCall','server':'cortex','tool':'read_report','status':'completed',
+        'result':{'structuredContent':{'report_id':base['report_id'],
+          'artifacts':[{'reference':'retry.py','version':'sha256:'+'a'*64}]}}})
+    assert receipt['reported_artifact_bindings'][0][1]=='a'*64
+
+
+def test_publication_identity_ignores_nested_governance_but_not_conflicting_roots():
+    published={'report_id':'r_6b6185b46456',
+               'governance':{'report_id':'r_0123456789ab','mode':'light'}}
+    item={'type':'McpToolCall','server':'cortex','tool':'write_report','status':'completed',
+          'result':{'structuredContent':published,
+                    'content':[{'type':'text','text':json.dumps(published)}]}}
+    receipt=OBSERVER['mcp_receipt_metadata'](item)
+    assert receipt['report_id']==published['report_id']
+    row=dict(receipt,thread_id='worker')
+    row['canonical_call_key']=OBSERVER['canonical_mcp_call_key'](row)
+    event={'thread_id':'worker','operation':'write_report','report_id':published['report_id']}
+    assert OBSERVER['event_call_candidate']([row],0,event=event) is row
+    item['result']['content'][0]['text']=json.dumps({'report_id':'r_deadbeefdead'})
+    assert 'report_id' not in OBSERVER['mcp_receipt_metadata'](item)
+    item['result']={'structuredContent':{'governance':published['governance']}}
+    assert 'report_id' not in OBSERVER['mcp_receipt_metadata'](item)
+
+
 def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
     skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
@@ -694,7 +748,8 @@ def test_desktop_launcher_and_observer_require_explicit_spawn_route_fields():
     assert 'nested success never excuses truncation' in instructions
 
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='live_instruction_fixture')
-    assert 'The coordinator must not use functions.exec, exec_command, terminal, or another shell route' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'Both roles may read their exact advertised SKILL.md' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'does not permit directory scans or private plugin/cache/candidate/registry probing' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
     forbidden=OBSERVER['call_policy_flags'](
         'exec_command',json.dumps({'cmd':'ls /fixture/.cortex-dev/.codex/plugins/cache'}),
         'coordinator','/fixture')
