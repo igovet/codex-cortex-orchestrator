@@ -58,7 +58,7 @@ def spawn_violations(payload, **extra):
 
 def test_ordinary_research_and_analysis_are_luna_only():
     policy = OBSERVER["worker_model_policy"]
-    assert policy("gpt-5.6-luna", "max", "research") == []
+    assert policy("gpt-5.6-luna", "medium", "research") == []
     assert policy("gpt-5.6-luna", "high", "exploration") == []
     assert policy("gpt-5.6-terra", "high", "analysis") == ["worker_model_policy_violation"]
     assert policy("gpt-5.6-sol", "high", "analysis") == ["worker_model_policy_violation"]
@@ -66,10 +66,10 @@ def test_ordinary_research_and_analysis_are_luna_only():
 
 def test_complex_terra_and_sol_microtask_effort_allowlists():
     policy = OBSERVER["worker_model_policy"]
-    assert policy("gpt-5.6-terra", "xhigh", "complex") == []
+    assert policy("gpt-5.6-terra", "high", "complex") == []
     assert policy("gpt-5.6-terra", "max", "complex") == ["worker_model_policy_violation"]
     assert policy("gpt-5.6-luna", "high", "complex") == ["worker_model_policy_violation"]
-    assert policy("gpt-5.6-sol", "xhigh", "security-analysis-microtask") == []
+    assert policy("gpt-5.6-sol", "high", "security-analysis-microtask") == []
     assert policy("gpt-5.6-sol", "max", "security-analysis-microtask") == ["worker_model_policy_violation"]
 
 
@@ -88,7 +88,7 @@ def test_reviews_follow_the_normal_ordinary_route():
     assert policy("gpt-5.6-terra", "high", "review",
                   implementation_model="gpt-5.6-terra",
                   implementation_effort="high") == ["worker_model_policy_violation"]
-    assert policy("gpt-5.6-luna", "max", "review",
+    assert policy("gpt-5.6-luna", "high", "review",
                   implementation_model="gpt-5.6-terra",
                   implementation_effort="xhigh") == []
     assert "worker_model_policy_violation" in policy(
@@ -106,8 +106,25 @@ def test_explicit_user_override_is_preserved():
     assert "worker_model_policy_violation" not in spawn_violations(payload)
 
 
+def test_consequential_decision_matrix_is_explicit_and_never_inherited():
+    policy = OBSERVER["worker_model_policy"]
+    accepted = {("decision", "gpt-5.6-sol", "medium"),
+                ("decision-hard", "gpt-5.6-sol", "high"),
+                ("decision-exceptional", "gpt-6-astra", "medium")}
+    for task_class in ("decision", "decision-hard", "decision-exceptional"):
+        for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"):
+            for effort in ("low", "medium", "high", "xhigh", "max"):
+                errors = policy(model, effort, task_class)
+                assert (not errors) == ((task_class, model, effort) in accepted)
+        metadata = spawn_metadata(spawn_payload("gpt-5.6-sol", "medium", task_class))
+        assert metadata["policy_class"] == task_class
+    for task_class in ("research", "exploration", "ordinary", "review"):
+        assert policy("gpt-5.6-luna", "max", task_class)
+        assert policy("gpt-6-astra", "medium", task_class)
+
+
 def test_spawn_policy_audit_uses_supported_message_labels():
-    complex_payload = spawn_payload("gpt-5.6-terra", "xhigh", "complex")
+    complex_payload = spawn_payload("gpt-5.6-terra", "high", "complex")
     complex_metadata = spawn_metadata(complex_payload)
     assert complex_metadata["policy_class"] == "complex"
     assert "worker_model_policy_violation" not in spawn_violations(complex_payload)

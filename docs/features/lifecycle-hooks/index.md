@@ -25,7 +25,7 @@ workflow gates, score evaluation outcomes, or accept task results.
 | PostToolUse | Records selected statuses, exit/session receipts, truncation and change signals, including worker command-session cwd provenance | Tool events without actor identity require validated child/parent provenance or remain session-scoped |
 | PreToolUse apply_patch | Checks actual parsed targets against registered Cortex files and the private-root boundary | Denies only established immutable-report/draft-integrity/ownership violations or a worker operand resolving inside `.codex/cortex/` |
 | PreToolUse app-thread messaging | Denies `mcp__codex_app__send_message_to_thread` and its direct alias before dispatch for active Cortex tasks | Tool events may not identify a worker, so the exact denial is task-wide and does not revoke the connector outside Cortex |
-| PreToolUse coordinator project access | Denies known command/file tools when the host explicitly identifies the bound coordinator; records the boundary receipt | Unproven session-scoped events remain compatible; validated child/parent provenance can establish worker scope without `agent_id` |
+| PreToolUse coordinator project access | Allows read-only file evidence and literal bounded reads; delegates project mutation and arbitrary execution | Private operands remain protected; unproven session events do not establish authority |
 | PreToolUse worker private-root boundary | Rejects shell, file, and patch operands resolving inside the confirmed task-private `.codex/cortex/` root | Deny-only preflight; bounded `mcp__cortex__read_report` and ordinary external/workspace diagnostics remain available |
 | SubagentStop/Stop | Diagnoses open drafts and missing saved publications | Advisory; reused assignment boundaries may be unavailable |
 | Interrupt/SessionEnd | Commits a short observed boundary receipt | Does not keep a session alive |
@@ -79,6 +79,25 @@ does not provide a documented continuation boundary, so the hook cannot certify 
 assignment of that worker. Errors are visible and non-blocking except an explicit
 confirmed integrity denial. No failure is a successful capture receipt.
 
+The local handler uses a narrow fail-open boundary only for passive observation,
+logging, telemetry, and diagnostic serialization. It can continue after one of
+those failures and emit a bounded, value-free error type/code with
+`evidence_admissibility=unverified`; a failure while emitting that diagnostic is
+also non-blocking. The helper never wraps storage, authorization, binding,
+provenance, replay/truncation, publication, cleanup, audit, or protected action
+responses, and does not catch or demote `StoreError` or `PermissionError`.
+
+Current-host static skill reads retain the same strict boundary at pre-dispatch and
+when transported through `functions.exec`: one direct `tools.exec_command` call must be bound once
+to a safe JavaScript identifier with `const` and forwarded completely with
+`text(<that-same-identifier>);` (for example, `const result = await ...;
+text(result);`). The
+observer rejects aliases, extra calls, partial forwarding, nested shells, and
+non-manifest paths. The pre-dispatch boundary admits only the exact manifest-bound
+`SKILL.md` leaf through a bounded literal `cat`/`sed` command, optionally inside one
+literal `bash -lc` envelope; the complete successful result is then available for
+the normal worker-skill receipt correlation.
+
 Private observation streams contain event types, safe identities/digests, statuses,
 terminal receipts, actor/thread lineage and bounded path-policy provenance
 (target class, access kind, decision and command/workdir digests), never raw
@@ -94,3 +113,11 @@ Ordinary handler performance target is p95 ≤100 ms including Python startup; t
 is ≤5% of task time. See the measured/unverified distinction in
 [release evidence](../../release-readiness.md) and the
 [three-configuration pilot](../../project/quality-evaluation.md).
+# Current advisory host boundary
+
+Lifecycle hooks never veto a host-permitted tool call. A proposed policy denial
+becomes bounded diagnostic context with `runtime_enforcement=none`; it does not
+claim `denied_before_dispatch`. Logging failures are nonblocking. Actual file
+integrity, failed operations and incomplete evidence remain observable and cannot
+be presented as successful publication or acceptance. Historical enforcement
+descriptions below are superseded by this advisory boundary.

@@ -35,8 +35,8 @@ def _native_turn(thread_id: str = "thread-current", control: str = "1" * 64,
 def test_phase2_identity_lock_matches_current_plugin_manifest():
     manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
     expected_version = manifest["version"]
-    expected_payload_sha256 = "e4f332d43bf380248c5de142b835a62a888f8885ad6577677aa4f394804733d7"
-    assert expected_version == "1.15.9+codex.sha256.e4f332d43bf38024"
+    expected_payload_sha256 = "302595ca1be50369d49bdec575dfb5eb85f31a62de11812baedbbdf6b696c7f6"
+    assert expected_version == "1.15.9+codex.sha256.302595ca1be50369"
     assert expected_version == phase2_cli_runner.CANDIDATE_VERSION
     assert expected_version == phase2_cli_auditor.CANDIDATE_VERSION
     assert expected_payload_sha256 == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
@@ -46,16 +46,20 @@ def test_phase2_identity_lock_matches_current_plugin_manifest():
 
 def test_phase2_live_harness_trusted_anchors_match_current_source():
     harness_sha256 = hashlib.sha256((ROOT / "scripts/cortex-live-smoke").read_bytes()).hexdigest()
+    observer_sha256 = hashlib.sha256((ROOT / "scripts/cortex-desktop-dev").read_bytes()).hexdigest()
     adapter_sha256 = hashlib.sha256((ROOT / "scripts/phase2_cli_adapter.py").read_bytes()).hexdigest()
     assert {phase2_cli_runner.TRUSTED_HARNESS_SHA256,
             phase2_cli_auditor.TRUSTED_HARNESS_SHA256,
             phase2_cli_adapter.TRUSTED_HARNESS_SHA256} == {harness_sha256}
     assert {phase2_cli_runner.TRUSTED_ADAPTER_SHA256,
             phase2_cli_auditor.TRUSTED_ADAPTER_SHA256} == {adapter_sha256}
+    assert {phase2_cli_runner.TRUSTED_OBSERVER_SHA256,
+            phase2_cli_auditor.TRUSTED_OBSERVER_SHA256,
+            phase2_cli_adapter.TRUSTED_OBSERVER_SHA256} == {observer_sha256}
     assert {phase2_cli_runner.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
-                "2cd411e289b6e9e8850136d733ae2f873e1702838ad6aef30b7fe68b4b8dbe63"
+                "6f672d5ca2acb54efc033e2151ec6981217ffbc15ad337fd9d0165482f360e80"
             }
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_auditor.EVIDENCE_COLLECTION
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_adapter.EVIDENCE_CONTRACT
@@ -1286,6 +1290,347 @@ def test_orphan_recovery_refuses_submitted_transport_receipt(tmp_path):
     assert not actions
 
 
+def test_ordinary_binding_receipt_is_owner_bound(tmp_path):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="ordinary_binding_fixture")
+    observation = tmp_path / "observation"
+    observation.mkdir(mode=0o700)
+    namespace = harness["_capture_ordinary_session_binding"].__globals__
+    namespace["STATE"] = observation
+    data = {
+        "workdir": str(tmp_path), "store": str(tmp_path / "project.db"),
+        "events": str(observation / "events"), "started_at": 100.0,
+        "thread_created_since": 100.0, "tmux_server_pid": 41,
+        "tmux_session_name": "cortex-markdown-smoke", "tmux_session_id": "$41",
+        "tmux_session_created": 42, "tmux_pane_id": "%41", "tmux_pane_pid": 4141,
+        "tmux_pane_start_ticks": 4142,
+    }
+    harness["_capture_ordinary_session_binding"](data)
+    binding = json.loads(Path(data["session_binding_path"]).read_text())
+    assert binding["schema_version"] == "cortex-live-session-binding-v1"
+    assert binding["control_record_sha256"] is None
+    assert data["session_receipt"] == binding["session_receipt"]
+    assert harness["_require_session_binding"](data) == binding
+
+
+def _ordinary_session_binding_fixture(tmp_path):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="ordinary_binding_sequence")
+    observation = tmp_path / "observation"
+    observation.mkdir(mode=0o700)
+    namespace = harness["_capture_ordinary_session_binding"].__globals__
+    namespace["STATE"] = observation
+    data = {
+        "workdir": str(tmp_path), "store": str(tmp_path / "project.db"),
+        "events": str(observation / "events"), "started_at": 100.0,
+        "thread_created_since": 100.0, "tmux_server_pid": 41,
+        "tmux_session_name": "cortex-markdown-smoke", "tmux_session_id": "$41",
+        "tmux_session_created": 42, "tmux_pane_id": "%41", "tmux_pane_pid": 4141,
+        "tmux_pane_start_ticks": 4142,
+    }
+    harness["_capture_ordinary_session_binding"](data)
+    return harness, data, observation
+
+
+def test_ordinary_start_observation_audit_then_stop_uses_same_binding(tmp_path, monkeypatch):
+    harness, data, state_root = _ordinary_session_binding_fixture(tmp_path)
+    events = state_root / "events"
+    events.mkdir(mode=0o700)
+    (state_root / "capture.txt").write_text("Cortex live-dev exit=0\n")
+    (state_root / "session.json").write_text(json.dumps(data))
+    namespace = harness["main"].__globals__
+    monkeypatch.setitem(namespace, "STATE", state_root)
+    monkeypatch.setitem(namespace, "state", lambda: data)
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: {
+        "current_command": "bash", "dead": False, "dead_status": None, "descendants": [],
+    })
+    observer = {
+        "observed_tool_calls": lambda _data: [],
+        "classify_host_failures": lambda _rows: ([], []),
+        "tool_error_history": lambda _rows: [],
+        "orchestration_error_history": lambda _rows: [],
+        "call_policy_violations": lambda _rows: [],
+        "mcp_first_bootstrap_receipt": lambda _rows, _data: None,
+        "mcp_first_bootstrap_violations": lambda _rows, _data: [],
+        "observational_policy_partition": lambda _rows, _data, policy: (policy, []),
+        "open_command_sessions": lambda _rows: [],
+        "open_exec_cells": lambda _rows: [],
+        "classify_audit_findings": lambda **_kwargs: {
+            "evidence_integrity_invalidators": [], "quality_findings": [],
+            "evidence_valid": True, "score_eligible": True,
+        },
+        "orchestration_policy_violations": lambda _rows: [],
+        "is_orchestration_call": lambda _row: False,
+        "current_host_observational_qualification": lambda *_args, **_kwargs: {
+            "status": "observational_accept", "outcome_receipt": {},
+        },
+    }
+    monkeypatch.setitem(namespace, "_observer_namespace", lambda _name: observer)
+    monkeypatch.setitem(namespace, "normalized_observer_events", lambda _observer, _events: ([], []))
+    monkeypatch.setitem(namespace, "tmux", lambda *args, **kwargs: None)
+    identity_checks = []
+    monkeypatch.setitem(namespace, "_exact_cleanup_identity",
+                        lambda actual: identity_checks.append(actual))
+    monkeypatch.setitem(namespace, "live_exit_marker_evidence", lambda _data: {
+        "status": "complete", "exit_status": 0,
+    })
+
+    for command in (("status",), ("calls",), ("events",), ("audit",)):
+        monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", *command])
+        assert harness["main"]() in (None, 0)
+        assert harness["_require_session_binding"](data)["session_receipt"] == data["session_receipt"]
+
+    monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", "stop"])
+    harness["main"]()
+    last = json.loads((state_root / "last.json").read_text())
+    assert last["session_receipt"] == data["session_receipt"]
+    assert Path(last["pre_stop_evidence"]["path"]).is_dir()
+    assert identity_checks == [data, data]
+
+
+@pytest.mark.parametrize("mismatch", ["server", "session", "created", "pane", "pid", "start_tick"])
+def test_ordinary_stop_rejects_restarted_or_reused_live_identity(tmp_path, monkeypatch, mismatch):
+    harness, data, _state_root = _ordinary_session_binding_fixture(tmp_path)
+    identity = {
+        "server": data["tmux_server_pid"], "session": data["tmux_session_id"],
+        "created": data["tmux_session_created"], "pane": data["tmux_pane_id"],
+        "pid": data["tmux_pane_pid"], "start_tick": data["tmux_pane_start_ticks"],
+    }
+    identity[mismatch] = {
+        "server": 99, "session": "$99", "created": 999,
+        "pane": "%99", "pid": 9999, "start_tick": 99999,
+    }[mismatch]
+    import types
+    monkeypatch.setitem(harness["_exact_cleanup_identity"].__globals__, "tmux",
+                        lambda *args, **kwargs: types.SimpleNamespace(
+                            returncode=0,
+                            stdout=(str(identity["server"]) + "\n" if args[0] == "display-message"
+                                    else "cortex-markdown-smoke|" + identity["session"] + "|"
+                                    + str(identity["created"]) + "|" + identity["pane"] + "|"
+                                    + str(identity["pid"]) + "\n")))
+    monkeypatch.setitem(harness["_exact_cleanup_identity"].__globals__, "_proc_start_ticks",
+                        lambda _pid: identity["start_tick"])
+    with pytest.raises(RuntimeError, match="replaced tmux server|replaced session or pane|PID reuse"):
+        harness["_exact_cleanup_identity"](data)
+
+
+def test_ordinary_binding_creation_is_no_replace_under_concurrent_creator(tmp_path, monkeypatch):
+    harness, data, _state_root = _ordinary_session_binding_fixture(tmp_path)
+    # Recreate the fixture with a fresh target and make an interposed creator
+    # win immediately before the immutable writer opens it. The competing
+    # bytes must survive; ordinary capture must fail closed.
+    binding_path = Path(data["session_binding_path"])
+    binding_path.unlink()
+    original = harness["_immutable_private_json"]
+    competing = {"schema_version": "foreign-creator", "session_receipt": "e" * 64}
+
+    def competing_creator(path, value):
+        path.write_text(json.dumps(competing))
+        path.chmod(0o600)
+        return original(path, value)
+
+    monkeypatch.setitem(harness["_capture_ordinary_session_binding"].__globals__,
+                        "_immutable_private_json", competing_creator)
+    with pytest.raises(RuntimeError):
+        harness["_capture_ordinary_session_binding"](data)
+    assert json.loads(binding_path.read_text()) == competing
+    assert binding_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_ordinary_normal_stop_keeps_session_when_current_identity_is_foreign(tmp_path, monkeypatch):
+    harness, data, state_root = _ordinary_session_binding_fixture(tmp_path)
+    events = state_root / "events"
+    events.mkdir(mode=0o700)
+    (state_root / "capture.txt").write_text("Cortex live-dev exit=0\n")
+    (state_root / "session.json").write_text(json.dumps(data))
+    namespace = harness["main"].__globals__
+    monkeypatch.setitem(namespace, "STATE", state_root)
+    monkeypatch.setitem(namespace, "state", lambda: data)
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: {
+        "current_command": "bash", "dead": False, "dead_status": None, "descendants": [],
+    })
+    monkeypatch.setitem(namespace, "live_exit_marker_evidence", lambda _data: {
+        "status": "complete", "exit_status": 0,
+    })
+    actions = []
+    monkeypatch.setitem(namespace, "tmux", lambda *args, **kwargs: (
+        actions.append(args) or type("Result", (), {
+            "returncode": 0, "stdout": "999\n" if args[0] == "display-message" else ""
+        })()
+    ))
+    monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", "stop"])
+    with pytest.raises(RuntimeError, match="replaced tmux server"):
+        harness["main"]()
+    assert (state_root / "session.json").exists()
+    assert not any(call[0] == "kill-session" for call in actions)
+
+
+def test_ordinary_start_enter_send_uses_ordinary_binding_and_live_identity(tmp_path, monkeypatch):
+    """Exercise the ordinary start-created receipt through one safe send."""
+    harness, data, state_root = _ordinary_session_binding_fixture(tmp_path)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("Ordinary start to send\n")
+    namespace = harness["main"].__globals__
+    monkeypatch.setitem(namespace, "STATE", state_root)
+    monkeypatch.setitem(namespace, "state", lambda: data)
+    saved = []
+    monkeypatch.setitem(namespace, "save", lambda value: saved.append(dict(value)))
+    monkeypatch.setitem(namespace, "_require_empty_composer",
+                        lambda *_: "› Ask Codex to do anything")
+    receipts = iter((0, 1))
+    monkeypatch.setitem(namespace, "user_prompt_receipts", lambda *_: next(receipts))
+    checks = []
+    monkeypatch.setitem(namespace, "_exact_cleanup_identity",
+                        lambda actual: checks.append(actual["session_receipt"]))
+    sent = []
+    import types
+    monkeypatch.setitem(namespace, "tmux",
+                        lambda *args, **kwargs: sent.append(args)
+                        or types.SimpleNamespace(returncode=0, stdout=""))
+    monkeypatch.setitem(namespace, "time",
+                        types.SimpleNamespace(sleep=lambda _: None, time=lambda: 123.0))
+
+    monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", "enter"])
+    assert harness["main"]() is None
+    monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", "send",
+                                        "--prompt-file", str(prompt)])
+    assert harness["main"]() is None
+    assert checks == [data["session_receipt"]] * 3
+    assert sum(call[0] == "paste-buffer" for call in sent) == 1
+    assert sum(call[-1] == "Enter" for call in sent) == 2
+    assert saved[-1]["first_submission_at"] == 123.0
+
+
+def test_ordinary_send_subprocess_canonical_path_passes_native_observation(tmp_path):
+    """Run the real helper main/send route past the former Phase 2-only error."""
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("Subprocess ordinary send\n")
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    script = r'''
+import runpy
+import sys
+import types
+from pathlib import Path
+
+helper = runpy.run_path(sys.argv[1], run_name="canonical_ordinary_subprocess")
+state_root = Path(sys.argv[2])
+prompt = Path(sys.argv[3])
+events = state_root / "events"
+events.mkdir(mode=0o700)
+data = {
+    "workdir": str(state_root), "store": str(state_root / "project.db"),
+    "events": str(events), "started_at": 100.0, "thread_created_since": 100.0,
+    "tmux_server_pid": 41, "tmux_session_name": "cortex-markdown-smoke",
+    "tmux_session_id": "$41", "tmux_session_created": 42,
+    "tmux_pane_id": "%41", "tmux_pane_pid": 4141,
+    "tmux_pane_start_ticks": 4142, "resumed": False,
+    "original_request_sha256": "a" * 64, "first_submission_at": None,
+    "lifecycle_status": "started", "bootstrap_route": helper["MCP_FIRST_BOOTSTRAP_ROUTE"],
+}
+namespace = helper["main"].__globals__
+namespace["STATE"] = state_root
+helper["_capture_ordinary_session_binding"](data)
+namespace["state"] = lambda: data
+namespace["save"] = lambda _value: None
+namespace["_exact_cleanup_identity"] = lambda _value: None
+seen = [0]
+def user_prompt_receipts(*_args):
+    seen[0] += 1
+    return 0 if seen[0] == 1 else 1
+namespace["user_prompt_receipts"] = user_prompt_receipts
+namespace["native_user_turn_receipts"] = lambda *_args: [{"thread_id": "child"}]
+namespace["_bind_mcp_first_root"] = lambda *_args: None
+def tmux(*args, **_kwargs):
+    stdout = "› Ask Codex to do anything\n" if args[0] == "capture-pane" else ""
+    return types.SimpleNamespace(returncode=0, stdout=stdout)
+namespace["tmux"] = tmux
+namespace["time"] = types.SimpleNamespace(sleep=lambda _value: None, time=lambda: 123.0)
+sys.argv = ["cortex-live-smoke", "send", "--prompt-file", str(prompt)]
+helper["main"]()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(ROOT / "scripts/cortex-live-smoke"),
+         str(state_root), str(prompt)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Submitted the exact literal prompt" in result.stdout
+    assert "Phase 2 native receipt lacks exact control binding" not in result.stderr
+
+
+@pytest.mark.parametrize("mutation", ["phase2_control", "phase2_schema", "missing_receipt",
+                                       "tampered_binding", "foreign_path"])
+def test_ordinary_send_rejects_cross_mode_or_tampered_receipt(tmp_path, mutation):
+    harness, data, _state_root = _ordinary_session_binding_fixture(tmp_path)
+    binding_path = Path(data["session_binding_path"])
+    if mutation == "phase2_control":
+        data["phase2_control_sha256"] = "c" * 64
+    elif mutation == "phase2_schema":
+        data["session_binding_schema"] = harness["SESSION_BINDING_SCHEMA"]
+    elif mutation == "missing_receipt":
+        data.pop("session_receipt")
+    elif mutation == "tampered_binding":
+        binding_path.write_text(json.dumps({
+            "schema_version": harness["ORDINARY_SESSION_BINDING_SCHEMA"],
+            "control_record_sha256": None,
+        }))
+    else:
+        foreign = binding_path.parent / ("session-binding-" + "e" * 64 + ".json")
+        foreign.write_text(binding_path.read_text())
+        foreign.chmod(0o600)
+        data["session_binding_path"] = str(foreign)
+    with pytest.raises(RuntimeError, match="Ordinary send|Normal stop"):
+        harness["_require_ordinary_send_binding"](data)
+
+
+@pytest.mark.parametrize("identity_failure", ["stale", "foreign"])
+def test_ordinary_send_rejects_stale_or_foreign_live_identity(tmp_path, monkeypatch,
+                                                               identity_failure):
+    harness, data, _state_root = _ordinary_session_binding_fixture(tmp_path)
+    message = ("replaced session or pane" if identity_failure == "foreign"
+               else "PID reuse")
+
+    def refuse(_data):
+        raise RuntimeError(message)
+
+    monkeypatch.setitem(harness["_require_ordinary_send_binding"].__globals__,
+                        "_exact_cleanup_identity", refuse)
+    with pytest.raises(RuntimeError, match=message):
+        harness["_require_ordinary_send_binding"](data)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "mismatched", "stale", "foreign"])
+def test_ordinary_binding_receipt_rejects_tampering(tmp_path, mutation):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="ordinary_binding_negative")
+    observation = tmp_path / "observation"
+    observation.mkdir(mode=0o700)
+    namespace = harness["_capture_ordinary_session_binding"].__globals__
+    namespace["STATE"] = observation
+    data = {
+        "workdir": str(tmp_path), "store": str(tmp_path / "project.db"),
+        "events": str(observation / "events"), "started_at": 100.0,
+        "thread_created_since": 100.0, "tmux_server_pid": 41,
+        "tmux_session_name": "cortex-markdown-smoke", "tmux_session_id": "$41",
+        "tmux_session_created": 42, "tmux_pane_id": "%41", "tmux_pane_pid": 4141,
+        "tmux_pane_start_ticks": 4142,
+    }
+    harness["_capture_ordinary_session_binding"](data)
+    mutated = dict(data)
+    binding_path = Path(data["session_binding_path"])
+    if mutation == "missing":
+        mutated.pop("session_receipt")
+    elif mutation == "mismatched":
+        mutated["session_receipt"] = "f" * 64
+    elif mutation == "stale":
+        binding_path.write_text(json.dumps({"schema_version": "cortex-live-session-binding-v1"}))
+    else:
+        foreign = observation / ("session-binding-" + "e" * 64 + ".json")
+        foreign.write_text(binding_path.read_text())
+        foreign.chmod(0o600)
+        mutated["session_binding_path"] = str(foreign)
+    with pytest.raises(RuntimeError, match="Normal stop"):
+        harness["_require_session_binding"](mutated)
+
+
 def test_orphan_recovery_refuses_foreign_session_or_missing_receipt(tmp_path):
     record = tmp_path / "control.json"
     record.write_text("sealed-control")
@@ -2002,6 +2347,14 @@ def test_native_user_turn_rejects_unrelated_same_cwd_root_without_owned_process_
     assert receipt[0]["control_record_sha256"] == "c" * 64
     assert receipt[0]["session_receipt"] == "d" * 64
     assert receipt[0]["prompt_sha256"] == hashlib.sha256(b"exact prompt").hexdigest()
+    # Current-host observational MCP-first qualification has no Phase 2
+    # control record. The same owned rollout remains usable as native evidence
+    # without fabricating a strict control binding.
+    data.pop("phase2_control_sha256"); data.pop("session_receipt")
+    observational = reader(data, "exact prompt")
+    assert len(observational) == 1
+    assert "control_record_sha256" not in observational[0]
+    assert "session_receipt" not in observational[0]
 
 
 @pytest.mark.parametrize("churn", ["added", "removed", "retargeted"])
@@ -2070,6 +2423,15 @@ def test_native_user_turn_wait_handles_delay_missing_and_ambiguity(monkeypatch):
     monkeypatch.setitem(globals_, "native_user_turn_receipts", lambda *_: [_native_turn(), _native_turn("other")])
     with pytest.raises(RuntimeError, match="ambiguous or duplicate"):
         wait({}, "exact", wait=False)
+
+
+def test_current_host_empty_composer_without_placeholder():
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="current_host_composer")
+    check = harness["_has_exact_empty_active_composer"]
+    assert check("›\n\n  gpt-5.6-luna high · /tmp/fixture\n")
+    assert not check("›\n")
+    assert not check("› Yes, continue\nPress enter to continue\n")
+    assert not check("›\n\n  gpt-5.6-luna high · /tmp/fixture\n› pending text\n")
 
 
 def test_empty_composer_rejects_historical_placeholder_before_active_text(monkeypatch):
@@ -3223,3 +3585,87 @@ def test_offline_host_receipts_do_not_probe_live_tools(tmp_path):
     source = (ROOT / "scripts/phase2_cli_runner.py").read_text()
     assert '["tmux", "-V"]' not in source
     assert '["codex", "--version"]' not in source
+def test_live_exit_marker_evidence_waits_for_owned_bash_and_marks_missing(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="exit_marker_timing")
+    probe = harness["live_exit_marker_evidence"]
+    namespace = probe.__globals__
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    terminal = {"current_command":"bash", "dead":False, "descendants":[]}
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: terminal)
+    monkeypatch.setattr(namespace["time"], "sleep", lambda _interval: None)
+    assert probe({}, attempts=1, interval=0)["status"] == "evidence_incomplete_missing_exit_marker"
+    (tmp_path / "capture.txt").write_text("Cortex live-dev exit=0\n")
+    assert probe({}, attempts=1, interval=0)["status"] == "complete"
+
+
+def test_live_exit_marker_evidence_reports_idle_composer_for_outcome_based_completion(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="composer_marker_branch")
+    probe = harness["live_exit_marker_evidence"]
+    namespace = probe.__globals__
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: {
+        "current_command":"codex", "dead":False,
+        "descendants":[{"pid":1235,"ppid":1234,"command":"codex"}],
+    })
+    assert probe({}, attempts=1, interval=0)["status"] == "idle_composer_observed"
+
+
+def test_ordinary_stop_seals_immutable_pre_stop_bundle_and_reserves_distinct_post_stop_path(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="pre_stop_bundle")
+    seal = harness["seal_pre_stop_evidence"]
+    namespace = seal.__globals__
+    events = tmp_path / "events"
+    events.mkdir(mode=0o700)
+    (tmp_path / "capture.txt").write_text("Cortex live-dev exit=0\n")
+    receipt = "a" * 64
+    calls = [{"thread_id": "root", "role": "coordinator", "tool": "functions.exec", "outcome": "success"}]
+    mcp = [{"event_kind": "mcp", "operation": "write_report", "outcome": "success"}]
+    hooks = [{"event_kind": "hook", "hook_event": "PostToolUse", "outcome": "success"}]
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    monkeypatch.setitem(namespace, "_observer_namespace", lambda _name: {
+        "observed_tool_calls": lambda _data: calls,
+    })
+    monkeypatch.setitem(namespace, "normalized_observer_events", lambda _observer, _events: (mcp, hooks))
+    sealed = seal({"session_receipt": receipt, "events": str(events)}, {
+        "status": "complete", "exit_status": 0,
+    })
+    bundle = Path(sealed["path"])
+    manifest = json.loads((bundle / "evidence-bundle.json").read_text())
+    assert bundle.stat().st_mode & 0o777 == 0o700
+    assert manifest["schema_version"] == "cortex-live-pre-stop-evidence-v1"
+    assert manifest["session_receipt"] == receipt
+    assert sealed["sha256"] == hashlib.sha256((bundle / "evidence-bundle.json").read_bytes()).hexdigest()
+    for name, entry in manifest["artifacts"].items():
+        artifact = bundle / name
+        assert artifact.stat().st_mode & 0o777 == 0o600
+        assert entry["sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    post_stop = Path(sealed["post_stop_directory"])
+    assert post_stop != bundle
+    post_stop.mkdir(mode=0o700)
+    (post_stop / "calls.jsonl").write_text('{"error":"no active session"}\n')
+    assert 'no active session' not in (bundle / "calls.jsonl").read_text()
+    with pytest.raises(RuntimeError, match="already exists"):
+        seal({"session_receipt": receipt, "events": str(events)}, {"status": "complete", "exit_status": 0})
+
+
+def test_ordinary_stop_refuses_cleanup_before_owned_bash_exit_marker(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="ordinary_stop_marker_gate")
+    main = harness["main"]
+    namespace = main.__globals__
+    events = tmp_path / "events"
+    events.mkdir(mode=0o700)
+    (tmp_path / "capture.txt").write_text("still running\n")
+    session = {"session_receipt": "b" * 64, "events": str(events)}
+    (tmp_path / "session.json").write_text(json.dumps(session))
+    actions = []
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: {
+        "current_command": "bash", "dead": False, "descendants": [],
+    })
+    monkeypatch.setitem(namespace, "tmux", lambda *args, **kwargs: actions.append(args))
+    monkeypatch.setattr(namespace["time"], "sleep", lambda _interval: None)
+    monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", "stop"])
+    with pytest.raises(RuntimeError, match="Cortex live-dev exit=0"):
+        main()
+    assert (tmp_path / "session.json").exists()
+    assert not actions

@@ -110,7 +110,9 @@ tokens in 253.538 seconds. Source checks for this candidate passed 382 tests in
 The Desktop run started after that rejected CLI was stopped at the user’s
 request before product work: nine observed calls, three initialization events,
 no errors yet, and no completed consultation. It is not qualification. Desktop
-will be run only after a clean CLI result.
+will be run only after a clean CLI result. This retained historical diagnostic
+does not authorize a Desktop diagnostic substitute under the current CLI-first
+qualification procedure.
 
 ## Previous candidate
 

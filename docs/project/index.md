@@ -7,6 +7,7 @@ execution and semantic judgment. The complete runtime is packaged below
 - [Report storage and reliability](storage.md)
 - [Development conventions](conventions.md)
 - [Verification](verification.md)
+- [Outcome-driven incident coordination](incident-outcomes.md)
 - [Marketplace skills and native agent capacity](host-compatibility.md)
 - [Comparative outcome evaluation](quality-evaluation.md)
 - [Phase 5 adaptive selection (offline)](phase5-adaptive-selection.md)

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .contracts import StoreError
+from .governance import governance_snapshot
 
 HOOK_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS source_turns (
@@ -203,6 +204,7 @@ class HookStorage:
             published = db.execute("SELECT count(*) FROM drafts WHERE task_id=? AND owner_thread_id=? AND published_report_id IS NOT NULL", (task, thread)).fetchone()[0]
             changes = db.execute("SELECT COALESCE(MAX(sequence),0) FROM task_changes WHERE task_id=? AND kind!='hook'", (task,)).fetchone()[0]
             result = dict(source_revision=sources[0]["revision"] if sources else 0,
+                          governance=governance_snapshot(db,task),
                           pipeline=dict(pipeline) if pipeline else None,
                           source_refs=[dict(row) for row in sources],
                           own_drafts=[dict(row) for row in drafts], published_count=published,

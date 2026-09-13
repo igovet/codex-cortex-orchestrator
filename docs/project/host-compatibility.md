@@ -66,11 +66,147 @@ contexts or grant access to host state.
 
 ## Qualification boundary
 
-Validate one unchanged installed marketplace candidate on actual CLI and Desktop:
-complete skill loading, Codebase Memory priority when available, report identity,
-product outcome and independent verification when warranted. Review all calls,
-including unsuccessful reads, truncated results and capacity handling. A product
-pass does not erase protocol failures. Keep raw host evidence private.
+Validate one unchanged installed marketplace candidate on actual CLI and then
+Desktop: complete skill loading, Codebase Memory priority when available, report
+identity, product outcome and independent verification when warranted. Desktop may
+start only after CLI ACCEPT with a clean audit on that exact unchanged candidate and
+payload. A failed, rejected, unavailable, or unverified CLI is ended and audited;
+Desktop is not a diagnostic substitute. Review all calls, including unsuccessful
+reads, truncated results and capacity handling. A product pass does not erase
+protocol failures. Keep raw host evidence private.
+
+For a current host that does not attest `functions-exec-pre-dispatch-v1`, the
+bounded CLI fallback is `--bootstrap-route mcp-first`. It is an observer-gated,
+not host-enforced, route: the child coordinator must directly complete public
+`mcp__cortex__create_task` before any project-target host action. The observer
+requires exact child-thread, project, task, original-request, and native-result
+receipt bindings, and records `host_enforcement_state=unverified`. Pre-binding
+shell, terminal, file, patch, nested wrapper, or private-path activity invalidates
+the evidence. The sole observed-current-host static discovery exception is a complete
+bounded literal read of an advertised coordinator `SKILL.md` or public `.mcp.json`/
+`.codex-plugin/plugin.json` declaration in the isolated bundled release; directories,
+globs, arbitrary cache content, runtime/state/registry paths, and mutation remain
+invalid. No shell fallback or Desktop diagnostic substitute is permitted.
+The exact value-free `text(ALL_TOOLS)` envelope is a distinct bounded public-catalogue
+observation only with a complete receipt. It never authorizes filters, queries, paths,
+content extraction, mutation, nested calls, or mixed wrappers.
+
+The private-path boundary evaluates the manifest-bound active skill exception before
+the general cache deny. It permits only one bounded literal `sed` or `cat` read of the
+exact active coordinator `skills/orchestrator/SKILL.md`, or a native-child worker's
+exact registered `skills/worker-*/SKILL.md`; the worker read may use one literal
+`bash -lc` envelope whose sole payload is reparsed by that same grammar. Direct
+dispatch therefore reaches the registered leaf and can produce its complete result
+receipt; directories, globs, aliases, other profiles, nested shells, extra commands,
+registries, runtime/state files, and every mutation remain denied. A complete result
+receipt is distinct from a server event. Where the current host has no separate event,
+observational evidence requires that result receipt plus one later non-replayed
+task-thread publication correlation; it remains `host_enforcement_state=unverified`.
+
+When the current host omits the authenticated worker assignment hint at that first
+hook event, the boundary may admit one literal, manifest-bound leaf from the closed
+registered worker `SKILL.md` set—not an arbitrary plugin/cache path. The retained
+observer must later match that read's profile and assignment digest to the unique
+closed native worker result; a cross-profile, absent, duplicate, or unmatched result
+is BLOCK. Current-host `functions.exec` transports retain only the exact bounded
+nested skill-read metadata necessary to classify that known coordinator read; a
+generic wrapper or any omitted bounded field remains a pre-binding invalidator.
+For the worker's exact registered leaf only, one literal `bash -lc` transport
+envelope is accepted as transport rather than a second command. Its sole payload is
+reparsed by the same closed `cat`/`sed`/`wc` read grammar; nested shells, extra
+operations, directories, globs, adjacent cache files, and mutations remain denied.
+
+In the current-host MCP-first observational mode, a verified closed native-worker
+result plus its correlated coordinator delegation-evidence report may classify an
+otherwise missing assignment receipt, separate worker skill-load receipt, or
+worker-project-before-skill-receipt finding as a retained non-blocking diagnostic.
+Likewise, a missing separate server event is diagnostic only after one complete public
+MCP result and exactly one later same-thread non-replayed publication result. This is
+post-observation evidence interpretation, not pre-dispatch authorization and not a
+host-enforcement claim. Failed, truncated, replayed, duplicate, ambiguous, private,
+registry/state, project-target, or mutating access—and failed binding, pending waits,
+or incomplete audit—remain hard non-ACCEPT conditions.
+
+For current-host interactive qualification, a capability the installed host cannot
+emit is `not_applicable` or a retained diagnostic, never a hard result by itself:
+bootstrap attestation, assignment-policy/skill-load receipt, separate server event,
+and process self-exit are the bounded examples. A completed route still needs exactly
+one direct public task receipt, one terminal native worker, one task-bound worker
+publication, coordinator reconciliation of the exact artifact hash, complete and
+non-truncated capture/calls/events/audit, and no pending/open work. A verified idle
+composer followed by exact owned cleanup is the alternative terminal proof when a
+self-exit marker is unavailable. All observed failures, malformed/mismatched/
+ambiguous/replayed/truncated evidence, artifact/check failures, and unsafe
+private/project mutation remain hard BLOCK conditions; the result is only
+`observational_accept` with `host_enforcement_state=unverified`.
+
+The same outcome rule treats a worker final that omits a redundant report ID as a
+diagnostic only where exactly one task/parent/profile-correlated worker publication
+and exact coordinator artifact reconciliation independently supply the identity.
+One completed non-mutating public `read_report` `invalid_arguments` lookup is also
+diagnostic only after that valid publication/reconciliation proof. These narrow
+current-host exceptions do not admit failed writes, missing or ambiguous report
+publication, mutation/private targets, artifact mismatch, replay, truncation, or
+other malformed evidence.
+
+For the current Desktop host only, `cortex-desktop-dev start` may record the
+predeclared exact SHA-256 for the single expected `RESULT.md` artifact. A complete
+observational Desktop outcome is one durable submitted root/direct public task
+receipt, one attributable native child thread, one successful coordinator report
+receipt, the exact regular artifact leaf below the isolated workdir, complete
+non-truncated capture, and no open session or cell. Historical polling `pending`,
+unavailable worker assignment/skill/native-final/report receipts, and a failed
+side-effect-free worker `wc` or `truncate` check are retained diagnostics only when
+that independently checked final state is complete. This does not authorize any
+executed private/cache/project-outside-artifact access, mutation, duplicate task or
+root, artifact mismatch, truncation, final open work, or a failed check without the
+later exact artifact; those conditions remain BLOCK. The result remains
+`observational_accept`, never host enforcement.
+
+When the installed host omits a public task ID or native result body, the observer
+uses only one immutable expected root, one parent-bound native worker/report, and
+one exact non-replayed coordinator artifact reconciliation as opaque root/report
+correlation. It never infers task identity: missing, duplicate, replayed, or
+mismatched root, worker, report, or artifact links remain BLOCK. One or more
+exact-equivalent denied-before-dispatch errors from the bounded registered worker
+`SKILL.md` read are diagnostic only after that same full outcome proof. They require
+the same worker/profile/manifest-bound static-read identity; differing, replayed,
+private/project, mutating, dispatched, truncated, or ambiguous reads remain blocking
+and none credits a skill receipt.
+
+Within `current_host_mcp_first` only, the exact labels
+`worker_assignment_policy_unverified` and `mcp_first_bootstrap_unverified`
+record unavailable installed-host attestations. The observer always retains them as
+printed `unsupported_by_current_host`, `not_applicable` diagnostics: they are never
+integrity invalidators or hard blockers, and they grant neither evidence nor a host
+enforcement claim. Supported outcome proof remains independently required; missing,
+unsafe, ambiguous, replayed, truncated, pending, open, or incomplete supported
+evidence remains fail-closed. Ordinary routes retain their existing policy handling.
+The final current-host audit boundary reapplies exactly this two-label treatment after
+all collector and classifier stages, preventing an earlier representation from
+reintroducing either unsupported attestation as an invalidator. It does not suppress
+any unrelated policy row or establish any outcome evidence.
+Generic `pre_binding_host_action` is never a route-specific diagnostic: it lacks
+strict actor/profile/path proof and can describe an unsafe dispatch. The one
+coordinator setup exception is an observer-proven manifest-bound, bounded, read-only
+literal `skills/orchestrator/SKILL.md` read carrying the active-skill marker; the
+separate exact-equivalent registered-worker static-SKILL-read predicate can retain
+complete read-only denied records. Any failed, replayed, ambiguous,
+directory/glob/other-skill, private/project-target, dispatched, truncated, or
+mutating bootstrap action remains a hard block.
+
+The helper's exit status is derived from this final classification: it returns 0
+only when `observational_accept` and valid evidence are present and every retained
+finding is explicitly diagnostic/not-applicable. Diagnostics remain printed; a
+hard failure, remaining policy row, pending/open state, mismatch, mutation,
+truncation, ambiguity, replay, or missing outcome proof returns 1.
+
+If worker Cortex MCP is unavailable, the current-host route may use only the closed
+`cortex-native-worker-result-v1` final body. The observer requires one exact native
+spawn, terminal wait, parent/task, registered profile, assignment digest, and status
+match, then requires a coordinator-authored `Delegation evidence: native_worker_result`
+publication. This is observational evidence with asserted worker artifact hashes and
+`host_enforcement_state=unverified`, not worker authorship or host enforcement.
 
 Native V2 capacity recovery from a stranded `pending_init` context remains a host
 limitation. Standard automatic eviction of eligible completed contexts is distinct

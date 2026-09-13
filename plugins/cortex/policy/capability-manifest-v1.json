@@ -1,0 +1,34 @@
+{
+  "schema": "capability-manifest-v1",
+  "version": 1,
+  "profiles": {
+    "build-verification": {
+      "profile_version": "agent-v2",
+      "allow": [
+        "cortex.report.read",
+        "cortex.task.read",
+        "cortex.runtime.execute",
+        "cortex.runtime.observe",
+        "cortex.artifact.inspect"
+      ],
+      "deny": [
+        "cortex.task.write",
+        "cortex.orchestrator.mutate",
+        "cortex.release.promote",
+        "cortex.internal.*",
+        "host.cache.inspect",
+        "host.registry.inspect",
+        "host.plugin.inspect",
+        "host.debug.inspect",
+        "host.state.read"
+      ]
+    }
+  },
+  "routes": [
+    "native_cli_qualification",
+    "native_desktop_qualification"
+  ],
+  "targets": ["cli", "desktop"],
+  "phases": ["bound_task"],
+  "host_enforcement": "required_host_attestation"
+}

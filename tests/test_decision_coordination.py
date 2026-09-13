@@ -15,6 +15,53 @@ def row(tool, thread='worker', role='backend_dev', **fields):
     return dict(tool=tool, thread_id=thread, role=role, outcome='success') | fields
 
 
+def test_coordinator_python_reconciliation_is_closed_read_only_grammar():
+    import shlex
+    parse=OBSERVER['python_artifact_read_paths']
+    program=('from pathlib import Path; b=Path("RESULT.md").read_bytes(); '
+             'print(repr(b)); print("lines", len(b.splitlines()), '
+             '"ends_newline", b.endswith(b"\\n"), "exact", b == b"ok\\n")')
+    command='python3 -c '+shlex.quote(program)
+    assert parse(command)==['RESULT.md']
+    assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':command}),'coordinator','/tmp/project')
+    hashing=('from pathlib import Path; import hashlib; p=Path("RESULT.md"); '
+             'b=p.read_bytes(); print(hashlib.sha256(b).hexdigest())')
+    assert parse('python3 -B -c '+shlex.quote(hashing))==['RESULT.md']
+    for unsafe in (
+        program+'; Path("RESULT.md").write_bytes(b"oops")',
+        program.replace('"RESULT.md"','"../RESULT.md"'),
+        program.replace('"RESULT.md"','"/tmp/RESULT.md"'),
+        program.replace('"RESULT.md"','".codex/cortex/private"'),
+        'import os; '+program,
+        'from pathlib import Path; print(__import__("os").system("id"))',
+        'from pathlib import Path; Path=print; print(Path("RESULT.md"))',
+        'from pathlib import Path; print=Path("RESULT.md").write_text; print("x")',
+        program+'; print(Path("another.md").read_text())',
+        program.replace('read_bytes()', 'unlink()'),
+        'from pathlib import Path; print(Path(input()).read_text())',
+    ):
+        assert parse('python3 -c '+shlex.quote(unsafe))==[]
+    assert parse(command+'; touch another.md')==[]
+    desktop=('from pathlib import Path\nimport hashlib, subprocess\np=Path("RESULT.md")\n'
+             'b=p.read_bytes()\nprint(hashlib.sha256(b).hexdigest())\n'
+             'print(b.splitlines(keepends=True))\n'
+             'print(all(line.endswith(b"\\n") for line in b.splitlines(keepends=True)))\n'
+             'print(subprocess.run(["git","diff","--quiet","--","dispatch/options.py"]).returncode)')
+    envelope="python3 - <<'PY'\n"+desktop+'\nPY'
+    assert parse(envelope)==['RESULT.md']
+    for unsafe in (
+        envelope.replace('"diff","--quiet","--"','"reset","--hard","--"'),
+        envelope.replace('"dispatch/options.py"','"../private"'),
+        envelope.replace('keepends=True','keepends=__import__("os").system("id")'),
+        envelope.replace('line.endswith(b"\\n")','__import__("os").system("id")'),
+        envelope.replace('for line in','for Path in'),
+        envelope+'\ntouch another.md',
+        envelope.replace("<<'PY'",'<<PY'),
+    ):
+        assert parse(unsafe)==[]
+
+
 def published():
     return [row('mcp__cortex__write_report', parent_thread_id='parent', report_id='r_000000000001'),
             row('native_agent_result', parent_thread_id='parent', report_id='r_000000000001', timestamp='2')]
@@ -46,15 +93,61 @@ def test_independent_worker_cannot_claim_another_workers_report():
     assert 'worker_final_with_unobserved_report' in flags(published() + [row('native_agent_result', 'other', report_id='r_000000000001')])
 
 
-def test_handoff_allows_owned_predecessor_but_requires_latest_and_rejects_foreign_references():
+def test_worker_final_requires_exactly_its_current_report_and_rejects_predecessors():
     history=published()+[row('followup_task','parent','coordinator',target_thread_id='worker',timestamp='3'),
         row('mcp__cortex__write_report',parent_thread_id='parent',report_id='r_000000000002'),
         row('mcp__cortex__write_report','other',parent_thread_id='parent',report_id='r_000000000003')]
-    final=row('native_agent_result',report_ids=['r_000000000001','r_000000000002'],timestamp='4')
+    final=row('native_agent_result',report_id='r_000000000002',timestamp='4')
     assert not flags(history+[final])
-    for references in (['r_000000000001'],['r_000000000002','r_000000000003'],['r_000000000002','r_000000000099']):
+    for references in (['r_000000000001'],['r_000000000001','r_000000000002'],
+                       ['r_000000000002','r_000000000003'],['r_000000000002','r_000000000099']):
         assert 'worker_final_with_unobserved_report' in flags(history+[{**final,'report_ids':references}])
     assert 'worker_final_without_report_id' in flags(history+[{**final,'report_ids':[]}])
+
+
+def test_worker_requires_own_complete_assigned_skill_before_project_action():
+    coordinator_read=row('exec_command','parent','coordinator',skill_instruction_read=True,
+                         worker_skill_complete=False)
+    pre_skill_probe=row('exec_command',policy_flags=['forbidden_plugin_or_cache_access'],
+                         worker_skill_receipt_required=True)
+    observed=flags([coordinator_read,pre_skill_probe])
+    assert {'forbidden_plugin_or_cache_access',
+            'worker_project_action_before_skill_receipt'} <= observed
+
+    exact_read=row('exec_command',worker_skill_complete=True,
+                   worker_skill_receipt_required=True,
+                   worker_skill_profile='backend_dev')
+    project_action=row('mcp__cortex__read_report',worker_skill_receipt_required=True)
+    clean=flags([coordinator_read,exact_read,project_action])
+    assert 'worker_project_action_before_skill_receipt' not in clean
+    assert 'worker_skill_route_mismatch' not in clean
+
+    wrong_read={**exact_read,'worker_skill_profile':'qa_engineer'}
+    assert 'worker_skill_route_mismatch' in flags([wrong_read,project_action])
+
+    profileless_read={key:value for key,value in exact_read.items()
+                      if key!='worker_skill_profile'}
+    profileless=flags([profileless_read,project_action])
+    assert {'worker_skill_route_mismatch',
+            'worker_project_action_before_skill_receipt'} <= profileless
+
+    generic_profileless=flags([
+        row('exec_command', role='worker', worker_skill_complete=True,
+            worker_skill_receipt_required=True),
+        row('mcp__cortex__read_report', role='worker',
+            worker_skill_receipt_required=True),
+    ])
+    assert {'worker_skill_route_mismatch',
+            'worker_project_action_before_skill_receipt'} <= generic_profileless
+
+    failed_read=row('exec_command', worker_skill_receipt_required=True,
+                    skill_instruction_read=True, outcome='error')
+    failed_only=flags([failed_read])
+    assert 'worker_skill_load_failed' in failed_only
+    assert 'worker_project_action_before_skill_receipt' not in failed_only
+    later_action=flags([failed_read, project_action])
+    assert {'worker_skill_load_failed',
+            'worker_project_action_before_skill_receipt'} <= later_action
 
 
 def test_prior_verifier_context_can_extend_its_own_findings():
@@ -101,6 +194,57 @@ def test_coordinator_can_read_needed_evidence_pages_and_user_sources():
     assert 'oversized_report_page' in flags([{**read, 'requested_limit': 4001}])
     assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"sed -n 1,80p user-source.txt"}', 'coordinator', '/tmp/project')
     assert 'coordinator_forbidden_tool' in OBSERVER['call_policy_flags']('exec_command', '{"cmd":"python3 change.py"}', 'coordinator', '/tmp/project')
+    assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags'](
+        'exec_command', '{"cmd":"cmp -- EXPECTED.txt RESULT.md"}', 'coordinator', '/tmp/project')
+
+
+def test_compound_source_reads_are_not_mistaken_for_mutations():
+    check=OBSERVER['coordinator_source_read']
+    quoted = '{cmd:' + json.dumps('rg -n "first|second" scripts/example.py') + ',max_output_tokens:4000}'
+    assert check('exec_command', quoted)
+    unsafe = '{cmd:' + json.dumps('rg -n "first|second" scripts/example.py > changed') + '}'
+    assert not check('exec_command', unsafe)
+    checks = "set -o pipefail\nnl -ba note.md\nwc -l < note.md\nsha256sum note.md\ngit diff --stat -- source.py\nexit 0"
+    assert check('exec_command',json.dumps({'cmd':checks}))
+    assert not check('exec_command',json.dumps({'cmd':checks.replace('< note.md','> note.md')}))
+    assert not check('exec_command',json.dumps({'cmd':checks.replace('exit 0','touch changed')}))
+    for command in (
+        "sed -n '1,240p' README.md && printf '\\n--- input ---\\n' && sed -n '1,240p' EXPECTED.txt && printf 'files' && rg --files",
+        "sed -n '1,240p' pipeline.md && rg -n '\\{\\{|<!--' pipeline.md || true",
+        "rg --files | head -80",
+        "cat README.md; cmp -- EXPECTED.txt RESULT.md",
+        "cmp -- EXPECTED.txt RESULT.md; cmp_status=$?; sha256sum EXPECTED.txt RESULT.md; printf 'git status:\\n'; git status --short; exit $cmp_status",
+    ):
+        assert check('exec_command',json.dumps({'cmd':command})),command
+    for command in (
+        'cat README.md && touch changed', 'cat README.md > changed',
+        'cat README.md &', 'cat $(touch changed)', 'cat `touch changed`',
+        "sed -n '1p;w changed' README.md", "sed -n '1e touch changed' README.md",
+        "sed -i '1p' README.md", 'rg --pre=touch README.md',
+        'rg --pre touch README.md', 'cat README.md\ntouch changed',
+        'cmp a b; status=$?; touch changed; exit $status',
+        'cmp a b; status=$?; cat README.md; exit $other',
+        'cmp a b; PATH=$?; cat README.md; exit $PATH',
+    ):
+        assert not check('exec_command',json.dumps({'cmd':command})),command
+
+
+def test_one_coordinator_private_probe_retains_two_policy_labels_on_one_operation(tmp_path):
+    command=json.dumps({'cmd':f'ls {tmp_path}/.cortex-dev/.codex/plugins/cache'})
+    metadata=OBSERVER['path_policy_metadata']('exec_command',command,'coordinator',str(tmp_path))
+    policy_flags=OBSERVER['call_policy_flags']('exec_command',command,'coordinator',str(tmp_path))
+    assert {'coordinator_forbidden_tool','forbidden_plugin_or_cache_access'} <= set(policy_flags)
+    violations=OBSERVER['call_policy_violations']([{
+        'timestamp':'2026-09-12T08:44:56.147Z','thread_id':'root','role':'coordinator',
+        'tool':'exec_command','outcome':'success','argument_digest':'argument-1',
+        'result_digest':'result-1','policy_flags':policy_flags,**metadata,
+    }])
+    matching=[row for row in violations if row['violation'] in {
+        'coordinator_forbidden_tool','forbidden_plugin_or_cache_access'}]
+    assert {row['violation'] for row in matching} == {
+        'coordinator_forbidden_tool','forbidden_plugin_or_cache_access'}
+    assert {row['timestamp'] for row in matching} == {'2026-09-12T08:44:56.147Z'}
+    assert {row['argument_digest'] for row in matching} == {'argument-1'}
 
 
 def test_routing_does_not_force_model_from_profile():
@@ -180,7 +324,7 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
     for value in negatives:
         args=json.dumps({'cmd':value})
         assert not OBSERVER['skill_instruction_read']('exec_command',args)
-    assert 'coordinator_forbidden_tool' in check(
+    assert 'coordinator_forbidden_tool' not in check(
         'exec_command',json.dumps({'cmd':command(tmp_path/'project.txt')}),'coordinator','/fixture')
     assert 'forbidden_plugin_or_cache_access' in check(
         'exec_command',json.dumps({'cmd':negatives[1]}),'general','/fixture')
@@ -206,6 +350,8 @@ def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monke
         assert 'coordinator_forbidden_tool' not in flags
 
     valid=command(skill)
+    assigned=valid.replace('print(Path(', 'p=Path(').replace(').read_text())', '); print(p.read_text())')
+    assert OBSERVER['python_skill_read_paths'](assigned)==[skill]
     raw_wrapper=('const result = await tools.exec_command({cmd:'+json.dumps(valid)
                  +',workdir:"/fixture",yield_time_ms:10000}); text(result);')
     assert OBSERVER['shell_command_text'](raw_wrapper)==valid
@@ -218,7 +364,8 @@ def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monke
         valid.replace('.read_text()', '.write_text("changed")'),
         valid+'; touch /tmp/changed',
         valid.replace('print(Path(', 'print(open("/tmp/other").read() + Path('),
-        valid.replace('print(Path(', 'p=Path(').replace(').read_text())', '); print(p.read_text())'),
+        assigned.replace('p=Path(', 'print=Path('),
+        assigned.replace('print(p.read_text())', 'print(p.write_text("changed"))'),
     )
     for value in negatives:
         arguments=json.dumps({'cmd':value})
@@ -402,7 +549,8 @@ def test_resume_restores_only_completed_assignment_receipts():
         row('prior_final',timestamp='5',report_ids=['r_000000000001','r_000000000002'])]
     retained=reduce(second)
     assert retained[0]['owned_report_ids']==['r_000000000001','r_000000000002']
-    assert not flags(retained+[row('followup_task','parent','coordinator',target_thread_id='worker',timestamp='6'),
+    assert 'worker_final_with_unobserved_report' in flags(retained+[
+        row('followup_task','parent','coordinator',target_thread_id='worker',timestamp='6'),
         row('mcp__cortex__write_report',parent_thread_id='parent',report_id='r_000000000003'),
         row('native_agent_result',report_ids=['r_000000000001','r_000000000003'])])
     assert reduce(second+[row('prior_final',timestamp='6',report_ids=['r_000000000002','r_000000000099'])])==[]
@@ -714,6 +862,25 @@ def test_pipeline_private_exclusion_is_not_a_private_read_but_private_target_is(
     assert private_metadata['path_access_kind']=='unauthorized_read_or_probe'
     assert 'forbidden_plugin_or_cache_access' in helper['call_policy_flags'](
         'exec_command',private_arguments,'explorer',str(tmp_path))
+
+
+def test_worker_path_policy_distinguishes_approved_load_static_exclusion_and_probe(tmp_path,monkeypatch):
+    monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    helper=OBSERVER
+    skill=(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/build'
+           /'skills/worker-explorer/SKILL.md')
+    registry=skill.parents[2]/'agents/explorer.toml'
+    skill.parent.mkdir(parents=True);registry.parent.mkdir();skill.write_text('complete skill');registry.write_text('agent')
+    approved=json.dumps({'cmd':f"sed -n '1,80p' {skill}"})
+    static=json.dumps({'cmd':"rg --files -g '!**/.codex/plugins/**' | sed -n '1,40p'"})
+    probe=json.dumps({'cmd':f"cat {registry}"})
+    assert helper['worker_skill_read']('exec_command',approved)
+    assert helper['worker_skill_profile']('exec_command',approved)=='explorer'
+    assert helper['call_policy_flags']('exec_command',approved,'explorer',str(tmp_path))==[]
+    assert helper['path_policy_metadata']('exec_command',static,'explorer',str(tmp_path))['path_access_kind']=='static_mention'
+    assert helper['call_policy_flags']('exec_command',static,'explorer',str(tmp_path))==[]
+    assert 'forbidden_plugin_or_cache_access' in helper['call_policy_flags'](
+        'exec_command',probe,'explorer',str(tmp_path))
 
 
 def test_observer_retains_codebase_memory_and_git_failures_as_worker_diagnostics():

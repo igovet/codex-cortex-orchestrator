@@ -15,7 +15,7 @@ historical measurements, not evidence for a newly edited payload.
 | Acceptance at the wrong boundary | A reported operational incident was declared fixed from internal checks while the requested external behavior was still missing | Require evidence at the user's observable boundary; clearly distinguish internal checks from unverified integration behavior. |
 | Native lifecycle mistaken for available capacity | A real V2 incident retained pending-init contexts despite repeated interrupt/spawn calls | Preserve lifecycle state, avoid queue-only messages to completed workers, use advertised release operations when available, and retry only after an observed capacity change. Stranded host residents are not repaired by prompts. |
 | Wrong retrieval workspace | A later real CLI worker selected a similarly named previous fixture index | Compare full normalized roots in code before graph dispatch; retain the matched entry and include evidence scope in the opening brief. |
-| Unbounded worker-model routing | Earlier guidance treated model choice as an evidence-based cost heuristic and left worker effort/model inheritance ambiguous | Apply the user-owned route matrix: Luna for ordinary/research/exploration/analysis, Terra only for complex work, Sol only for narrow security-analysis microtasks, with explicit user overrides preserved and no automatic review escalation. |
+| Unbounded worker-model routing | Earlier guidance left worker effort/model inheritance ambiguous and confined Sol to security | Apply the user-owned decision matrix: Luna medium/high for ordinary work and fact gathering, Terra medium/high for complex implementation/review, Sol medium/high for consequential decisions, Astra medium only for exceptional system decisions. Preserve user overrides; no automatic review escalation or runtime gate. |
 | A successful range mistaken for EOF | Actual workers repeatedly read only 240 lines of longer skills | Generated skills preserve a final marker and exact generated-byte checks; complete loading is required, while the shared core is now compact. |
 | Discovery before instructions were loaded | Both roles in an actual CLI batched a long skill read with a broad catalogue search, truncating its result | Require the complete applicable skill body before relying on it. Already attached live schemas need no catalogue bootstrap, and no fixed first-call order or batching rule is imposed. |
 | A coordinator reply classified as unsolicited | An active worker sent a question after the coordinator waited, then received its reply | Track one reply opportunity for that exact worker; unrelated or repeated messages remain flagged. |
@@ -70,6 +70,17 @@ Bounded independent discovery may precede the first pipeline edition. Useful dur
 requirements, decisions, assignments and ownership state must exist before dependency,
 shared-resource or acceptance decisions; this is an outcome requirement rather than a
 mandatory initial publication stage.
+
+The P0/P1 evidence protocol keeps implementation, delivery, and coordinator acceptance
+as distinct model-owned states. Receipt-backed Git/CI/deployment/production claims name
+their exact artifact revision; immutable-report delivery does not establish acceptance.
+For consequential repeated live attempts, a context-selected cross-layer contract,
+failed-canary table, predecessor comparison, and discriminating check make changed
+causal assumptions reviewable. Material scope expansion and distinct failures receive
+outcome/scope or replan deltas. Review/verification reuse is keyed by
+`(artifact_revision, acceptance_boundary, check_identity)` and needs new evidence or a
+rerun reason when unchanged. This is evidence-shaping guidance, not a workflow engine,
+hook/server state machine, route selector, threshold, or approval mechanism.
 
 Real CLI/Desktop qualification must use one unchanged marketplace candidate and inspect
 both outcomes and full call evidence. See [host compatibility](host-compatibility.md),

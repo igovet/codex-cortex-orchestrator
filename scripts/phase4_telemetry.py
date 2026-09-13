@@ -42,6 +42,13 @@ COUNT_FIELDS = (
     "wait_count",
     "recovery_count",
 )
+ORCHESTRATION_COST_SIGNALS = (
+    "rollout",
+    "review",
+    "recheck",
+    "delivery_error",
+    "wait",
+)
 AVAILABILITY_KINDS = (
     "codebase_memory",
     "gateway_provider",
@@ -241,6 +248,22 @@ def _counts(value: Any) -> dict[str, int]:
     return {field: _bounded_int(source.get(field, 0), f"counts.{field}") for field in COUNT_FIELDS}
 
 
+def _orchestration_cost_signals(value: Any) -> dict[str, int | None]:
+    """Normalize bounded advisory planning signals without inventing unavailable zeros."""
+    if value is None:
+        return {field: None for field in ORCHESTRATION_COST_SIGNALS}
+    source = _mapping(value, "orchestration_cost_signals")
+    _keys(source, set(ORCHESTRATION_COST_SIGNALS), "orchestration_cost_signals")
+    if set(source) != set(ORCHESTRATION_COST_SIGNALS):
+        raise TelemetryError("orchestration_cost_signals must include every bounded signal")
+    return {
+        field: None if source[field] is None else _bounded_int(
+            source[field], f"orchestration_cost_signals.{field}"
+        )
+        for field in ORCHESTRATION_COST_SIGNALS
+    }
+
+
 def _errors(value: Any) -> dict[str, int]:
     if value is None:
         return {}
@@ -325,10 +348,11 @@ def _validate_aggregate(value: Any) -> dict[str, Any]:
     allowed = {
         "schema_version", "run_id", "pair_id", "suite_id", "phase", "strategy_version", "host",
         "digests", "lifecycle", "participants", "participant_counts", "tokens", "response_count",
-        "counts", "availability", "quality", "errors", "unavailable_reason",
+        "counts", "orchestration_cost_signals", "availability", "quality", "errors", "unavailable_reason",
     }
     _keys(source, allowed, "aggregate")
-    missing = allowed - set(source)
+    required = allowed - {"orchestration_cost_signals"}
+    missing = required - set(source)
     if missing:
         raise TelemetryError(f"aggregate is missing required fields: {sorted(missing)!r}")
     if source["schema_version"] != SCHEMA_VERSION:
@@ -367,6 +391,7 @@ def _validate_aggregate(value: Any) -> dict[str, Any]:
         "tokens": normalized_tokens,
         "response_count": normalized_response_count,
         "counts": _counts(source["counts"]),
+        "orchestration_cost_signals": _orchestration_cost_signals(source.get("orchestration_cost_signals")),
         "availability": _availability(source["availability"]),
         "quality": _quality(source["quality"]),
         "errors": _errors(source["errors"]),
@@ -388,7 +413,7 @@ def aggregate_run(source: Mapping[str, Any]) -> dict[str, Any]:
         "run_id", "pair_id", "suite_id", "phase", "strategy_version", "host",
         "payload_digest", "config_digest", "dependency_digest", "tool_catalogue_digest",
         "task_family_digest", "fixture_digest", "oracle_digest", "lifecycle", "participants",
-        "counts", "availability", "quality", "errors", "unavailable_reason",
+        "counts", "orchestration_cost_signals", "availability", "quality", "errors", "unavailable_reason",
     }
     _keys(source, allowed, "run")
     required = ("run_id", "pair_id", "suite_id", "phase", "strategy_version", "host", "availability", "lifecycle")
@@ -426,6 +451,7 @@ def aggregate_run(source: Mapping[str, Any]) -> dict[str, Any]:
         "tokens": token_totals,
         "response_count": response_count,
         "counts": _counts(source.get("counts")),
+        "orchestration_cost_signals": _orchestration_cost_signals(source.get("orchestration_cost_signals")),
         "availability": _availability(source["availability"]),
         "quality": quality,
         "errors": _errors(source.get("errors")),

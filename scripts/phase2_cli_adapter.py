@@ -33,13 +33,13 @@ SCHEMA = "phase2-cli-v1-control-v2"
 MECHANISM = "phase2-common-live-harness-v1"
 MODEL = "gpt-5.6-luna"
 EFFORT = "high"
-TRUSTED_HARNESS_SHA256 = "9c625cf6d3aa895ef2895ebf969b8cf9cf1a27f5f70f10ee761b561d618e58b6"
-TRUSTED_OBSERVER_SHA256 = "2d0aff126189a013f41c7ff0ed2ae10e29386034b214e0e9afe9cc208efe75fb"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "2cd411e289b6e9e8850136d733ae2f873e1702838ad6aef30b7fe68b4b8dbe63"
+TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
+TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "6f672d5ca2acb54efc033e2151ec6981217ffbc15ad337fd9d0165482f360e80"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.e4f332d43bf38024"
-CANDIDATE_PAYLOAD_SHA256 = "e4f332d43bf380248c5de142b835a62a888f8885ad6577677aa4f394804733d7"
+CANDIDATE_VERSION = "1.15.9+codex.sha256.302595ca1be50369"
+CANDIDATE_PAYLOAD_SHA256 = "302595ca1be50369d49bdec575dfb5eb85f31a62de11812baedbbdf6b696c7f6"
 EVIDENCE_SCHEMA = "phase2-cli-evidence-bundle-v1"
 CELL_AUTH_SCHEMA = "phase2-cli-cell-authorization-v2"
 SESSION_BINDING_SCHEMA = "phase2-cli-session-binding-v1"
@@ -167,6 +167,13 @@ EVIDENCE_CONTRACT = {
         "binding_schema": SESSION_BINDING_SCHEMA,
         "receipt": "captured-once-after-owned-pane",
         "authorization_scope": ["control_record_sha256", "session_receipt"],
+    },
+    "bootstrap": {
+        "route": "current_host_mcp_first",
+        "host_enforcement_state": "unverified",
+        "first_qualifying_operation": "direct_public_mcp__cortex__create_task",
+        "pre_binding_host_action": "integrity_invalidator_no_shell_fallback",
+        "launcher_transport": "not_child_qualification_evidence",
     },
     "terminal_proof": {
         "accepted_panes": ["successful-dead-bash", "idle-live-bash", "idle-live-codex-composer"],
@@ -493,6 +500,7 @@ def _require_frozen_start(argv: list[str]) -> None:
     parser.add_argument("--model")
     parser.add_argument("--effort")
     parser.add_argument("--resume-last", action="store_true")
+    parser.add_argument("--bootstrap-route", choices=("mcp-first",))
     try:
         parsed = parser.parse_args(argv)
     except SystemExit as exc:

@@ -1,13 +1,35 @@
 # Security policy
 
+Incident coordination preserves production safety, rollback and exact deployed
+identity. Quality diagnostics remain advisory and grant no host permissions.
+Coordinators may inspect project evidence; project mutation stays with its owner.
+Discovery ownership and Codebase Memory priority are model guidance, not access
+controls. Graph limitations permit bounded native fallback. Live helpers preserve
+the isolated graph configuration without modifying stable settings.
+Decision-model and English-only guidance never terminate workers or deny calls.
+The observer retains a literal unary file predicate's exit 1 as `predicate_false`,
+not a command crash; raw receipts and independent required-artifact, completion,
+mutation and path-policy checks remain intact. Syntax/permission errors, stderr,
+compound commands and unknown predicates do not receive this interpretation.
+See [incident outcomes](docs/project/incident-outcomes.md).
+The observational collector recognizes only a bounded literal word filter over
+public tool names/descriptions, not arbitrary JavaScript. Publication identity
+comes from public result roots; nested advisory IDs cannot substitute for it,
+and conflicting result copies remain ambiguous evidence.
+Current lifecycle behavior supersedes the historical pre-dispatch enforcement
+descriptions below: hooks never return a runtime veto. Proposed policy denials
+are retained as diagnostics with `runtime_enforcement=none`, not prevented-action
+receipts. Codex sandbox, permissions and approvals remain authoritative; storage
+and audit still report invalid or incomplete evidence rather than invent success.
+
 ## Stable release status
 
-The stable 1.15.9 candidate is `1.15.9+codex.sha256.e4f332d43bf38024`.
-Final consecutive CLI/Desktop qualification passed on the unchanged candidate
-(`r_648c4f40dcf9`), supported by offline tests and independent reviews. The user
-cancelled the Phase 2 outcome comparison; it is non-blocking and non-scoring,
-and no efficacy, score, or promotion conclusion is claimed. Historical failures
-remain diagnostics and do not block the stable release.
+The current 1.15.9 source candidate is `1.15.9+codex.sha256.07c3aeae551a990e`.
+The final CLI/Desktop qualification (`r_648c4f40dcf9`) applies only to the
+superseded `e4f332d43bf38024` payload, not to this changed candidate. Its package,
+sync, full-suite, and real-host qualification remain required, and no efficacy,
+score, promotion, delivery, or acceptance conclusion is claimed. The user-cancelled
+Phase 2 outcome comparison remains non-blocking and non-scoring.
 
 Cortex is a local private document store with advisory coordination guidance.
 Native host/user permissions govern project edits, subagents, external actions
@@ -20,6 +42,56 @@ silently treated as that child's identity. Explicit child identity and parent
 linkage must agree with retained binding evidence. Missing or conflicting bindings
 cannot broaden access. Author labels and artifact versions remain reported
 metadata, not independently authenticated evidence.
+
+For a host that exposes the typed `functions.exec` pre-dispatch contract, Cortex
+accepts only an authenticated actor/role, explicit `pre_task` or `bound_task`
+phase, trusted task/assignment relation, approved route, and a closed operand-free
+nested operation envelope. Pre-task permits only typed Cortex task bootstrap;
+shell, file, plugin/cache/registry, opaque, malformed, and mixed envelopes deny
+atomically. The repository cannot itself make Codex invoke this seam, so the
+shell-wrapper qualification launcher refuses fresh pre-task qualification without
+a host-attested capability. The bounded current-host alternative is explicit
+`--bootstrap-route mcp-first`: it accepts no caller receipt, file, environment,
+shell, or inferred-local route as host authorization. It retains
+`host_enforcement_state=unverified`, and requires the child coordinator's first
+qualifying operation to be a direct public `mcp__cortex__create_task` with the exact
+immutable launch-bound child root plus project, task, original-request, and
+native-result receipt binding. Missing, competing, or replacement root identities
+are unverified.
+Pre-binding functions/terminal/file/patch/nested/private activity, a failed MCP
+bootstrap, or any missing/ambiguous binding is an integrity invalidator with no shell
+fallback; it is not host enforcement or a filesystem sandbox. A host execution
+despite a deny receipt is an audit integrity invalidator.
+
+Actor and role are one closed provenance pair in both phases:
+`native_coordinator` must declare `coordinator` and `native_worker` must declare
+`worker`. Membership in each set separately is insufficient; a cross-pair denies
+before nested operation parsing or executor dispatch and retains no operand.
+
+## P1 semantic capability and evidence contract
+
+`plugins/cortex/policy/capability-manifest-v1.json` is a closed versioned policy
+declaration, consumed by the repository runtime for bounded decisions and
+evidence-admissibility checks. It does not mint a bearer token or claim installed
+host enforcement. Canonical operations use a versioned semantic tuple; aliases,
+encoded names, opaque descriptors, mixed resource scopes, unknown capability
+versions, unverified profiles, and incomplete bindings deny fail-closed. The
+build-verification profile permits only public report/task reads, runtime
+execute/observe, and artifact inspection; it explicitly denies task/orchestrator
+mutation, release promotion, and internal/cache/registry/plugin/debug/raw-state
+classes.
+
+Every protected receipt binds candidate payload, artifact revision, acceptance
+boundary, check identity, task, assignment receipt, route, target, phase, policy
+version, actor, profile/version, canonical capability, operation tuple, and resource
+tuple. This full identity is the decision hash, so two capabilities in the same
+qualification context cannot share a receipt. Denied, incomplete, stale, unknown,
+truncated, replaced, or mismatched receipts are `unverified` and cannot be accepted
+evidence. A host-attested receipt can describe host enforcement, but the
+repository cannot create or locally verify that attestation: local helpers emit
+only `policy_declared` or `policy_observed`, and any supplied `host_enforced`
+label is unverified. Token authenticity and filesystem,
+process, and egress isolation remain host/platform responsibilities.
 
 Each canonical project owns one SQLite store at
 `.codex/cortex/cortex.sqlite3`; separate projects do not share this metadata
@@ -63,22 +135,23 @@ response language.
 
 The coordinator must state a worker's model, effort and policy class explicitly.
 Luna (`gpt-5.6-luna`) is the default and priority route for ordinary work and all
-research, exploration and analysis assignments, at medium/high/xhigh/max effort.
-Terra (`gpt-5.6-terra`) is limited to explicitly complex work at medium/high/xhigh.
-Sol (`gpt-5.6-sol`) is limited to narrow security-analysis microtasks at
-medium/high/xhigh and is never an implementation route merely because a change is
+fact gathering and exploration assignments, at medium/high effort.
+Terra (`gpt-5.6-terra`) handles explicitly complex implementation/review at medium/high.
+Sol (`gpt-5.6-sol`) handles consequential decisions at medium and difficult,
+conflicting or high-risk decisions at high; narrow security analysis may use
+medium/high. It is never an implementation route merely because a change is
 security-related. Security implementation uses Luna or Terra. Reviews and
 verifications follow the permitted model and effort routes without automatic
 escalation from the inspected implementation. Explicit user-requested
 model/effort overrides are preserved and recorded; coordinator-selected other models
-or efforts are policy violations.
+or efforts are diagnostic policy deviations, never runtime prohibitions.
 The `review` label records work kind and does not select a model; absent an
 explicit complexity or security classification, it follows the ordinary route.
 
-The opt-in `senior_consultant` has a separate bounded route: Sol medium for a
-standard question, Sol low for a narrow question, and Sol high for a harder
-question. Astra (`gpt-6-astra`) at low/medium/high is permitted only for an
-explicitly justified deeper escalation after unresolved Sol evidence. The
+The opt-in `senior_consultant` uses Sol medium for a standard or narrow question
+and Sol high for a harder question. Astra (`gpt-6-astra`) only at medium is
+reserved for an explicitly justified exceptional system decision after unresolved
+Sol evidence. The
 coordinator keeps its own model unchanged and must state the consultation policy
 class in the native assignment.
 
@@ -147,14 +220,81 @@ and sessions from another recent root are excluded from that task's evidence, wh
 the competing root itself remains an isolation failure. This prevents cross-task
 attribution without allowing a shared-profile qualification to pass.
 
-Once a Cortex task exists, the coordinator does not use host command wrappers to
-read, mutate, hash or verify project artifacts. The worker owns that complete
-boundary, including trivial one-file requests and byte-level checks, so the audit
-can distinguish worker execution from coordinator project access. Coordinator
-access remains limited to user-supplied sources, attachments and the exact
-Cortex-issued pipeline draft.
-Installed plugin/cache/candidate paths and agent registries are not coordinator
-evidence sources; only the exact advertised coordinator skill read is allowed.
+On the current Desktop host, an observational audit may use a predeclared exact
+`RESULT.md` SHA-256 and the isolated workdir as the bounded product receipt. It does
+not turn unavailable worker assignment/skill/final-report attestations into host
+enforcement. Historical non-dispatch skill denials, polling snapshots, or failed
+side-effect-free artifact checks remain visible diagnostics only after the final
+artifact, unique root/worker/coordinator activity, complete capture, and no-open
+state are independently proven. Any executed unsafe access, mutation outside the
+artifact boundary, ambiguous root, mismatch, truncation, or final pending/open work
+remains an audit failure.
+
+The coordinator may inspect project evidence through read-only file tools or a
+literal bounded read. Arbitrary command execution and project mutation stay with
+the assigned owner. Internal/private storage boundaries remain in effect for reads.
+Installed plugin/cache/candidate paths and agent registries are not generic
+coordinator evidence sources. Before public task creation, the only permitted
+current-host static discovery is a complete bounded read of an exact advertised
+coordinator `SKILL.md` or the public `.mcp.json`/`.codex-plugin/plugin.json`
+declaration from the isolated bundled release; directories, globs, arbitrary files,
+runtime/state/registry paths, and mutations remain invalid.
+The only catalogue form retained as pre-binding metadata is exact value-free
+`text(ALL_TOOLS)` with its complete bounded receipt. It does not permit a query,
+path, content extraction, mutation, nested member call, or mixed wrapper.
+Where the host omits the early worker assignment hint, the protected boundary admits
+only one literal manifest-bound leaf in the closed registered worker `SKILL.md` set.
+The later native result must exactly bind that profile and assignment digest; this is
+not a cache allowlist and a cross-profile, arbitrary leaf, duplicate, or unmatched
+receipt stays blocking.
+For worker MCP unavailability, `cortex-native-worker-result-v1` is model-supplied
+observational evidence only. Its closed body must match exactly one observed native
+spawn, terminal wait, parent/task, registered profile and assignment digest before a
+coordinator-authored `Delegation evidence: native_worker_result` report is usable.
+Its artifact hashes are asserted, not independently verified; the route remains
+`host_enforcement_state=unverified` and any absent, duplicate, truncated, replayed,
+or competing receipt invalidates qualification.
+Only within that current-host observational route, a fully correlated closed native
+worker result may retain missing assignment/worker-skill receipt evidence as a
+non-blocking diagnostic, and a complete public MCP result plus one later same-thread
+publication may retain a missing separate server event. These are post-observation
+classifications, not an authorization bypass: failed, malformed, truncated, replayed,
+private/state/registry, project-target, mutating, or ambiguous operations remain hard
+integrity invalidators and cannot become accepted evidence.
+Where the installed host omits task/native-result bodies, one expected root, one
+parent-bound native worker/report, and one exact non-replayed coordinator artifact
+reconciliation are the only opaque observational binding. Missing, duplicate,
+replayed, or mismatched links remain blocking. One or more exact-equivalent
+denied-before-dispatch errors from the bounded registered worker `SKILL.md` leaf may
+be diagnostic only after that same full outcome proof. They require the same
+worker/profile/manifest-bound static-read identity; differing, replayed, private,
+project-target, mutating, dispatched, truncated, or ambiguous reads remain blocking
+and never credit a skill receipt.
+One literal `bash -lc` transport envelope around the exact registered worker leaf is
+reparsed under that same closed grammar. It does not authorize nested shells, extra
+operations, directories, globs, adjacent plugin/cache files, private paths, or writes.
+If the installed host places the read inside `functions.exec`, the observer requires
+exactly one direct `tools.exec_command` call bound as one safe JavaScript identifier
+and followed by complete literal forwarding of that same identifier (for example,
+`const result = await ...; text(result);`). The identifier is bound once and
+forwarded once; aliases, property access, extra JavaScript, API/tool calls,
+incomplete forwarding, mixed wrappers, and unknown provenance remain fail-closed.
+If the installed interactive host cannot emit bootstrap attestation, assignment or
+skill receipts, a separate server event, or a process self-exit marker, that absence
+is `not_applicable`/diagnostic rather than a hard failure. It cannot substitute for
+complete observed outcome evidence: exactly one direct task binding, one completed
+native worker, one task-bound worker report, coordinator reconciliation of the exact
+artifact hash, no pending/open work, and either owned `exit=0` or a verified idle
+composer followed by exact owned cleanup. This remains observational only and never
+sets `host_enforcement_state=host_enforced`.
+Generic `pre_binding_host_action` is never a current-host diagnostic because it
+lacks strict actor/profile/path proof and can describe an unsafe dispatch. The sole
+coordinator setup exception is an observer-proven manifest-bound, bounded, read-only
+literal `skills/orchestrator/SKILL.md` read carrying the active-skill marker; the
+separate exact-equivalent registered-worker static-SKILL-read predicate can retain
+complete read-only denied records. Failed, duplicate, replayed, ambiguous,
+directory/glob/other-skill, private/project-target, dispatched, truncated, or
+mutating bootstrap actions remain hard invalidators.
 Compaction recovery repeats this boundary. Where the host supplies an explicit
 coordinator identity, the active-task hook denies known command/file tools before
 dispatch. When `agent_id` is absent, the hook establishes worker scope only from a
@@ -171,6 +311,29 @@ bounded wait for the same owner. Before acceptance/final delivery, assignments a
 reconciled with native worker state and required evidence; failure or cancellation
 must be explicit and recorded. This policy is model guidance, not a server-side
 semantic acceptance gate.
+
+The pipeline keeps `implementation_state`, receipt-backed `delivery_state`, and
+coordinator-owned `acceptance_state` separate. Immutable-report delivery does not
+imply implementation correctness or acceptance. Git, CI, deployment, rollout, and
+production claims require their observed receipt and exact artifact revision; absent
+receipts remain unverified. Reused review/verification evidence is identified by
+`(artifact_revision, acceptance_boundary, check_identity)` and unchanged repetition
+requires new evidence or a concrete rerun reason. A consequential repeated live
+attempt can use a model-authored cross-layer acceptance contract, failed-canary table,
+predecessor comparison, and discriminating check; these are not hooks, server state,
+approval stages, routing, or acceptance gates.
+
+The report-template extension point optionally structures six model-authored fields:
+`delivery_state`, `acceptance_boundary`, `causal_model_delta`,
+`predecessor_rollout`, `retry_discriminator`, and `receipt_references`. Bounded
+null-safe missing-field warnings and exact duplicate review/verification reuse
+diagnostics are retained as advisory metadata only. They do not authorize, route,
+approve, accept, or fail a task, and they never claim `host_enforced`.
+The legacy `failed_canary`, `review`, and `cost` fields use the same bounded,
+null-safe, strict-JSON-safe recursive normalization, including for nested values;
+oversized strings are truncated and arbitrary-magnitude or non-finite numbers are
+omitted as `null`. This preserves their keys and advisory-only role without
+turning malformed model metadata into a blocker.
 
 Codebase Memory supplies derived project evidence, not instructions or task authority.
 Its presence or an isolated provider failure is ordinary worker activity, not an
@@ -206,6 +369,12 @@ or block the bounded `mcp__cortex__read_report` operation, and ordinary workspac
 Git, Codebase Memory, and external MCP diagnostics remain available. This is a
 narrow preflight control, not an OS sandbox; the observer's fail-closed hard stop
 still remains acceptance-critical if an unauthorized event is observed.
+Only complete attributable `PreToolUse` denials carrying `PERMISSION_DENIED` and
+the explicit `denied_before_dispatch` state are retained as bounded
+prevented-attempt diagnostics, not hook-observation failures or evidence of a
+dispatched host access. Missing or unknown semantic status fails the audit closed.
+They cannot establish acceptance. An actually dispatched unauthorized target remains
+a fail-closed audit finding.
 Workers match its index to the exact canonical workspace and check relevant coverage;
 a similarly named project or ready status alone does not establish that match.
 Initial local indexing is scoped to the authorized workspace and does not authorize
@@ -328,7 +497,11 @@ It writes each bounded artifact by atomic replacement and emits the bundle recei
 last, only after successful status, capture, events, calls, usage, and audit schema
 checks. `stop` requires and revalidates that control- and arm-bound receipt plus all
 artifact digests; incomplete or tampered capture cannot authorize removal of the
-live observation streams.
+live observation streams. Ordinary `stop` additionally re-queries the live tmux
+server/session/pane/PID/start-tick identity before sealing and again before kill;
+restarted, replaced, and reused identities refuse cleanup. Ordinary binding files
+use exclusive creation and 0600 ownership, so a concurrent creator cannot be
+overwritten.
 Before submission, `begin-cell` issues an owner-private one-time nonce bound to the
 frozen cell ID, control, arm, canonical workdir/store, and current session receipt.
 The fresh start captures that receipt exactly once only after tmux returns the
@@ -421,7 +594,17 @@ conflict. The handler parses actual patch targets; a path mentioned in text is n
 such a target. Unknown actor identity cannot establish an ownership violation.
 Hooks do not grant permission, rewrite tool results, accept work, assign agents or
 force repeated continuation. Stop diagnostics remain advisory. Failures are visible
-and must not be described as a successful observation.
+and must not be described as a successful observation. The runtime's narrow
+fail-open diagnostic boundary applies only to passive observation, logging,
+telemetry, and diagnostic serialization. It records at most a bounded error
+class/code, marks the diagnostic evidence `unverified`, and continues the caller
+when possible, including storage or permission errors in passive telemetry. It never
+covers authorization, private-path/provenance, binding, replay/truncation,
+publication, cleanup, audit, or a protected/uncertain action.
+
+The offline live auditor requires native participant completion and rejects real
+check failures even when an output artifact already matches. This acceptance
+boundary never sends a runtime denial or terminates an executing worker.
 
 ## Development and evidence
 
@@ -430,13 +613,26 @@ Never change the user's stable installation or settings for development. Real
 Desktop uses the same candidate with a disposable profile. Do not bypass hook trust.
 A successful source test is not CLI/Desktop qualification.
 
+Live parity is strictly CLI-first: Desktop may start only after a CLI **ACCEPT**
+with a clean audit on the same unchanged candidate and payload. A failed, rejected,
+unavailable, or unverified CLI attempt is ended, fully audited, and stopped before
+Desktop; Desktop cannot be used as a diagnostic substitute. This ordering is
+qualification procedure, not server-side acceptance state.
+
 The Desktop submission helper treats X11 activation as an ownership boundary. Only
 the exact `_NET_WM_DESKTOP` property warning may reach its single focus fallback;
 the launched PID is checked before and after focus, and `getactivewindow` must
 identify that same window before input is emitted. Other xdotool failures and any
 identity mismatch fail closed. The warning and fallback result remain in the
 owner-only session state, while composer preparation and the one-new-task receipt
-gate remain mandatory.
+gate remain mandatory. Current Desktop exposes no supported composer-element
+locator, so the helper preserves the `codex://threads/new` URI's prepared composer
+focus and never treats a guessed window coordinate as an input authorization. Before
+its one plain `Return`, the helper requires the owned window to remain focused across
+two observations after a three-second hydration interval. One monotonic 60-second
+deadline covers both owned-window lookup and focus retries, so a missing window cannot
+restart a fresh lookup budget. This bounded readiness check may delay or fail a
+submission; it never substitutes for the exact one-new-task receipt.
 
 Routine worker checks are permission-safe by guidance: isolated CLI and Desktop
 helpers force `PYTHONDONTWRITEBYTECODE=1` and suppress only a complete inherited
@@ -445,6 +641,19 @@ deletion, `git clean`, reset/checkout, and other broad cleanup for ordinary resi
 Pre-existing residue is left untouched and reported with the exact blocker and
 required authority when it prevents a check. This does not broaden host permissions
 or turn worker instructions into an approval mechanism.
+
+Before any project action, a worker needs an attributable complete attached or exact
+assigned worker-skill receipt; a coordinator read never establishes worker route
+provenance. From its first action, workers do not probe installed plugin/cache/
+candidate/agent-registry paths. The observer allows only that exact approved
+instruction read and quoted static exclusions, while direct or ambiguous operands
+remain auditable unauthorized-access findings. PostToolUse failure receipts expose
+only bounded error class/stage and retained task attribution, never raw commands,
+output, or exception text; they remain acceptance-critical. Use one bounded command
+per wrapper with a complete exit/result receipt. A worker final names exactly its own
+current published report ID; predecessor and foreign report IDs stay in the immutable
+report body. Truncated wrappers remain incomplete evidence even when nested commands
+later show success.
 
 After a pending or timed-out native wait, the coordinator repeats a bounded wait for
 the same owner and may use internal status/evidence observations. Unsolicited
@@ -468,6 +677,13 @@ initialize it or write identity settings. A missing-repository worker probe rema
 advisory rather than a coordinator-boundary breach.
 A saved report is not acceptance. The coordinator assesses current requirements,
 source completeness, artifact revisions and the evidence's limits.
+
+Unchanged waits are silent: a timeout, pending worker, elapsed time, or unchanged
+poll does not justify a user-facing status update. Only a state/evidence delta,
+genuine blocker, required user decision, or material next-action change is communicated.
+Offline advisory signals for rollout, review, recheck, delivery-error, and wait are
+bounded/null-safe planning evidence only; they never select models, rank workers,
+gate actions, or establish acceptance.
 
 Phase 2 orphan cleanup is not a fallback around the evidence-bundle stop gate.
 The separate recovery command requires the exact owner-private prior control,
@@ -662,3 +878,16 @@ decision remains unverified because its Rust source is stripped.
 
 See [storage](docs/project/storage.md), [hooks](docs/features/lifecycle-hooks/index.md),
 and [verification](docs/project/verification.md).
+## Advisory depth is not authorization
+
+Current governance metadata contains only a validated mode and public record IDs;
+raw rationale is not injected into recovery instructions. An unavailable projection
+does not stop a successful operation. Changing depth neither grants host permissions
+nor accepts results, cancels workers or removes required independent checks.
+
+## Linked coordinator instructions
+
+Read-only coordinator references are limited to direct Markdown links from the
+packaged orchestrator entrypoint, with matching installed/source bytes. They do
+not qualify as the pre-binding entrypoint read, a worker receipt, or permission
+to inspect arbitrary cache, registry or runtime state.

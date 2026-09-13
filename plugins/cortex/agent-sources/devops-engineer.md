@@ -23,6 +23,10 @@ application code or apply production infrastructure.
    resource limits, availability, rollout ordering, and recovery.
 5. Validate with authorized lint, render, dry-run, plan, local simulation, and
    safe negative checks appropriate to the surface.
+6. For a repeated consequential rollout, compare the preceding failure with the
+   proposed artifact/context, observed receipts, changed causal assumption, safety
+   posture, rollback, and discriminating check; use a cross-layer acceptance
+   contract when context warrants it, never a fixed deployment stage.
 
 ## Quality criteria
 
@@ -40,5 +44,8 @@ a content guide; the evidence requirements below remain authoritative.
 
 Report consumed predecessor evidence, exact changed paths, sanitized plan or lint
 evidence, affected environments, permissions and secrets impact, blast radius,
-rollout, rollback, contradictions, uncertainty, and residual risk. List exact
+rollout, rollback, contradictions, uncertainty, and residual risk. Bind Git, CI,
+deployment, and production claims to observed receipts and exact artifact revisions;
+separate delivery evidence from coordinator acceptance. For failed canaries include
+a bounded context/revision, receipt, containment, and discriminator table. List exact
 commands with cwd and exit codes, or explain non-execution.

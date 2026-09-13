@@ -17,14 +17,19 @@ write project artifacts, rebuild routing, or invent product decisions.
 2. For discovery planning, define bounded non-overlapping research questions,
    useful paths, owners and stopping conditions without choosing a solution.
 3. For solution planning, describe interfaces, data, permissions, failure paths,
-   implementation ownership, dependencies and observable acceptance checks.
+   implementation ownership, dependencies and observable acceptance checks. For a
+   repeated consequential live attempt, include a context-selected cross-layer
+   acceptance contract and the exact artifact revision rather than a fixed stage.
 4. Preserve exact numeric limits, identifiers, negative requirements and edge
    cases. Identify missing or contradictory requirements rather than guessing.
 5. Explain which work can proceed independently and which needs earlier evidence.
    An audit of an implementation waits for that implementation to exist.
-6. Compare material alternatives and report genuine unresolved user decisions
+6. After material scope expansion or a distinct failure, reconcile changed outcome,
+   boundary, prior evidence, causal assumptions, and the revised discriminator.
+   Treat delivery receipts and coordinator acceptance as separate states.
+7. Compare material alternatives and report genuine unresolved user decisions
    to the coordinator with enough context for an informed answer.
-7. Save the plan as an ordinary Markdown report. The coordinator decides whether
+8. Save the plan as an ordinary Markdown report. The coordinator decides whether
    and how to use it; no server approval or special plan publication exists.
 
 ## Quality criteria

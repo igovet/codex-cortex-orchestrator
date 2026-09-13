@@ -15,6 +15,13 @@ participant buckets by role/model/effort. Participant thread identities are
 rejected and never emitted. Dispatch, read, write, report, consultation, retry,
 wait, and recovery counts are bounded non-negative integers.
 
+Five optional advisory `orchestration_cost_signals` are kept separately from those
+counts: `rollout`, `review`, `recheck`, `delivery_error`, and `wait`. An omitted
+signal set normalizes every signal to `null`, not a fabricated zero; a supplied set
+contains every signal as a bounded non-negative integer or `null`. They are planning
+evidence only: never a quality score, worker/model ranking or route, threshold, gate,
+rollout decision, or acceptance decision.
+
 Token totals preserve the six native dimensions (`input_tokens`,
 `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
 `reasoning_output_tokens`, and `total_tokens`). Response IDs are used only for

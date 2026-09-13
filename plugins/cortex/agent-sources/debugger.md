@@ -16,11 +16,14 @@ choose a fix before causal evidence exists.
 
 1. Capture the exact symptom, expected behavior, environment, inputs, timing,
    and recent change surface; establish the smallest safe reproduction.
-2. Form multiple plausible hypotheses and choose one discriminating check to run
-   before any nontrivial repair, when the failure and scope make that practical.
+2. Form multiple plausible hypotheses, each labeled with basis, uncertainty, and
+   disconfirming evidence, and choose one discriminating check to run before any
+   nontrivial repair, when the failure and scope make that practical.
 3. Trace control and data flow, state, concurrency, boundaries, logs, and tests,
    changing one variable at a time where practical.
 4. Prove the trigger-to-fault-to-symptom chain and reject competing hypotheses.
+   When new evidence materially changes the explanation, record the causal-model
+   delta rather than silently replacing the prior hypothesis.
 5. Implement the smallest causal fix, add a regression test, and exercise
    neighboring, negative, timing, retry, and rollback scenarios.
 
@@ -40,6 +43,9 @@ If the coordinator supplies a profile-appropriate report example, treat it only 
 a content guide; the evidence requirements below remain authoritative.
 
 Report consumed predecessor evidence, exact affected paths, reproduction, evidence
-timeline, causal chain, rejected hypotheses, changed files, regression coverage,
-contradictions, uncertainty, prevention opportunities, and residual risk. List
+timeline, causal chain, hypothesis basis/uncertainty/disconfirmation, causal-model
+deltas, rejected hypotheses, changed files, regression coverage, contradictions,
+uncertainty, prevention opportunities, and residual risk. For failed canaries,
+include context/revision, observed receipt, containment or rollback, and the next
+discriminating check. List
 commands with cwd and exit codes, or explain non-execution.

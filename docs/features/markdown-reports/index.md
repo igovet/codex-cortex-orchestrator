@@ -1,5 +1,10 @@
 # Markdown coordination
 
+Incident work follows [outcome-driven coordination](../../project/incident-outcomes.md).
+Pipeline editions track material decisions rather than each worker completion or wait.
+The optional incident_decision block groups the causal model and next transition;
+existing evidence fields remain available. Runtime quality signals remain advisory.
+
 Cortex keeps one model-authored `pipeline.md` per task. Each new edition is
 prepended, retaining previous editions below. The current edition records active
 requirements, cancelled conditions, decisions, assignments, resource owners,
@@ -36,6 +41,44 @@ findings depend. A later message or observed file change signals possible stale
 evidence. The coordinator decides what needs reconciliation or another check;
 the storage service and hooks do not decide semantic coverage or acceptance.
 
+The current pipeline keeps model-owned `implementation_state`, `delivery_state`,
+and `acceptance_state` distinct. Implementation state records changed artifacts and
+evidence; delivery state records observed immutable-report, Git, CI, deployment, or
+production receipts and their exact revisions; acceptance remains the coordinator's
+judgment at the user boundary. A delivery receipt is never acceptance. External
+claims remain unverified without their observed receipt and exact artifact revision.
+Review and verification reuse the identity `(artifact_revision, acceptance_boundary,
+check_identity)`; repeating unchanged work requires new evidence or a concrete rerun
+reason, not a timeout or elapsed time.
+
+The report templates provide an optional structured evidence extension for
+`delivery_state`, `acceptance_boundary`, `causal_model_delta`, `predecessor_rollout`,
+`retry_discriminator`, and `receipt_references`. Runtime helpers emit bounded,
+null-safe missing-field warnings and an exact duplicate reuse diagnostic when there
+is no fresh evidence or rerun reason. Both are advisory metadata: they never add a
+workflow stage, route work, require approval, alter coordinator acceptance, or turn
+successful command results into failures.
+All advisory values, including the legacy `failed_canary`, `review`, and `cost`
+keys, are serialization-safe and bounded recursively: booleans are retained,
+integers stay within the JSON-safe 53-bit range, finite floats are capped at
+`1e308`, strings are capped at 512 characters, and arbitrary-magnitude or
+non-finite numbers are omitted as `null` rather than emitted as invalid JSON.
+
+Passive diagnostic serialization and observation writes use a separate bounded,
+value-free continuity helper. It may emit only a safe error class/code and
+`evidence_admissibility=unverified`; a broken logger is itself non-blocking. The
+helper is never used around storage, authorization, binding, provenance,
+replay/truncation, publication, cleanup, or audit decisions, and cannot convert an
+uncertain action into success.
+
+For a repeated consequential live attempt, the coordinator may record a cross-layer
+acceptance contract and predecessor comparison: outcome/boundary, revision, relevant
+context, rollback posture, expected receipts, and a discriminating check. Material
+scope expansion and materially distinct failures require an outcome/scope or replan
+delta when useful, including causal-model changes and bounded failed-canary evidence.
+These are adaptive model records, never server workflow stages, approval gates, or
+automatic acceptance.
+
 Bounded independent discovery may precede the first pipeline edition. Before making
 dependency, shared-resource or acceptance decisions, the coordinator records useful
 durable requirements, decisions, assignments, ownership and open actions. This does
@@ -66,6 +109,11 @@ returned no evidence. The narrow exceptions are one reply to an inbound same-own
 handoff, direct user steering/clarification, or an intentional follow-up after a
 terminal worker result and report preview have been reconciled. These remain model
 guidance and audit evidence, not server-side gates.
+
+When no evidence or model-owned state changed, the coordinator waits silently: a
+timeout, pending worker, elapsed time, or unchanged poll is not a user-facing update.
+It communicates only a new evidence/state delta, a genuine blocker, a required user
+decision, or a material next-action change.
 
 The report class follows the assignment's observed outcome. A specialist's class is
 a default and does not require reassignment when the same worker produces a suitable

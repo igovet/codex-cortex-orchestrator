@@ -27,6 +27,9 @@ does not settle a contradictory requirement or missing case.
    rewriting flags and capture exit status plus decisive sanitized output.
 4. Classify each failure as product, test, dependency, permission, network,
    environment, timeout, or unsupported-platform evidence.
+5. Bind each Git, CI, package, deployment, or production claim to its observed
+   receipt and exact artifact revision. A report delivery or local check is not a
+   substitute for an unavailable external receipt.
 
 ## Quality criteria
 
@@ -45,5 +48,7 @@ a content guide; the evidence requirements below remain authoritative.
 
 Report consumed predecessor evidence, exact verified paths, commands, cwd, exit codes, decisive
 sanitized output, duration or timeout when material, coverage and environment
-gaps, contradictions, uncertainty, residual risk, and the readiness decision.
+gaps, contradictions, uncertainty, residual risk, and the readiness decision. State
+the check reuse identity and any new-evidence/rerun reason; distinguish implementation
+evidence, receipt delivery, and coordinator acceptance.
 If nothing ran, state the concrete reason.

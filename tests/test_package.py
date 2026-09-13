@@ -53,6 +53,19 @@ def test_stamped_package_and_profiles():
     assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}==expected_runtime
 
 
+def test_release_readiness_keeps_retained_host_runs_historical_and_superseded():
+    readiness = (ROOT/'docs/release-readiness.md').read_text()
+    historical = (
+        'Both retained final host runs belong to superseded payload `e4f332d43bf38024`,\n'
+        'used its unchanged isolated candidate with Luna coordination/workers and no stable\n'
+        'installation or configuration change, and are historical-only.'
+    )
+    assert historical in readiness
+    assert ('they do not qualify current payload\n'
+            '`07c3aeae551a990e`.') in readiness
+    assert 'Both final host runs used the unchanged current candidate' not in readiness
+
+
 def test_mcp_advertises_isolated_gateway_dependency_environment():
     mcp = json.loads((PLUGIN/'.mcp.json').read_text())['mcpServers']['cortex']
     assert set(mcp['env_vars']) == {'CORTEX_OBSERVATION_DIR', 'CORTEX_DEPENDENCY_DIR'}
@@ -140,11 +153,8 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     assert 'Never probe required\nfields with an empty argument object' in publication
     assert 'Omit `request_key` for' not in publication
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert '`request_key` must be a literal UUID or stable key' in orchestrator
-    assert '`crypto.randomUUID()` or another runtime generator' in orchestrator
-    assert 'After task creation, delegate every project-target mutation, read, hash or' in orchestrator
-    assert '`functions.exec`, `exec_command` or terminals for project targets' in orchestrator
-    assert 'Only user\nsources and the exact Cortex-issued pipeline draft remain coordinator-readable.' in orchestrator
+    assert 'Delegate discovery AND requested files (notes included)' in orchestrator
+    assert 'missing output to that worker; never create it yourself' in orchestrator
     pipeline_publication=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
     assert 'When a pipeline mutation schema requires `request_key`' in pipeline_publication
     assert 'ordered `replaceable_markers` list as authoritative' in pipeline_publication
@@ -157,7 +167,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
 def test_coordinator_publication_guidance_closes_observed_draft_failure():
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     reference=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
-    assert 'follow its workflow.' in orchestrator
+    assert '(references/pipeline-publication.md)' in orchestrator
     assert reference.index('Before `write_report`') < reference.index('If `write_report` returns the deterministic')
     assert 'verify that no listed marker (or other exact template\nplaceholder) remains' in reference
 
@@ -212,8 +222,8 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert "sub.add_parser('send')" in source
     assert "owner.stdout.strip()==str(pid)" in source
     assert 'def desktop_thread_ids(workdir,started_at):' in source
-    assert 'def wait_desktop_window(pid):' in source
-    assert "[xdotool,'key','--window',window,'ctrl+Return']" in source
+    assert 'def wait_desktop_window(pid,deadline=None):' in source
+    assert "[xdotool,'key','--window',window,'Return']" in source
     assert "state['thread_id']=created.pop()" in source
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     companion=sum(
@@ -229,16 +239,10 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     # The opt-in consultant and explicit native-worker tracking boundary add a
     # bounded coordinator packet while retaining the compact companion budget.
     assert companion < 27_500
-    assert '## Durable task and pipeline' in orchestrator
-    assert '## Choose the smallest useful work graph' in orchestrator
-    assert '## Model and effort' in orchestrator
-    assert '## Recovery after compaction or restart' in orchestrator
-    assert 'A 4,000-character limit is one page, never a total context limit.' in orchestrator
-    assert 'Never reassign or\nduplicate work because of a wait timeout' in orchestrator
-    assert 'Ordinary work defaults to `gpt-5.6-luna`' in orchestrator
-    assert 'Sol is never an implementation route' in orchestrator
-    assert 'Answer short questions directly' in orchestrator
-    assert 'applicable artifact skill' in orchestrator
+    assert len(orchestrator) < 6500
+    routing = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
+    assert '`gpt-5.6-luna` at `medium` or `high`' in routing
+    assert 'implementation returns to Luna/Terra' in routing
     assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
 
 
@@ -390,6 +394,143 @@ def test_desktop_activation_fails_closed_on_focus_ownership_change(monkeypatch,t
     assert json.loads(state_file.read_text())['desktop_activation']['fallback']=='failed_ownership'
 
 
+def test_desktop_prepared_send_keeps_prompt_retryable_when_no_new_task_receipt(monkeypatch,tmp_path):
+    """The verified plain-Return transport stays non-accepting without a receipt."""
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True}
+    state_file=tmp_path/'session.json'
+    calls=[]
+    scope=helper['submit_prepared_desktop_prompt'].__globals__
+    monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:{'existing'})
+    monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
+    monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+    with pytest.raises(RuntimeError,match='produced 0 new task receipts'):
+        helper['submit_prepared_desktop_prompt'](state,state_file)
+    assert state.get('prompt_sent') is None
+    assert calls==[['/usr/bin/xdotool','key','--window','456','Return']]
+
+
+def test_desktop_prepared_send_uses_owned_window_shortcut_and_one_durable_task_receipt(monkeypatch,tmp_path):
+    """Current-host transport has no composer locator: it preserves URI focus."""
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True}
+    state_file=tmp_path/'session.json'
+    calls=[];receipts=iter(({'existing'},{'existing','new-task'}))
+    scope=helper['submit_prepared_desktop_prompt'].__globals__
+    monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
+    monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+    monkeypatch.setattr(helper['time'],'time',lambda:99.0)
+    assert helper['submit_prepared_desktop_prompt'](state,state_file)=='456'
+    assert calls==[['/usr/bin/xdotool','key','--window','456','Return']]
+    assert state['prompt_sent'] is True
+    assert state['thread_id']=='new-task'
+    assert state['first_submission_at']==99.0
+    assert json.loads(state_file.read_text())['desktop_window']=='456'
+
+
+def test_desktop_prepared_send_rejects_duplicate_task_receipts_after_one_plain_return(monkeypatch,tmp_path):
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_duplicate_receipt')
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True}
+    state_file=tmp_path/'session.json'
+    calls=[];receipts=iter(({'existing'},{'existing','task-one','task-two'}))
+    scope=helper['submit_prepared_desktop_prompt'].__globals__
+    monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
+    monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+    with pytest.raises(RuntimeError,match='produced 2 new task receipts'):
+        helper['submit_prepared_desktop_prompt'](state,state_file)
+    assert state.get('prompt_sent') is None
+    assert calls==[['/usr/bin/xdotool','key','--window','456','Return']]
+
+
+def test_desktop_readiness_waits_for_hydration_and_stable_owned_window(monkeypatch,tmp_path):
+    import types
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_readiness')
+    state={'pid':123,'start':'stable-start','started_at':100.0,'started_monotonic':100.0}
+    scope=helper['wait_prepared_desktop_readiness'].__globals__
+    sleeps=[];times=iter((100.0,100.25,103.0))
+    monkeypatch.setitem(scope,'identity',lambda pid:'stable-start')
+    monkeypatch.setitem(scope,'wait_desktop_window',lambda pid,*args:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
+    monkeypatch.setitem(scope,'_owned_desktop_window',lambda *args:None)
+    monkeypatch.setitem(scope,'write_state',lambda *args:None)
+    monkeypatch.setattr(helper['time'],'time',lambda:next(times))
+    monotonic=iter((100.0,100.0,100.25,100.25,103.0))
+    monkeypatch.setattr(helper['time'],'monotonic',lambda:next(monotonic))
+    monkeypatch.setattr(helper['time'],'sleep',lambda interval:sleeps.append(interval))
+    monkeypatch.setattr(helper['subprocess'],'run',lambda *args,**kwargs:types.SimpleNamespace(returncode=0,stdout='456\n'))
+    assert helper['wait_prepared_desktop_readiness'](state,tmp_path/'session.json')==('/usr/bin/xdotool','456')
+    assert sleeps==[helper['DESKTOP_READY_POLL_SECONDS']]*2
+    assert state['desktop_readiness']['observations']==3
+    assert state['desktop_readiness']['ready_at']==103.0
+
+
+def test_desktop_readiness_requires_consecutive_same_window_observations(monkeypatch,tmp_path):
+    import types
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_stable_window')
+    state={'pid':123,'start':'stable-start','started_at':0.0,'started_monotonic':0.0}
+    scope=helper['wait_prepared_desktop_readiness'].__globals__
+    windows=iter(('456','789','789'))
+    active_windows=iter(('456','789','789'))
+    monkeypatch.setitem(scope,'identity',lambda pid:'stable-start')
+    monkeypatch.setitem(scope,'wait_desktop_window',lambda pid,*args:('/usr/bin/xdotool',next(windows)))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
+    monkeypatch.setitem(scope,'_owned_desktop_window',lambda *args:None)
+    monkeypatch.setitem(scope,'write_state',lambda *args:None)
+    monkeypatch.setattr(helper['time'],'time',lambda:5.0)
+    monotonic=iter((5.0,5.0,5.25,5.25,5.5))
+    monkeypatch.setattr(helper['time'],'monotonic',lambda:next(monotonic))
+    monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+    monkeypatch.setattr(helper['subprocess'],'run',lambda *args,**kwargs:types.SimpleNamespace(returncode=0,stdout=next(active_windows)+'\n'))
+    assert helper['wait_prepared_desktop_readiness'](state,tmp_path/'session.json')==('/usr/bin/xdotool','789')
+    assert state['desktop_readiness']['observations']==2
+
+
+def test_desktop_readiness_no_window_uses_one_monotonic_total_deadline(monkeypatch,tmp_path):
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_readiness_deadline')
+    state={'pid':123,'start':'live','started_at':0.0,'started_monotonic':0.0}
+    scope=helper['wait_prepared_desktop_readiness'].__globals__
+    clock={'now':0.0}
+    monkeypatch.setitem(scope,'identity',lambda pid:'live')
+    monkeypatch.setitem(scope,'desktop_window',lambda pid:(_ for _ in ()).throw(RuntimeError('no owned window')))
+    monkeypatch.setitem(scope,'write_state',lambda *args:None)
+    monkeypatch.setattr(helper['time'],'monotonic',lambda:clock['now'])
+    monkeypatch.setattr(helper['time'],'sleep',lambda interval:clock.__setitem__('now',clock['now']+interval))
+    with pytest.raises(RuntimeError,match='did not become stably ready'):
+        helper['wait_prepared_desktop_readiness'](state,tmp_path/'no-window.json')
+    assert clock['now']==helper['DESKTOP_READY_TIMEOUT_SECONDS']
+    assert state['desktop_readiness']['status']=='timeout'
+
+
+def test_desktop_readiness_fails_closed_on_process_death_or_focus_instability(monkeypatch,tmp_path):
+    import types
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_readiness_failures')
+    scope=helper['wait_prepared_desktop_readiness'].__globals__
+    def configure(state,identity_value,active_value,monotonic_values,windows=None):
+        monkeypatch.setitem(scope,'identity',lambda pid:identity_value)
+        windows=windows or iter(('456',))
+        monkeypatch.setitem(scope,'wait_desktop_window',lambda pid,*args:('/usr/bin/xdotool',next(windows)))
+        monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
+        monkeypatch.setitem(scope,'_owned_desktop_window',lambda *args:None)
+        monkeypatch.setitem(scope,'write_state',lambda *args:None)
+        monkeypatch.setattr(helper['time'],'time',lambda:60.0)
+        monkeypatch.setattr(helper['time'],'monotonic',lambda:next(monotonic_values))
+        monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+        monkeypatch.setattr(helper['subprocess'],'run',lambda *args,**kwargs:types.SimpleNamespace(returncode=0,stdout=active_value+'\n'))
+    dead={'pid':123,'start':'live','started_at':0.0,'started_monotonic':0.0}
+    configure(dead,'different','456',iter((0.0,)))
+    with pytest.raises(RuntimeError,match='not active'):
+        helper['wait_prepared_desktop_readiness'](dead,tmp_path/'dead.json')
+    unstable={'pid':123,'start':'live','started_at':0.0,'started_monotonic':0.0}
+    configure(unstable,'live','999',iter((0.0,60.0)),iter(('456','456')))
+    with pytest.raises(RuntimeError,match='did not become stably ready'):
+        helper['wait_prepared_desktop_readiness'](unstable,tmp_path/'unstable.json')
+
+
 def test_cli_helper_audits_all_thread_calls_with_shared_observer():
     source=(ROOT/'scripts/cortex-live-smoke').read_text()
     assert "add_argument('--data-dir',type=Path)" not in source
@@ -461,6 +602,28 @@ def test_observer_attributes_compound_command_failure_to_shell_named_executable(
             "error_code": "command_exit_2", "argument_digest": "real"}]
 
 
+def test_unary_path_predicate_false_is_observed_without_granting_acceptance():
+    observer = runpy.run_path(str(ROOT / "scripts/cortex-desktop-dev"))
+    check = observer["semantic_absent_path"]
+    assert check("test -e RESULT.md", 1, "", "")
+    assert check("test -f docs/result.md", 1, "", "")
+    for cmd in ("test", "test -e", "test -x RESULT.md", "test -e $TARGET",
+                "test -e RESULT.md; false", "test -e RESULT.md || true",
+                "test -e RESULT.md\nfalse", "test -e $(touch x)"):
+        assert not check(cmd, 1, "", "")
+    assert not check("test -e RESULT.md", 2, "", "")
+    assert not check("test -e RESULT.md", 1, "", "Permission denied")
+    raw = {"thread_id": "worker", "tool": "command_execution", "outcome": "error",
+           "exit_code": 1, "error_code": "command_exit_1", "argument_digest": "predicate",
+           "semantic_result": "predicate_false", "semantic_nonfailure": True}
+    assert observer["classify_host_failures"]([raw]) == ([], [])
+    assert observer["tool_error_history"]([raw]) == []
+    assert raw["exit_code"] == 1 and raw["outcome"] == "error"
+    receipt, reason = observer["desktop_supported_outcome_receipt"](
+        [raw], {}, open_sessions=[], open_cells=[])
+    assert receipt is None  # A negative observation is never task/artifact evidence.
+
+
 def test_baseline_identity_and_graph_disabled_launcher_omit_invalid_transport():
     import runpy
     import cortex_eval
@@ -492,7 +655,7 @@ def test_graph_enabled_launcher_retains_explicit_complete_server_override():
     assert 'mcp_servers.node_repl.enabled=false' not in overrides
 
 
-def test_graph_disabled_launcher_disables_existing_complete_server(monkeypatch, tmp_path):
+def test_default_launcher_preserves_existing_graph_configuration(monkeypatch, tmp_path):
     import runpy
 
     owner = tmp_path/'owner'
@@ -513,7 +676,7 @@ def test_graph_disabled_launcher_disables_existing_complete_server(monkeypatch, 
                                     configured)
     overrides = [value for index, value in enumerate(command)
                  if index and command[index - 1] == '-c']
-    assert 'mcp_servers.codebase_memory.enabled=false' in overrides
+    assert not any(value.startswith('mcp_servers.codebase_memory.') for value in overrides)
     config.unlink()
     assert cli['isolated_codebase_memory_configured']() is False
     command = cli['launch_command'](Path('/tmp/private-events'), False,
@@ -523,14 +686,16 @@ def test_graph_disabled_launcher_disables_existing_complete_server(monkeypatch, 
     assert 'mcp_servers.codebase_memory.enabled=false' not in overrides
 
 
-def test_desktop_graph_disabled_config_disables_only_complete_server():
+def test_desktop_config_preserves_graph_availability():
     import runpy
     import tomllib
 
     desktop = runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'), run_name='observer')
     config = '[mcp_servers.codebase_memory]\nenabled = true\ncommand = "/bin/codebase-memory-mcp"\n'
     parsed = tomllib.loads(desktop['live_test_config'](config))
-    assert parsed['mcp_servers']['codebase_memory']['enabled'] is False
+    assert parsed['mcp_servers']['codebase_memory']['enabled'] is True
+    disabled = config.replace('enabled = true', 'enabled = false')
+    assert tomllib.loads(desktop['live_test_config'](disabled))['mcp_servers']['codebase_memory']['enabled'] is False
 
     absent = tomllib.loads(desktop['live_test_config']('model = "x"\n'))
     assert 'mcp_servers' not in absent
@@ -538,6 +703,23 @@ def test_desktop_graph_disabled_config_disables_only_complete_server():
     incomplete = '[mcp_servers.codebase_memory]\nenabled = true\n'
     parsed = tomllib.loads(desktop['live_test_config'](incomplete))
     assert parsed['mcp_servers']['codebase_memory']['enabled'] is True
+
+
+def test_explicit_dev_graph_opt_in_preserves_other_settings():
+    import runpy
+    import tomllib
+    enable = runpy.run_path(str(ROOT/'scripts/cortex_dev_config.py'))['enable_configured_graph']
+    source = ('model = "kept"\n[mcp_servers.codebase_memory]\n'
+              'command = "/bin/memory"\nenabled = false\n'
+              '[mcp_servers.other]\nenabled = false\nurl = "http://localhost"\n')
+    changed = enable(source)
+    assert changed == source.replace('command = "/bin/memory"\nenabled = false',
+                                     'command = "/bin/memory"\nenabled = true')
+    assert enable(changed) == changed
+    assert enable('model = "kept"\n') == 'model = "kept"\n'
+    assert enable('[mcp_servers.codebase_memory]\nenabled = false\n') == '[mcp_servers.codebase_memory]\nenabled = false\n'
+    implicit = '[mcp_servers.codebase_memory]\nurl = "http://localhost"\n'
+    assert tomllib.loads(enable(implicit))['mcp_servers']['codebase_memory']['enabled'] is True
 
 
 def test_isolated_launchers_force_bytecode_suppression_over_ambient_value(monkeypatch, tmp_path):
@@ -565,17 +747,32 @@ def test_worker_safety_and_post_wait_rules_are_payload_guidance():
     for rule in ('rm -rf', 'find ... -delete', 'git clean', 'reset/checkout', 'recursive cleanup'):
         assert rule in worker
     assert 'Checks `PYTHONDONTWRITEBYTECODE=1`' in worker
-    assert 'native final names only the assignment-owned report ID' in worker
-    assert 'Put every other report ID only in the saved report' in worker
-    assert 'A wait timeout is only no new evidence, never\ncompletion' in orchestrator
-    assert 'pending is equivalent' in orchestrator
-    assert '`send_message`/`followup_task`\nafter a wait alone' in orchestrator
-    assert 'inbound same-owner reply' in orchestrator
-    assert 'follow-up after terminal result/report reconciliation' in orchestrator
+    assert 'Before any project action' in worker
+    assert 'a coordinator read never satisfies that' in worker
+    assert 'one bounded command per wrapper' in worker
+    assert "native final names exactly one ID: this worker's own current" in worker
+    assert 'other-worker report ID only in the saved report' in worker
+    assert 'Timeout alone never replaces its active owner' in orchestrator
+    assert 'Reconcile actual outcomes' in orchestrator
+
+
+def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
+    orchestrator = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    worker = (PLUGIN/'agent-sources/worker-protocol.md').read_text()
+    pipeline = (PLUGIN/'report-templates/pipeline.md').read_text()
+    assert 'implementation_state' in orchestrator
+    assert 'delivery_state' in orchestrator
+    assert 'acceptance_state' in orchestrator
+    assert 'CI, reports and commands prove only their own boundary' in orchestrator
+    assert '(artifact_revision, acceptance_boundary, check_identity)' in orchestrator
+    assert 'basis, uncertainty, and\ndisconfirmation' in worker
+    assert 'receipt-backed' in worker
+    assert 'rollout/review/recheck/' in worker
+    assert 'implementation_state, delivery_state, and coordinator-owned acceptance_state' in pipeline
 
 
 def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management():
-    orchestrator = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    orchestrator = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
     payload = json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     rule = (
         'Native subagents spawned through `collaboration.spawn_agent` are tracked only with\n'
@@ -868,7 +1065,8 @@ def test_cli_start_fresh_store_rejects_before_git_or_launch_mutation(tmp_path, m
     monkeypatch.setitem(globals_, 'ensure_git_workspace',
                         lambda workdir: (_ for _ in ()).throw(AssertionError('Git setup ran before rejection')))
     args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
-                           model=None, effort=None, codebase_memory=False, apps_enabled=False)
+                           model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
 
     with pytest.raises(RuntimeError, match='evaluation fresh-store target already exists'):
         cli['start'](args)
@@ -895,7 +1093,8 @@ def test_cli_start_missing_git_is_precommit_and_leaves_no_project_residue(tmp_pa
     monkeypatch.setitem(cli['start'].__globals__, 'tmux',
                         lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=''))
     args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
-                           model=None, effort=None, codebase_memory=False, apps_enabled=False)
+                           model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
 
     with pytest.raises(RuntimeError, match='root of a Git repository'):
         cli['start'](args)
@@ -934,7 +1133,8 @@ def test_cli_tmux_launch_preflight_rejects_bad_provenance_before_project_commit(
 
     monkeypatch.setitem(globals_, 'tmux', fake_tmux)
     args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
-                           model=None, effort=None, codebase_memory=False, apps_enabled=False)
+                           model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
     with pytest.raises(RuntimeError, match='tmux launch preflight failed before fresh-store commit'):
         cli['start'](args)
     assert not (project/'.codex').exists()
@@ -1031,12 +1231,15 @@ def test_cli_start_postcommit_failure_marks_store_unusable_consumes_control_and_
         return SimpleNamespace(returncode=0, stdout='')
 
     monkeypatch.setitem(globals_, 'tmux', fake_tmux)
-    monkeypatch.setitem(globals_, '_proc_start_ticks', lambda _pid: 902)
+    start_tick_pids = []
+    monkeypatch.setitem(globals_, '_proc_start_ticks',
+                        lambda pid: start_tick_pids.append(pid) or 902)
     if failure == 'provenance':
         monkeypatch.setitem(globals_, '_write_evaluation_provenance',
                             lambda events, receipt: (_ for _ in ()).throw(OSError('artifact unavailable')))
     args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
-                           model=None, effort=None, codebase_memory=False, apps_enabled=False)
+                           model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
     with pytest.raises(cli['PostCommitLaunchFailure'], match='post_commit_launch_failure') as caught:
         cli['start'](args)
     message = str(caught.value)
@@ -1054,6 +1257,11 @@ def test_cli_start_postcommit_failure_marks_store_unusable_consumes_control_and_
     expected_cleanup = 'not-created' if failure == 'provenance' else 'stopped'
     assert marker['session_cleanup'] == expected_cleanup
     if failure == 'tmux-configuration':
+        # This fixture intentionally has valid Phase 2 control but no
+        # bootstrap route. It must pass phase binding and reach the simulated
+        # configuration fault instead of failing early with a missing
+        # ``tmux_pane_start_ticks`` KeyError.
+        assert start_tick_pids == [4242]
         assert ('kill-session', '-t', '$42') in tmux_calls
         assert ('kill-session', '-t', '=cortex-markdown-smoke') not in tmux_calls
     with pytest.raises(RuntimeError, match='marked unusable'):
@@ -1063,7 +1271,8 @@ def test_cli_start_postcommit_failure_marks_store_unusable_consumes_control_and_
         cli['start'](args.__class__(**{**args.__dict__, 'workdir': clean}))
 
 
-def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize('fresh_store', [True, False])
+def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, monkeypatch, fresh_store):
     import hashlib
     import runpy
     from types import SimpleNamespace
@@ -1092,27 +1301,36 @@ def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, mon
             )
         return SimpleNamespace(returncode=0, stdout='')
     monkeypatch.setitem(globals_, 'tmux', fake_tmux)
-    args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
-                           model=None, effort=None, codebase_memory=False, apps_enabled=False)
+    monkeypatch.setitem(globals_, '_proc_start_ticks', lambda pid: 70070)
+    args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=fresh_store,
+                           model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           bootstrap_route='mcp-first',
+                           host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
     cli['start'](args)
+    started_state = json.loads((tmp_path/'cli-state'/'session.json').read_text())
+    assert started_state['bootstrap_route'] == 'current_host_mcp_first'
+    assert started_state['host_enforcement_state'] == 'unverified'
+    binding = json.loads(Path(started_state['session_binding_path']).read_text())
+    assert started_state['session_receipt'] == binding['session_receipt']
+    assert binding['schema_version'] == 'cortex-live-session-binding-v1'
+    assert binding['control_record_sha256'] is None
     assert any(call[0] == 'send-keys' for call in calls)
     creation_calls = [call for call in calls if call[0] == 'new-session']
-    assert len(creation_calls) == 2
-    assert creation_calls[0][:-2] == creation_calls[1][:-1]
-    assert creation_calls[0][-2:] == ('/bin/sleep', '30')
-    assert creation_calls[1][-1] == '/bin/bash'
+    assert len(creation_calls) == (2 if fresh_store else 1)
+    if fresh_store:
+        assert creation_calls[0][:-2] == creation_calls[1][:-1]
+        assert creation_calls[0][-2:] == ('/bin/sleep', '30')
+    assert creation_calls[-1][-1] == '/bin/bash'
     configuration_calls = [call for call in calls if call[0] == 'set-option']
-    assert configuration_calls == [
-        ('set-option', '-t', '$7', 'remain-on-exit', 'on'),
-        ('set-option', '-t', '$7', 'remain-on-exit', 'on'),
-    ]
+    assert configuration_calls == [('set-option', '-t', '$7', 'remain-on-exit', 'on')] * (2 if fresh_store else 1)
     assert all(call[2] == '=$7' for call in calls if call[0] == 'list-panes')
     assert all(call[call.index('-t') + 1] == '%7'
                for call in calls if call[0] in {'pipe-pane', 'send-keys'})
     assert not any('cortex-markdown-smoke:0.0' in call for call in calls)
     assert not (project/'.codex/cortex/phase2-launch-failure.json').exists()
-    marker = json.loads((project/'.codex/cortex/phase2-launch-transaction.json').read_text())
-    assert marker['status'] == 'launched'
+    if fresh_store:
+        marker = json.loads((project/'.codex/cortex/phase2-launch-transaction.json').read_text())
+        assert marker['status'] == 'launched'
     next_workdir = (tmp_path/'next-workdir').resolve(); next_workdir.mkdir()
     globals_['_refuse_failed_phase2_launch'](next_workdir)
 
@@ -1162,7 +1380,8 @@ def test_cli_postcommit_receipt_io_failure_remains_typed_and_refuses_control_and
         return original_atomic(path, value)
     monkeypatch.setitem(globals_, '_atomic_private_json', failing_atomic)
     args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
-                           model=None, effort=None, codebase_memory=False, apps_enabled=False)
+                           model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
 
     with pytest.raises(cli['PostCommitLaunchFailure'], match='post_commit_launch_failure'):
         cli['start'](args)
@@ -1224,16 +1443,37 @@ def test_live_helper_stops_preserve_the_project_store(monkeypatch,tmp_path):
     monkeypatch.setitem(cli_globals,'STATE',cli_state)
     cli_globals['private']()
     events=cli_state/'events';events.mkdir();(events/'event.jsonl').write_text('{}\n')
-    (cli_state/'capture.txt').write_text('capture')
-    (cli_state/'session.json').write_text(json.dumps({
-        'workdir':str(project),'store':str(store),
-        'tmux_session_id':'$1','tmux_pane_id':'%1',
-    }))
+    (cli_state/'capture.txt').write_text('Cortex live-dev exit=0\n')
+    session={
+        'workdir':str(project),'store':str(store),'events':str(events),
+        'started_at':100.0,'thread_created_since':100.0,
+        'tmux_server_pid':1,'tmux_session_name':'cortex-markdown-smoke',
+        'tmux_session_id':'$1','tmux_session_created':2,
+        'tmux_pane_id':'%1','tmux_pane_pid':3,'tmux_pane_start_ticks':4,
+    }
+    cli['_capture_ordinary_session_binding'](session)
+    (cli_state/'session.json').write_text(json.dumps(session))
     monkeypatch.setitem(cli_globals,'tmux',lambda *args,**kwargs: None)
+    monkeypatch.setitem(cli_globals,'_exact_cleanup_identity',lambda _data: None)
+    monkeypatch.setitem(cli_globals,'terminal_snapshot',lambda _data:{
+        'current_command':'bash','dead':False,'descendants':[],
+    })
+    monkeypatch.setitem(cli_globals,'_observer_namespace',lambda _name:{
+        'observed_tool_calls':lambda _data:[{
+            'thread_id':'root','role':'coordinator','tool':'functions.exec','outcome':'success',
+        }],
+    })
+    monkeypatch.setitem(cli_globals,'normalized_observer_events',lambda _observer,_events:([
+        {'event_kind':'mcp','operation':'write_report','outcome':'success'},
+    ],[
+        {'event_kind':'hook','hook_event':'PostToolUse','outcome':'success'},
+    ]))
     monkeypatch.setattr(sys,'argv',['cortex-live-smoke','stop'])
     cli['main']()
     assert store.read_bytes()==b'project database'
-    assert json.loads((cli_state/'last.json').read_text())['store']==str(store)
+    last=json.loads((cli_state/'last.json').read_text())
+    assert last['store']==str(store)
+    assert Path(last['pre_stop_evidence']['path']).is_dir()
     assert not (cli_state/'session.json').exists() and not events.exists()
 
     desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
@@ -1352,6 +1592,7 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     }))=={
         'task_name':'frontend','requested_model':'gpt-5.6-terra',
         'requested_reasoning_effort':'high','fork_turns':'none',
+        'assignment_digest':'462189425c5aac5c29bfc1010a4e6b69b8c9338adf9d10f825eaf1f673bbd6f1',
     }
     assert classify([{'type':'input_text','text':'{"exit_code":130,"output":"^C"}'}],
                     'write_stdin','chars:"\\u0003"')[:2]==('stopped',None)
@@ -1644,25 +1885,18 @@ def test_markdown_local_links():
             assert (path.parent/link.split('#')[0]).exists(),(path,link)
 
 
-def test_coordinator_cannot_drop_required_checks_on_environment_failure():
-    text=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Preserve required checks until the user changes scope.' in text
-    assert 'Match completion evidence to the user\'s outcome.' in text
-    assert 'exact pipeline draft edit' in ' '.join(text.split())
-    assert 'One worker owns each shared or coupled mutation surface.' in text
-    assert 'unavailable attachment as an explicit gap' in text
-
-
-def test_coordinator_cannot_finalize_active_or_unreconciled_work():
-    text=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Never emit a terminal final while an assigned owner is active or a required' in text
-    assert 'Interim updates are non-terminal.' in text
-    assert 'Before acceptance/final, reconcile\nassignments with native worker state/evidence' in text
-    assert 'A wait timeout is only no new evidence, never\ncompletion' in text
-    assert 'repeat bounded native wait for the same owner.' in text
-    assert 'Record terminal failure/cancellation before final.' in text
-    assert 'Timeout or unavailable\nobservation is not failure/cancellation.' in text
-    assert 'Never inspect installed plugin/cache/candidate paths or agent registries.' in text
+def test_orchestrator_routes_conditional_procedures_with_valid_links():
+    import re
+    root = PLUGIN/'skills/orchestrator'
+    body = (root/'SKILL.md').read_text()
+    assert len(body) < 6500
+    links = re.findall(r'\]\((references/[^)]+)\)', body)
+    assert len(set(links)) >= 7
+    for link in links:
+        assert (root/link).is_file()
+    routing = (root/'references/worker-routing.md').read_text()
+    for profile in json.loads((PLUGIN/'profiles.json').read_text())['profiles']:
+        assert '`'+profile['name']+'`' in routing
 
 
 def test_shared_worker_protocol_routes_rare_interactive_procedure():
@@ -1680,7 +1914,7 @@ def test_native_instruction_boundaries_cover_observed_live_failures():
     communication=(PLUGIN/'skills/coordinator-communication/SKILL.md').read_text()
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
-    assert "language of the user's latest own prose" in coordinator
+    assert "Use the user's language" in coordinator
     assert "user's latest own prose" in communication
     assert 'Reuse retained results while relevant state is unchanged.' in discipline
     assert 'Re-read after user steering' in discipline
@@ -1711,6 +1945,7 @@ def test_cli_uncertain_submission_never_sends_again(monkeypatch,tmp_path):
     })
     monkeypatch.setitem(namespace,'STATE',state_root)
     monkeypatch.setitem(namespace,'save',lambda _: None)
+    monkeypatch.setitem(namespace,'_require_ordinary_send_binding',lambda _data: None)
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_: 0)
     monkeypatch.setitem(namespace,'_require_trust_receipt',lambda *_: {'status':'accepted'})
     monkeypatch.setitem(namespace,'_require_empty_composer',lambda *_: 'empty')
@@ -1741,6 +1976,7 @@ def test_ordinary_cli_trust_composer_send_needs_no_phase2_identity(monkeypatch,t
     sent=[];saved=[];receipts=iter((0,0,1))
     monkeypatch.setitem(namespace,'state',lambda:data)
     monkeypatch.setitem(namespace,'save',lambda value:saved.append(dict(value)))
+    monkeypatch.setitem(namespace,'_require_ordinary_send_binding',lambda _data: None)
     monkeypatch.setitem(namespace,'_require_empty_composer',lambda *_:'› Ask Codex to do anything')
     monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_:next(receipts))
     monkeypatch.setitem(namespace,'tmux',lambda *args,**kwargs: sent.append(args) or types.SimpleNamespace(returncode=0))
@@ -1760,6 +1996,39 @@ def test_ordinary_cli_trust_composer_send_needs_no_phase2_identity(monkeypatch,t
         main()
     assert sent==calls_after_first and saved==saves_after_first
     assert data['first_submission_at']==123.0
+
+
+def test_mcp_first_ordinary_send_uses_native_receipt_without_phase2_control(monkeypatch,tmp_path):
+    """Exercise the actual current-host send branch that previously raised KeyError."""
+    import runpy
+    import sys
+    import types
+
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='mcp_first_ordinary_send')
+    main=helper['main'];namespace=main.__globals__
+    prompt=tmp_path/'prompt.txt';prompt.write_text('Current-host observational request\n')
+    data={'workdir':str(tmp_path),'started_at':100,'thread_created_since':100,
+          'tmux_pane_id':'%7','resumed':False,'original_request_sha256':'a'*64,
+          'first_submission_at':None,'lifecycle_status':'started',
+          'bootstrap_route':helper['MCP_FIRST_BOOTSTRAP_ROUTE']}
+    sent=[];saved=[];bound=[];receipts=iter((0,1))
+    native={'thread_id':'child','user_turn_sha256':'b'*64}
+    monkeypatch.setattr(sys,'argv',['cortex-live-smoke','send','--prompt-file',str(prompt)])
+    monkeypatch.setitem(namespace,'state',lambda:data)
+    monkeypatch.setitem(namespace,'save',lambda value:saved.append(dict(value)))
+    monkeypatch.setitem(namespace,'_require_ordinary_send_binding',lambda _data: None)
+    monkeypatch.setitem(namespace,'_require_empty_composer',lambda *_:'› Ask Codex to do anything')
+    monkeypatch.setitem(namespace,'user_prompt_receipts',lambda *_:next(receipts))
+    monkeypatch.setitem(namespace,'_native_send_receipt',lambda *_args,**_kwargs:native)
+    monkeypatch.setitem(namespace,'_bind_mcp_first_root',lambda actual,receipt:bound.append((actual,receipt)))
+    monkeypatch.setitem(namespace,'tmux',lambda *args,**kwargs:sent.append(args) or types.SimpleNamespace(returncode=0))
+    monkeypatch.setitem(namespace,'time',types.SimpleNamespace(sleep=lambda _:None,time=lambda:123.0))
+
+    assert main() is None
+    assert bound == [(data,native)]
+    assert 'phase2_control_sha256' not in data and 'session_receipt' not in data
+    assert sum(call[0]=='paste-buffer' for call in sent)==1
+    assert saved[-1]['first_submission_at']==123.0
 
 
 def test_ordinary_resumed_cli_refuses_send_before_observation_or_state_change(monkeypatch,tmp_path):
@@ -1866,7 +2135,10 @@ def test_marketplace_audit_extracts_only_known_role_from_assignment():
     assert extract('$cortex:worker-unknown secret') is None
     assert extract('$cortex:worker-backend-dev $cortex:worker-debugger') is None
     metadata=helper['safe_call_metadata']('spawn_agent',json.dumps({'message':'$cortex:worker-technical-writer Private content'}))
-    assert metadata=={'assigned_profile':'technical_writer'}
+    assert metadata=={
+        'assigned_profile':'technical_writer',
+        'assignment_digest':'de969536f8b80cfd43ac5726d7fe480a2ae8393d16fcd450fa3894a19f536fde',
+    }
 
 
 def test_skill_instruction_exception_does_not_allow_cache_exploration(tmp_path,monkeypatch):

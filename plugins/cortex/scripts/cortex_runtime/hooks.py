@@ -14,8 +14,9 @@ import time
 import uuid
 
 from .contracts import StoreError
-from .execution_boundary import private_access_denied
+from .execution_boundary import authorize_pre_dispatch, capabilities_for_role
 from .hook_storage import HookStorage, fingerprint
+from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 EVENTS = frozenset({"UserPromptSubmit", "SessionStart", "SubagentStart", "PreCompact",
                     "PostCompact", "PostToolUse", "PreToolUse", "SubagentStop", "Stop",
@@ -348,6 +349,28 @@ def _context_output(event, message):
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": message[:MAX_CONTEXT_CHARACTERS]}}
 
 
+def _failure_stage(payload):
+    """Return a bounded lifecycle stage without retaining host error contents."""
+    event = payload.get("hook_event_name") if isinstance(payload, dict) else None
+    return {
+        "PostToolUse": "post_tool_receipt",
+        "PreToolUse": "pre_tool_policy",
+        "SubagentStart": "subagent_binding",
+        "SubagentStop": "subagent_stop",
+        "UserPromptSubmit": "source_capture",
+        "SessionStart": "session_restore",
+        "SessionEnd": "session_end",
+        "PreCompact": "compaction_boundary",
+        "PostCompact": "compaction_boundary",
+        "Stop": "stop_boundary",
+    }.get(event, "hook_input_or_storage")
+
+
+def _failure_class(exc):
+    name = type(exc).__name__
+    return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "UnknownError"
+
+
 def restoration(snapshot):
     # Only server-generated references/counters enter developer context. Report
     # titles, summaries, prompts, paths and arbitrary pipeline prose never do.
@@ -356,6 +379,12 @@ def restoration(snapshot):
              "resource owners and unfinished actions. The coordinator decides interpretation and completion."]
     pipeline = snapshot["pipeline"]
     lines.append("Pipeline report: " + (pipeline["id"] if pipeline else "not yet published") + ".")
+    governance = snapshot.get("governance", {})
+    if governance.get("status") == "selected":
+        lines.append(f"Current advisory governance: {governance['mode']}; rationale report: {governance['report_id']}. "
+                     "Restore this depth before selecting work and verification; it grants no permissions or acceptance.")
+    else:
+        lines.append("Advisory governance is unset or unavailable. Use the user's requirements and observed risk; do not stop work for this diagnostic.")
     lines.append(f"Current source revision: {snapshot['source_revision']}; change cursor sequence: {snapshot['change_sequence']}.")
     lines.append(f"Turns awaiting authoritative native source capture: {snapshot['pending_source_turns']}. "
                  "A pending turn is a capture gap, not a count or interpretation of messages.")
@@ -452,43 +481,87 @@ class HookHandler:
                                                     "permissionDecisionReason": "Cortex blocks app-thread messaging before dispatch; use the native parent/subagent route."}}
                 metadata["diagnostic_codes"] = ["forbidden_app_thread_message_pre_dispatch"]
                 self.observation["outcome"] = "denied"
-            elif (context["role"] == "worker"
-                  and private_access_denied(tool, payload.get("tool_input"),
-                                            cwd=command_cwd, project_root=context["project_root"])):
-                output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
-                                                   "permissionDecisionReason": "Cortex blocks direct worker access to task-private storage before dispatch; use bounded mcp__cortex__read_report evidence reads."}}
-                metadata["diagnostic_codes"] = ["private_cortex_execution_boundary"]
-                self.observation["outcome"] = "denied"
-            elif context["role"] == "coordinator" and agent is not None and tool in COORDINATOR_PROJECT_TOOLS:
-                output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
-                                                   "permissionDecisionReason": "Cortex coordinator project access is delegated to a native worker before dispatch."}}
-                metadata["diagnostic_codes"] = ["coordinator_project_access_pre_dispatch"]
-                self.observation["outcome"] = "denied"
+            elif unknown_actor and tool != "apply_patch":
+                # A session-only event has no actor receipt. Preserve the
+                # established no-classification outcome rather than guessing
+                # coordinator/worker authority from a shared parent session.
+                # The semantic authorizer itself remains fail-closed whenever
+                # it is called with missing context.
+                pass
             else:
-                data = payload.get("tool_input")
-                mutations = parse_patch(data.get("command") if isinstance(data, dict) else None, cwd)
-                if mutations is None:
-                    metadata["diagnostic_codes"] = ["patch_not_parsed"]
+                # ``apply_patch`` still reaches the established registered-file
+                # parser without an actor receipt: a literal patch mutation is
+                # independently observable, while prose merely mentioning a
+                # path remains unclassified.  All other session-only host
+                # events preserve the legacy empty result above.
+                if unknown_actor:
+                    decision = {"allowed": True}
                 else:
-                    paths = {p for m in mutations for k, p in m.items() if k in {"path", "destination"}}
-                    records = self.storage.protected_paths(context, sorted(paths))
-                    reason = None
-                    for record in records:
-                        for mutation in mutations:
-                            if record["path"] not in {mutation["path"], mutation.get("destination")}:
-                                continue
-                            if record["kind"] == "report":
-                                reason = "Registered Cortex publications are immutable; publish a new draft through Cortex."
-                            elif mutation["action"] == "delete" or mutation.get("destination"):
-                                reason = "A registered Cortex draft must remain at its allocated path; edit it in place."
-                            # Tool events do not document agent_id. Only an explicit
-                            # worker mapping can prove an ownership violation here.
-                            elif agent is not None and record["owner_thread_id"] != context["thread_id"]:
-                                reason = "This registered Cortex draft belongs to a different confirmed worker."
-                    if reason:
-                        output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny", "permissionDecisionReason": reason}}
-                        metadata["diagnostic_codes"] = ["registered_file_integrity"]
-                        self.observation["outcome"] = "denied"
+                    actor_kind = ("native_coordinator" if context["role"] == "coordinator"
+                                  else "native_worker")
+                    assigned = _assigned_worker_skill(payload)
+                    # A coordinator can load only the active bundled
+                    # orchestrator skill. A worker needs both a native child
+                    # context and the host's registered assigned worker skill;
+                    # absent/ambiguous assignment metadata remains denied.
+                    expected_skill = (
+                        "skills/orchestrator/SKILL.md" if context["role"] == "coordinator"
+                        else assigned[1] if context.get("agent_id") and assigned is not None else None
+                    )
+                    decision = authorize_pre_dispatch(
+                        tool, payload.get("tool_input"), actor_kind=actor_kind,
+                        role=context["role"], task_id=context["task_id"],
+                        assignment_id=context["receipt"], route="native_hook",
+                        capabilities=capabilities_for_role(context["role"]),
+                        cwd=command_cwd, project_root=context["project_root"],
+                        expected_skill=expected_skill,
+                    )
+                if not decision["allowed"]:
+                    reason = "Cortex pre-dispatch authorization denied this protected host operation."
+                    if context["role"] == "coordinator" and agent is not None:
+                        # Keep the long-standing explicit coordinator result
+                        # distinct while the semantic decision still denies
+                        # before dispatch and supplies receipt-bound metadata.
+                        reason = "Cortex coordinator project access is delegated to a native worker before dispatch."
+                    elif (context["role"] == "worker"
+                          and decision.get("reason") == "internal_operand"):
+                        # Preserve the established worker-private boundary
+                        # diagnosis while the new authorization seam still
+                        # rejects the operation before tool execution.
+                        reason = ("Cortex blocks direct worker access to task-private storage before dispatch; "
+                                  "use bounded mcp__cortex__read_report evidence reads.")
+                    output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
+                                                       "permissionDecisionReason": reason}}
+                    metadata.update(
+                        diagnostic_codes=["pre_dispatch_authorization_denied", decision["code"]],
+                        authorization_outcome=decision["code"],
+                        authorization_capability=decision["capability"],
+                        authorization_reason=decision["reason"],
+                    )
+                    self.observation["outcome"] = "denied"
+                else:
+                    data = payload.get("tool_input")
+                    mutations = parse_patch(data.get("command") if isinstance(data, dict) else None, cwd)
+                    if mutations is None:
+                        metadata["diagnostic_codes"] = ["patch_not_parsed"]
+                    else:
+                        paths = {p for m in mutations for k, p in m.items() if k in {"path", "destination"}}
+                        records = self.storage.protected_paths(context, sorted(paths))
+                        reason = None
+                        for record in records:
+                            for mutation in mutations:
+                                if record["path"] not in {mutation["path"], mutation.get("destination")}:
+                                    continue
+                                if record["kind"] == "report":
+                                    reason = "Registered Cortex publications are immutable; publish a new draft through Cortex."
+                                elif mutation["action"] == "delete" or mutation.get("destination"):
+                                    reason = "A registered Cortex draft must remain at its allocated path; edit it in place."
+                                elif agent is not None and record["owner_thread_id"] != context["thread_id"]:
+                                    reason = "This registered Cortex draft belongs to a different confirmed worker."
+                        if reason:
+                            output = {"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny", "permissionDecisionReason": reason}}
+                            metadata["diagnostic_codes"] = ["registered_file_integrity"]
+                            self.observation["outcome"] = "denied"
         elif event == "PostToolUse":
             self.observation.update(tool_name=payload["tool_name"],
                                     response_shape=_response_shape(payload.get("tool_response")))
@@ -554,13 +627,25 @@ class HookHandler:
                         "observed_events_flushed": True}
         else:
             metadata = {"boundary": event, "observed_events_flushed": True}
+        # Cortex is observational: never turn a policy finding into a host veto.
+        # Preserve the proposed decision for diagnostics without claiming that
+        # an action was prevented or that the host granted permission.
+        decision_output=output.get("hookSpecificOutput", {})
+        if decision_output.get("permissionDecision") == "deny":
+            reason=decision_output.get("permissionDecisionReason", "Cortex policy finding")
+            output={"hookSpecificOutput":{"hookEventName":event,
+                    "additionalContext":"Cortex advisory diagnostic: "+reason+
+                    " This is not a runtime restriction; continue host-permitted work."}}
+            metadata["runtime_enforcement"]="none"
+            self.observation.update(outcome="diagnostic", runtime_enforcement="none")
         metadata.update(actor_scope="session" if unknown_actor else "actor",
                         actor_thread_id=None if unknown_actor else context["thread_id"],
                         parent_session_id=session, binding_origin=context["binding_origin"])
         stored = self.storage.record(context, event, event_key, metadata)
         self.observation["receipt_digest"] = event_key
         self.observation["replayed"] = not stored
-        for key in ("exit_code", "command_session_id", "status", "truncated", "diagnostic_codes", "result_digest"):
+        for key in ("exit_code", "command_session_id", "status", "truncated", "diagnostic_codes", "result_digest",
+                    "authorization_outcome", "authorization_capability", "authorization_reason"):
             if key in metadata:
                 self.observation[key] = metadata[key]
         if "changed_paths" in metadata:
@@ -568,14 +653,19 @@ class HookHandler:
         return output
 
 
-def observe(row):
-    """Optional private hook-only stream; never claim model/tool evidence."""
+def _write_observation(row):
+    """Write one optional private hook-only stream row."""
     location = os.environ.get("CORTEX_OBSERVATION_DIR")
     if not location:
         return
     from .store import private_directory, regular
-    row = dict(row, event_kind="hook", action_status=row.get("outcome", "unknown"),
-               outcome="error" if row.get("outcome") == "failed" else "success")
+    action_status = row.get("outcome", "unknown")
+    prevented = (row.get("hook_event") == "PreToolUse"
+                 and action_status == "denied"
+                 and row.get("authorization_outcome") == "PERMISSION_DENIED")
+    row = dict(row, event_kind="hook", action_status=action_status,
+               execution_status=("denied_before_dispatch" if prevented else "not_observed"),
+               outcome="error" if action_status in {"failed", "denied"} else "success")
     root = private_directory(location)
     target = root / f"hooks-{os.getpid()}.jsonl"
     fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -585,6 +675,16 @@ def observe(row):
             os.write(fd, (json.dumps(dict(row, timestamp_ns=time.time_ns()), sort_keys=True) + "\n").encode())
     finally:
         os.close(fd)
+
+
+def observe(row, *, diagnostic_stream=None):
+    """Optional private hook-only stream; observation failure is non-blocking."""
+    return run_passive_diagnostic(
+        lambda: _write_observation(row),
+        operation="observation",
+        emit=lambda finding: emit_bounded_diagnostic(
+            diagnostic_stream if diagnostic_stream is not None else sys.stderr, finding),
+    )
 
 
 def main(stdin=None, stdout=None, stderr=None):
@@ -623,13 +723,25 @@ def main(stdin=None, stdout=None, stderr=None):
     except Exception as exc:
         # Failure remains visible but is non-blocking (never exit 2). Exception
         # bodies may contain source text, filesystem paths or SQLite data.
-        row = dict(handler.observation if handler else row, outcome="failed", error_type=type(exc).__name__)
-        stderr.write("Cortex hook failed; the event was not fully recorded (" + type(exc).__name__ + ").\n")
+        error_class = _failure_class(exc)
+        row = dict(handler.observation if handler else row, outcome="failed",
+                   error_type=error_class, error_class=error_class,
+                   error_stage=_failure_stage(payload if 'payload' in locals() else None))
+        # Failure reporting is itself passive logging. Preserve the real hook
+        # failure/exit code while keeping a broken stderr stream non-blocking.
+        # The human-readable failure line is itself the best-effort emitter.
+        # Use a value-free passive trigger so even StoreError/PermissionError
+        # from a broken stderr stream cannot escape this legacy return path.
+        run_passive_diagnostic(
+            lambda: (_ for _ in ()).throw(RuntimeError("hook failure logging")),
+            operation="logging",
+            emit=lambda _finding: stderr.write(
+                "Cortex hook failed; the event was not fully recorded (" + error_class + ").\n"),
+        )
         exit_code = 1
     row["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
-    try:
-        observe(row)
-    except Exception:
-        stderr.write("Cortex hook observation receipt could not be saved.\n")
-        exit_code = 1
+    # This stream is passive telemetry, never the hook's authorization response.
+    # Its failure must not change the underlying hook outcome or turn a logging
+    # problem into a host decision.
+    observe(row, diagnostic_stream=stderr)
     return exit_code

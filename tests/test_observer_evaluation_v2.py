@@ -5,6 +5,8 @@ import runpy
 import sqlite3
 import tomllib
 
+import pytest
+
 
 ROOT=Path(__file__).resolve().parents[1]
 OBSERVER=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'))
@@ -38,6 +40,73 @@ def test_hook_actions_are_separate_from_model_and_mcp_events(tmp_path):
     assert rows[1]=={key:value for key,value in later.items() if key not in {'raw_output','arguments'}}
     assert rows[1]['command_session_id']=='command-7'
     assert rows[1]['parent_session_id']=='parent-2'
+
+
+def test_hook_failure_diagnostics_are_bounded_and_correlate_wrapper_truncation(tmp_path):
+    hook=dict(timestamp_ns=200,event_kind='hook',hook_event='PostToolUse',outcome='error',
+              task_id='t_'+'a'*12,thread_id='worker',parent_thread_id='parent',role='backend_dev',
+              tool_name='exec_command',error_class='OSError',error_stage='post_tool_receipt',
+              raw_error='private hook failure')
+    (tmp_path/'hooks-13.jsonl').write_text(json.dumps(hook)+'\n')
+    observed=OBSERVER['observed_hook_events'](tmp_path)
+    assert observed == [{key:value for key,value in hook.items() if key!='raw_error'}]
+    wrapper=dict(timestamp='2026-01-01T00:00:00Z',thread_id='worker',parent_thread_id='parent',
+                 role='backend_dev',tool='exec_command',outcome='covered_by_nested',
+                 wrapper_outcome='truncated',error_code='truncated_output')
+    classified=OBSERVER['classify_audit_findings'](
+        failures=[],hook_failures=observed,host_failures=[wrapper],policy_violations=[],
+        open_sessions=[],open_cells=[])
+    invalidators=classified['evidence_integrity_invalidators']
+    assert any(item['source']=='hook_failure' and item['error_class']=='OSError'
+               and item['error_stage']=='post_tool_receipt' for item in invalidators)
+    assert any(item['source']=='host_failure'
+               and item['reason']=='truncated_or_unverified_observation' for item in invalidators)
+
+
+def test_pre_dispatch_denial_is_value_free_prevented_attempt_not_hook_failure(tmp_path):
+    denial=dict(timestamp_ns=210,event_kind='hook',hook_event='PreToolUse',outcome='error',
+                action_status='denied',task_id='t_'+'b'*12,thread_id='worker',parent_thread_id='parent',
+                role='worker',binding_confidence='receipt',binding_origin='native_hook',
+                authorization_outcome='PERMISSION_DENIED',
+                authorization_capability='cortex.internal.*',authorization_reason='internal_operand',
+                execution_status='denied_before_dispatch',
+                diagnostic_codes=['pre_dispatch_authorization_denied','PERMISSION_DENIED'],
+                raw_command='cat private/cache')
+    (tmp_path/'hooks-denial.jsonl').write_text(json.dumps(denial)+'\n')
+    observed=OBSERVER['observed_hook_events'](tmp_path)
+    assert observed == [{key:value for key,value in denial.items() if key!='raw_command'}]
+    classified=OBSERVER['classify_audit_findings'](
+        failures=[],hook_failures=observed,host_failures=[],policy_violations=[],
+        open_sessions=[],open_cells=[])
+    assert classified['evidence_integrity_invalidators'] == []
+    prevented=classified['quality_findings'][0]
+    assert (prevented['source'], prevented['classification'], prevented['reason']) == (
+        'hook_prevented_attempt', 'prevented_attempt_diagnostic',
+        'authorization_denied_before_dispatch')
+    assert prevented['authorization_outcome']=='PERMISSION_DENIED'
+    assert prevented['execution_status']=='denied_before_dispatch'
+    assert 'private/cache' not in json.dumps(prevented)
+
+
+@pytest.mark.parametrize('execution_status', [None, 'unknown'])
+def test_incomplete_pre_dispatch_denial_is_fail_closed_not_score_eligible(tmp_path, execution_status):
+    denial=dict(timestamp_ns=211,event_kind='hook',hook_event='PreToolUse',outcome='error',
+                action_status='denied',task_id='t_'+'c'*12,thread_id='worker',parent_thread_id='parent',
+                role='worker',binding_confidence='receipt',binding_origin='native_mcp',
+                authorization_outcome='PERMISSION_DENIED',
+                authorization_capability='cortex.internal.*',authorization_reason='internal_operand',
+                diagnostic_codes=['pre_dispatch_authorization_denied','PERMISSION_DENIED'])
+    if execution_status is not None:
+        denial['execution_status']=execution_status
+    (tmp_path/'hooks-incomplete-denial.jsonl').write_text(json.dumps(denial)+'\n')
+    classified=OBSERVER['classify_audit_findings'](
+        failures=[],hook_failures=OBSERVER['observed_hook_events'](tmp_path),host_failures=[],
+        policy_violations=[],open_sessions=[],open_cells=[])
+    assert classified['evidence_valid'] is False
+    assert classified['score_eligible'] is False
+    invalidator=classified['evidence_integrity_invalidators'][0]
+    assert (invalidator['source'], invalidator['reason']) == (
+        'hook_prevented_attempt', 'pre_dispatch_denial_receipt_incomplete')
 
 
 def test_desktop_observation_is_scoped_to_submitted_task_tree(tmp_path,monkeypatch):
@@ -100,6 +169,42 @@ def test_desktop_observation_is_scoped_to_submitted_task_tree(tmp_path,monkeypat
         'root-a']
     usage_result=OBSERVER['participant_token_usage'](state)
     assert {row['thread_id'] for row in usage_result['participants']}=={'root-a','child-a'}
+    assert not any(row['terminal'] for row in usage_result['participants'])
+    def lifecycle(thread, kind, turn):
+        with paths[thread].open('a') as target:
+            target.write(json.dumps({'type':'event_msg','payload':{
+                'type':kind,'turn_id':turn,'duration_ms':1000}})+'\n')
+    lifecycle('root-a','task_started','root-turn')
+    lifecycle('child-a','task_started','child-turn')
+    lifecycle('root-a','task_complete','root-turn')
+    participants=OBSERVER['participant_token_usage'](state)['participants']
+    quality={'evidence_valid':True,'score_eligible':True,
+             'evidence_integrity_invalidators':[],'quality_findings':[]}
+    accept=OBSERVER['desktop_final_acceptance']
+    assert not accept({'status':'complete'},quality,participants)
+    lifecycle('child-a','task_complete','child-turn')
+    participants=OBSERVER['participant_token_usage'](state)['participants']
+    assert accept({'status':'complete'},quality,participants)
+    # Desktop prefixes a child rollout with copied parent context. Its pending
+    # parent turn is not work owned by the child; explicit native settings resume
+    # the child's own lifecycle. A genuine later child turn must still block.
+    with paths['child-a'].open('a') as target:
+        for row in [
+            {'type':'session_meta','payload':{'id':'root-a'}},
+            {'type':'event_msg','payload':{'type':'task_started','turn_id':'inherited-parent'}},
+            {'type':'event_msg','payload':{'type':'thread_settings_applied','thread_id':'child-a'}},
+        ]: target.write(json.dumps(row)+'\n')
+    assert accept({'status':'complete'},quality,
+                  OBSERVER['participant_token_usage'](state)['participants'])
+    lifecycle('child-a','task_started','own-followup')
+    assert not accept({'status':'complete'},quality,
+                      OBSERVER['participant_token_usage'](state)['participants'])
+    lifecycle('child-a','task_complete','own-followup')
+    assert not accept({'status':'complete'},dict(quality,quality_findings=[
+        {'classification':'product_quality_outcome'}]),participants)
+    lifecycle('root-a','task_started','followup')
+    assert not accept({'status':'complete'},quality,
+                      OBSERVER['participant_token_usage'](state)['participants'])
 
 
 def test_task_scope_rejects_rows_with_any_conflicting_native_identity():
@@ -220,6 +325,45 @@ def test_original_request_receipt_accepts_native_user_message_event(tmp_path,mon
     assert len(create)==1 and create[0]['original_request_preserved'] is True
     assert 'coordinator_original_request_changed' not in {
         row['violation'] for row in OBSERVER['call_policy_violations'](rows)}
+
+
+def test_all_tools_catalogue_label_is_exact_and_keeps_direct_create_provenance(tmp_path, monkeypatch):
+    """Exercise the live-shaped wrapper/output/receipt/event correlation."""
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    codex=tmp_path/'.cortex-dev/.codex';codex.mkdir(parents=True)
+    rollout=tmp_path/'coordinator.jsonl'; events=tmp_path/'events';events.mkdir()
+    def entry(stamp, payload):
+        return json.dumps(dict(timestamp=stamp,type='response_item',payload=payload))
+    rollout.write_text('\n'.join([
+        entry('2026-09-10T18:00:00.010Z',dict(type='custom_tool_call',call_id='catalogue',
+            name='functions.exec',input='text(ALL_TOOLS)')),
+        entry('2026-09-10T18:00:00.020Z',dict(type='custom_tool_call_output',call_id='catalogue',
+            output='Script completed')),
+        entry('2026-09-10T18:00:00.030Z',dict(type='custom_tool_call',call_id='create',
+            name='functions.exec',input='await tools.mcp__cortex__create_task({project_root:"/fixture",request_key:"key"})')),
+        entry('2026-09-10T18:00:00.040Z',dict(type='item_completed',item=dict(
+            type='McpToolCall',server='cortex',tool='create_task',status='completed',
+            arguments={'project_root':'/fixture','request_key':'key'},
+            result={'structuredContent':{'task_id':'t_child'}}))),
+        entry('2026-09-10T18:00:00.050Z',dict(type='custom_tool_call_output',call_id='create',
+            output='Script completed')),
+    ])+'\n')
+    with sqlite3.connect(codex/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT,rollout_path TEXT,agent_role TEXT,model TEXT,reasoning_effort TEXT,created_at INTEGER,cwd TEXT)')
+        db.execute('CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',
+                   ('root',str(rollout),None,'gpt-5.6-luna','high',1789063200,'/fixture'))
+    (events/'server.jsonl').write_text(json.dumps(dict(
+        time_ns=1789063200045000000,operation='create_task',outcome='success',
+        thread_id='root',parent_thread_id=None,task_id='t_child'))+'\n')
+    rows=OBSERVER['observed_tool_calls'](dict(workdir='/fixture',started_at=1789063200,
+                                              thread_created_since=1789063200,events=str(events)))
+    catalogue=[row for row in rows if row.get('tool')=='tool_catalogue_search']
+    creates=[row for row in rows if row.get('tool')=='mcp__cortex__create_task']
+    assert len(catalogue)==1 and catalogue[0]['catalogue_discovery'] is True
+    assert catalogue[0]['host_receipt_observed'] is True
+    assert len(creates)==1 and creates[0]['direct_public_mcp'] is True
+    assert creates[0]['server_observed'] is True and creates[0]['canonical_call_key']
 
 
 def test_worker_static_bracket_and_alias_app_calls_are_observed(tmp_path,monkeypatch):
@@ -460,6 +604,67 @@ def test_paired_write_report_observation_does_not_look_like_post_publication_wor
     assert 'worker_tool_after_successful_write_report' not in flags
 
 
+def test_write_report_result_receipt_extracts_exact_publication_identity():
+    receipt=OBSERVER['mcp_receipt_metadata']({
+        'type':'McpToolCall','server':'cortex','tool':'write_report','status':'completed',
+        'result':{'structuredContent':{'report_id':'r_6b6185b46456'},'content':[]},
+    })
+    assert receipt['report_id']=='r_6b6185b46456'
+    row={'thread_id':'worker','tool':receipt['tool'],'report_id':receipt['report_id']}
+    row['canonical_call_key']=OBSERVER['canonical_mcp_call_key'](row)
+    event={'thread_id':'worker','operation':'write_report','report_id':'r_6b6185b46456'}
+    assert OBSERVER['event_call_candidate']([row],0,event=event) is row
+
+
+def test_pipeline_editions_have_distinct_call_keys_and_sha256_prefix_is_normalized():
+    base={'thread_id':'parent','tool':'mcp__cortex__write_report','report_id':'r_0123456789ab'}
+    first=dict(base,draft_id='d_0123456789ab')
+    second=dict(base,draft_id='d_deadbeefdead')
+    for row in (first,second):row['canonical_call_key']=OBSERVER['canonical_mcp_call_key'](row)
+    assert first['canonical_call_key']!=second['canonical_call_key']
+    event=dict(second,operation='write_report')
+    assert OBSERVER['event_call_candidate']([first,second],0,event=event) is second
+    receipt=OBSERVER['mcp_receipt_metadata']({
+        'type':'McpToolCall','server':'cortex','tool':'read_report','status':'completed',
+        'result':{'structuredContent':{'report_id':base['report_id'],
+          'artifacts':[{'reference':'retry.py','version':'sha256:'+'a'*64}]}}})
+    assert receipt['reported_artifact_bindings'][0][1]=='a'*64
+
+
+def test_report_pages_match_exact_identity_and_disjoint_intervals():
+    base=dict(thread_id='parent',tool='mcp__cortex__read_report',report_id='r_0123456789ab')
+    key=OBSERVER['canonical_mcp_call_key'](base)
+    first=dict(base,canonical_call_key=key,timestamp='2026-01-01T00:00:00Z',
+               completed_timestamp='2026-01-01T00:00:01Z')
+    second=dict(base,canonical_call_key=key,timestamp='2026-01-01T00:00:02Z',
+                completed_timestamp='2026-01-01T00:00:03Z')
+    event=dict(base,operation='read_report')
+    when=1767225600*1_000_000_000+500_000_000
+    choose=OBSERVER['event_call_candidate']
+    assert choose([first,second],when,event=event) is first
+    assert choose([first,dict(first)],when,event=event) is None
+    assert choose([first,second],when+1_000_000_000,event=event) is None
+    assert choose([first,second],when,event={**event,'report_id':'r_deadbeefdead'}) is None
+
+
+def test_publication_identity_ignores_nested_governance_but_not_conflicting_roots():
+    published={'report_id':'r_6b6185b46456',
+               'governance':{'report_id':'r_0123456789ab','mode':'light'}}
+    item={'type':'McpToolCall','server':'cortex','tool':'write_report','status':'completed',
+          'result':{'structuredContent':published,
+                    'content':[{'type':'text','text':json.dumps(published)}]}}
+    receipt=OBSERVER['mcp_receipt_metadata'](item)
+    assert receipt['report_id']==published['report_id']
+    row=dict(receipt,thread_id='worker')
+    row['canonical_call_key']=OBSERVER['canonical_mcp_call_key'](row)
+    event={'thread_id':'worker','operation':'write_report','report_id':published['report_id']}
+    assert OBSERVER['event_call_candidate']([row],0,event=event) is row
+    item['result']['content'][0]['text']=json.dumps({'report_id':'r_deadbeefdead'})
+    assert 'report_id' not in OBSERVER['mcp_receipt_metadata'](item)
+    item['result']={'structuredContent':{'governance':published['governance']}}
+    assert 'report_id' not in OBSERVER['mcp_receipt_metadata'](item)
+
+
 def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
     skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
@@ -569,7 +774,21 @@ def test_desktop_launcher_and_observer_require_explicit_spawn_route_fields():
     assert 'model="gpt-5.6-luna"' in instructions
     assert 'reasoning_effort="medium" or "high"' in instructions
     assert 'fork_turns="none"' in instructions
-    assert 'must not inspect installed plugin/cache/candidate paths' in instructions
+    assert 'must not use functions.exec, exec_command, terminal, or another shell route' in instructions
+    assert 'attributable complete' in instructions
+    assert 'nested success never excuses truncation' in instructions
+
+    cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='live_instruction_fixture')
+    assert 'Both roles may read their exact advertised SKILL.md' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'does not permit directory scans or private plugin/cache/candidate/registry probing' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    forbidden=OBSERVER['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':'ls /fixture/.cortex-dev/.codex/plugins/cache'}),
+        'coordinator','/fixture')
+    assert 'forbidden_plugin_or_cache_access' in forbidden
+    static=OBSERVER['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':"rg -n 'plugins/cache' README.md"}),
+        'coordinator','/fixture')
+    assert 'forbidden_plugin_or_cache_access' not in static
 
     base={'message':'gAAAAA'+'x'*100,'task_name':'author_spec',
           'model':'gpt-5.6-luna','reasoning_effort':'high','fork_turns':'none'}
@@ -624,3 +843,52 @@ def test_live_audit_rejects_heavy_models_and_wrong_effort():
     worker={**coordinator,'thread_id':'child','parent_thread_id':'root','role':'worker',
             'reasoning_effort':'low'}
     assert violation in {row['violation'] for row in policy([worker])}
+def test_task_local_revision_and_exact_worker_receipt_are_fail_closed():
+    revisions=OBSERVER['task_source_revision_violations']
+    # Parent revision is provenance only; a newly-created child starts at one.
+    assert revisions([
+        {'thread_id':'parent','source_revision':5},
+        {'thread_id':'child','source_revision':1},
+        {'thread_id':'child','source_revision':1},
+    ]) == []
+    assert revisions([
+        {'thread_id':'pipeline-parent','task_id':'parent-task','source_revision':9},
+        {'thread_id':'fresh-root','task_id':'fresh-task','parent_thread_id':None,
+         'source_revision':1},
+        {'thread_id':'fresh-worker','task_id':'fresh-task','parent_thread_id':'fresh-root',
+         'source_revision':1},
+    ]) == []
+    assert revisions([
+        {'thread_id':'child','source_revision':2},
+        {'thread_id':'child','source_revision':1},
+    ]) == [{'index':1,'thread_id':'child',
+            'violation':'task_source_revision_nonmonotonic'}]
+    legal=OBSERVER['call_policy_violations']([
+        {'thread_id':'parent','role':'coordinator','tool':'mcp__cortex__create_task',
+         'outcome':'success','source_revision':5},
+        {'thread_id':'child','parent_thread_id':'parent','role':'coordinator',
+         'tool':'mcp__cortex__create_task','outcome':'success','source_revision':1},
+    ])
+    assert not [row for row in legal if row['violation'].startswith('task_source_revision')]
+    illegal=OBSERVER['call_policy_violations']([
+        {'thread_id':'child','role':'coordinator','tool':'mcp__cortex__create_task',
+         'outcome':'success','source_revision':2},
+        {'thread_id':'child','role':'coordinator','tool':'mcp__cortex__list_reports',
+         'outcome':'success','source_revision':1},
+    ])
+    assert any(row['violation']=='task_source_revision_nonmonotonic' for row in illegal)
+    task_identity_illegal=OBSERVER['call_policy_violations']([
+        {'thread_id':'child-a','task_id':'child-task','role':'coordinator',
+         'tool':'mcp__cortex__create_task','outcome':'success','source_revision':2},
+        {'thread_id':'child-b','task_id':'child-task','role':'coordinator',
+         'tool':'mcp__cortex__list_reports','outcome':'success','source_revision':1},
+    ])
+    assert any(row['violation']=='task_source_revision_nonmonotonic'
+               and row['task_id']=='child-task' for row in task_identity_illegal)
+    audit=OBSERVER['classify_audit_findings'](failures=[],hook_failures=[],host_failures=[],
+        policy_violations=illegal,open_sessions=[],open_cells=[])
+    assert audit['evidence_valid'] is False
+    receipt=OBSERVER['worker_skill_assignment_receipt']
+    assert receipt('explorer','explorer',True)=='complete_exact_assigned'
+    assert receipt('explorer',None,True) is None
+    assert receipt(None,None,True) is None

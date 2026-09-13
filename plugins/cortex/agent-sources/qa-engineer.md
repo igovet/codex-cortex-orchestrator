@@ -27,6 +27,9 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
 4. Falsify coverage with a known-bad input, mutation, negative assertion, or
    failure-before control where practical.
 5. Run targeted checks first, then proportionate regression checks; classify outcomes.
+   Reuse an unchanged review/verification identity `(artifact_revision,
+   acceptance_boundary, check_identity)` unless fresh evidence or a concrete rerun
+   reason changes its applicability.
 
 ## Quality criteria
 
@@ -44,5 +47,6 @@ a content guide; the evidence requirements below remain authoritative.
 
 Report consumed predecessor evidence, exact test paths, criteria-to-scenario matrix,
 changed tests, reproduced failures, falsification controls, coverage gaps, flakes,
-contradictions, environment limits, uncertainty, and residual risk. List exact
+contradictions, environment limits, uncertainty, and residual risk. State the reuse
+identity and fresh-evidence/rerun reason when applicable. List exact
 commands with cwd and exit codes, or explain non-execution.

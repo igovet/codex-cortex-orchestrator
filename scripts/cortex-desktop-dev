@@ -34,6 +34,9 @@ WORKER_MODELS={
     'ordinary': 'gpt-5.6-luna',
     'complex': 'gpt-5.6-terra',
     'security-analysis-microtask': 'gpt-5.6-sol',
+    'decision': 'gpt-5.6-sol',
+    'decision-hard': 'gpt-5.6-sol',
+    'decision-exceptional': 'gpt-6-astra',
 }
 CONSULTANT_MODELS={'consultation':'gpt-5.6-sol',
                    'consultation-narrow':'gpt-5.6-sol',
@@ -48,15 +51,18 @@ WORKER_MODEL_CHOICES={
     **{key:{value} for key,value in CONSULTANT_MODELS.items()},
 }
 WORKER_EFFORTS={
-    'gpt-5.6-luna': {'medium','high','xhigh','max'},
-    'gpt-5.6-terra': {'medium','high','xhigh'},
-    'gpt-5.6-sol': {'low','medium','high','xhigh'},
-    'gpt-6-astra': {'low','medium','high'},
+    'gpt-5.6-luna': {'medium','high'},
+    'gpt-5.6-terra': {'medium','high'},
+    'gpt-5.6-sol': {'medium','high'},
+    'gpt-6-astra': {'medium'},
 }
 CONSULTANT_EFFORTS={'consultation': {'medium'},
-                     'consultation-narrow': {'low'},
+                     'consultation-narrow': {'medium'},
                      'consultation-hard': {'high'},
-                     'consultation-deeper': {'low','medium','high'}}
+                     'consultation-deeper': {'medium'},
+                     'decision': {'medium'},
+                     'decision-hard': {'high'},
+                     'decision-exceptional': {'medium'}}
 ADVISORY_POLICY_FLAGS={
     'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
     'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
@@ -72,14 +78,35 @@ ADVISORY_POLICY_FLAGS={
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
     'gpt-5.6-luna with high reasoning effort. Every native subagent must use '
-    'gpt-5.6-luna with medium or high reasoning effort, except the explicitly '
-    'assigned senior-consultant may use gpt-5.6-sol or gpt-6-astra with low, '
-    'medium, or high effort. Every spawn_agent call must explicitly include '
+    'gpt-5.6-luna with medium or high reasoning effort. Every spawn_agent call must explicitly include '
     'model="gpt-5.6-luna", reasoning_effort="medium" or "high", and '
-    'fork_turns="none"; the consultant exception must include its selected '
-    'model and effort explicitly. The coordinator must not inspect installed '
-    'plugin/cache/candidate paths or agent registries; use only the exact '
-    'advertised skill read and live tool schemas. For this live test, this '
+    'fork_turns="none". The coordinator must not use functions.exec, '
+    'exec_command, terminal, or another shell route for generic installed '
+    'plugin/cache/candidate/registry probing before or after task creation. Before '
+    'the public task receipt, the sole static exception is an exact read-only '
+    'advertised coordinator SKILL.md or public plugin declaration (.mcp.json or '
+    '.codex-plugin/plugin.json), with a fixed literal file, bounded reader, and '
+    'complete receipt: never a directory, glob, runtime/state file, registry, or '
+    'mutation. Both roles may read their exact advertised SKILL.md and its declared '
+    'instruction references with bounded literal reads and complete receipts. '
+    'Discover deferred tools by exact name or namespace only; for Cortex use '
+    'text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__"))). '
+    'Broad description searches can truncate. Public catalogue reads cannot mix '
+    'paths, content extraction, mutations or nested tool calls. '
+    'Use only the exact '
+    'advertised assigned worker-SKILL read or native attachment receipt and live '
+    'tool schemas. Each opaque worker route must retain one attributable complete '
+    'worker-skill receipt before any worker project action; a coordinator read never '
+    'satisfies it. From the first worker action, workers must not probe those paths. '
+    'When the launcher declares current-host MCP-first bootstrap, the child coordinator '
+    'must make direct public mcp__cortex__create_task its first qualifying operation '
+    'and wait for its complete native receipt before any project-target action; no '
+    'functions.exec, nested shell, terminal, file, patch, or private probe may substitute. '
+    'Use one bounded command per wrapper with complete exit/result receipt; nested '
+    'success never excuses truncation. For coordinator source inspection use a single literal '
+    'cat, sed -n, or rg command; do not combine commands with separators, pipes, '
+    'redirection, or banner printing. A wait timeout alone is not a reason to '
+    'message an active worker; continue waiting silently. For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
 )
@@ -198,16 +225,7 @@ def live_test_config(source):
     replace(None,'model_reasoning_effort',json.dumps(LIVE_COORDINATOR_EFFORT))
     replace(None,'developer_instructions',json.dumps(instructions))
     replace('agents','default_subagent_model',json.dumps(LIVE_MODEL))
-    # A complete optional graph server can be inherited by the disposable
-    # profile even for an ordinary (graph-disabled) live run. Disable only an
-    # existing complete entry: creating an override for an absent or incomplete
-    # table would make Codex reject the transport as malformed.
-    server=parsed.get('mcp_servers',{}).get('codebase_memory')
-    complete=(isinstance(server,dict)
-              and isinstance(server.get('command'),str)
-              and bool(server['command'].strip()))
-    if complete:
-        replace('mcp_servers.codebase_memory','enabled','false')
+    # Preserve the isolated graph server's enabled state, including explicit opt-out.
     return source
 
 
@@ -336,7 +354,9 @@ def observed_hook_events(directory,thread_ids=None):
              'binding_origin','source_revision','exit_code','command_session_id','session_id',
              'status','truncated',
              'changed_path_count','changed_paths_digest','diagnostic_codes',
-             'action_status','actor_scope','parent_session_id'}
+             'action_status','actor_scope','parent_session_id','error_class',
+             'error_stage','error_type','authorization_outcome',
+             'authorization_capability','authorization_reason','execution_status'}
     rows=[]
     for path in Path(directory).glob('hooks-*.jsonl'):
         with path.open(encoding='utf-8') as source:
@@ -379,8 +399,8 @@ def participant_token_usage(state):
     participants=[];seen=set();latest=None;coordinator_durations=[]
     boundary=float(state.get('trial_started_at',state.get('thread_created_since',state.get('started_at',0))))-2
     for thread in threads:
-        totals={field:0 for field in TOKEN_FIELDS};responses=0;parent=None;completed_turns=set();durations=[]
-        path=Path(thread['rollout_path'])
+        totals={field:0 for field in TOKEN_FIELDS};responses=0;parent=None;completed_turns=set();started_turns=set();durations=[]
+        path=Path(thread['rollout_path']);inherited_context=False
         if path.is_file():
             with path.open(encoding='utf-8') as source:
                 for line in source:
@@ -388,10 +408,23 @@ def participant_token_usage(state):
                     except ValueError:continue
                     payload=entry.get('payload',{})
                     if entry.get('type')=='session_meta' and isinstance(payload,dict):
+                        metadata_id=payload.get('id')
+                        if isinstance(metadata_id,str):
+                            inherited_context=metadata_id!=thread['id']
+                        if inherited_context:continue
                         provenance=payload.get('source')
                         if isinstance(provenance,dict):
                             parent=(((provenance.get('subagent') or {}).get('thread_spawn') or {})
                                     .get('parent_thread_id'))
+                    if (entry.get('type')=='event_msg' and isinstance(payload,dict)
+                            and payload.get('type')=='thread_settings_applied'
+                            and payload.get('thread_id')==thread['id']):
+                        inherited_context=False
+                    if inherited_context:continue
+                    if (entry.get('type')=='event_msg' and isinstance(payload,dict)
+                            and payload.get('type')=='task_started'
+                            and isinstance(payload.get('turn_id'),str)):
+                        started_turns.add(payload['turn_id'])
                     if (entry.get('type')=='event_msg' and isinstance(payload,dict)
                             and payload.get('type')=='task_complete'
                             and payload.get('turn_id') not in completed_turns
@@ -411,7 +444,8 @@ def participant_token_usage(state):
         if role=='coordinator':coordinator_durations.extend(durations)
         participants.append(dict(thread_id=thread['id'],parent_thread_id=parent,role=role,
                                  model=thread['model'],reasoning_effort=thread['reasoning_effort'],
-                                 responses=responses,tokens=totals if responses else None))
+                                 responses=responses,tokens=totals if responses else None,
+                                 terminal=bool(started_turns) and started_turns<=completed_turns))
     complete=bool(participants) and all(row['tokens'] is not None for row in participants)
     aggregate=({field:sum(row['tokens'][field] for row in participants) for field in TOKEN_FIELDS}
                if complete else None)
@@ -486,6 +520,20 @@ def safe_receipt_provenance(raw):
     return exit_code,'Warning: truncated output' in rendered
 
 
+def public_result_objects(result):
+    """Decode only public result roots, never IDs nested in advisory metadata."""
+    if not isinstance(result,dict):return []
+    roots=[result]
+    if isinstance(result.get('structuredContent'),dict):
+        roots.append(result['structuredContent'])
+    for block in result.get('content',[]) if isinstance(result.get('content'),list) else []:
+        if not isinstance(block,dict) or block.get('type')!='text':continue
+        try:value=json.loads(block.get('text',''))
+        except (TypeError,ValueError):continue
+        if isinstance(value,dict):roots.append(value)
+    return roots
+
+
 def mcp_receipt_metadata(item):
     """Classify the host's completed MCP receipt independently of wrappers."""
     if not isinstance(item,dict) or item.get('type')!='McpToolCall':return None
@@ -504,6 +552,33 @@ def mcp_receipt_metadata(item):
     if server=='cortex' and tool=='create_draft' and outcome=='success':
         ids=set(re.findall(r'\\?"draft_id\\?"\s*:\s*\\?"(d_[0-9a-f]{12})\\?"',rendered))
         if len(ids)==1:metadata['draft_id']=ids.pop()
+    if server=='cortex' and tool in {'write_report','read_report'} and outcome=='success':
+        # `write_report` returns the public report identity in its result, not
+        # in the request. Retain only that bounded identity for exact later
+        # event correlation; a missing or ambiguous value remains unbound.
+        ids={root['report_id'] for root in public_result_objects(result)
+             if isinstance(root.get('report_id'),str)
+             and re.fullmatch(r'r_[0-9a-f]{12}',root['report_id'])}
+        if len(ids)==1:metadata['report_id']=ids.pop()
+    if server=='cortex' and tool=='read_report' and outcome=='success':
+        structured=result.get('structuredContent') if isinstance(result,dict) else None
+        candidates=[result,structured] if isinstance(structured,dict) else [result]
+        bindings=[]
+        for candidate in candidates:
+            artifacts=candidate.get('artifacts') if isinstance(candidate,dict) else None
+            if not isinstance(artifacts,list):continue
+            parsed=[]
+            for artifact in artifacts:
+                if (not isinstance(artifact,dict) or set(artifact) != {'reference','version'}
+                        or not isinstance(artifact['reference'],str)
+                        or not isinstance(artifact['version'],str)
+                        or not re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}',artifact['version'])):
+                    parsed=[];break
+                parsed.append((hashlib.sha256(artifact['reference'].encode()).hexdigest()[:12],
+                               artifact['version'].removeprefix('sha256:')))
+            if parsed:
+                bindings=sorted(set(parsed));break
+        if bindings:metadata['reported_artifact_bindings']=bindings
     return dict(tool='mcp__'+server+'__'+tool,tool_namespace='mcp__'+server,host_status=status,
                 host_receipt_outcome=outcome,host_error_code=code,
                 host_result_digest=digest,**metadata)
@@ -516,8 +591,22 @@ def mcp_argument_metadata(tool,arguments):
     except (TypeError,ValueError):return {}
     if not isinstance(value,dict):return {}
     allowed={'template','draft_id','report_id','document_kind','page','limit'}
-    return {key:value[key] for key in allowed
-            if key in value and type(value[key]) in (str,int) and value[key] != ''}
+    metadata={key:value[key] for key in allowed
+              if key in value and type(value[key]) in (str,int) and value[key] != ''}
+    # Bind a direct public task bootstrap to its exact canonical project without
+    # retaining the pathname or caller-selected request key.  This is observer
+    # metadata, not a model-provided bootstrap receipt.
+    if tool=='mcp__cortex__create_task':
+        project=value.get('project_root')
+        if isinstance(project,str) and project:
+            metadata['bootstrap_project_digest']=hashlib.sha256(project.encode()).hexdigest()
+    if tool=='mcp__cortex__write_report':
+        # The seven-tool schema remains unchanged.  This fixed title merely
+        # labels the coordinator's ordinary immutable report as fallback
+        # evidence; report body claims remain model-authored and untrusted.
+        metadata['delegation_evidence_report']=(
+            value.get('title')=='Delegation evidence: native_worker_result')
+    return metadata
 
 
 def command_execution_outcome(status,exit_code,output=''):
@@ -587,6 +676,16 @@ def semantic_no_match_family(source,exit_code,stdout,stderr,cwd):
     return search[0].rsplit('/',1)[-1]
 
 
+def semantic_absent_path(source,exit_code,stdout,stderr):
+    """A literal unary file predicate returning false is an observation, not a crash.
+
+    Preserve the raw exit and path policy. This grants no artifact/completion proof;
+    missing required output still fails independent outcome reconciliation.
+    """
+    if exit_code!=1 or str(stdout or '').strip() or str(stderr or '').strip():return False
+    return bool(re.fullmatch(r'test[ \t]+-(?:e|f|d)[ \t]+[A-Za-z0-9_./-]+',source))
+
+
 def nested_tool_invocations(source):
     """Extract statically visible tool calls and their argument digests.
 
@@ -625,6 +724,52 @@ def nested_tool_invocations(source):
         arguments=source[end:index-1] if depth==0 else source[end:]
         matches.append((name,hashlib.sha256(arguments.encode()).hexdigest()[:12],arguments))
     return matches
+
+
+def direct_public_cortex_create_task(source, nested):
+    """Identify one semantically direct public Cortex task call in a host wrapper.
+
+    Current Codex can serialize a direct MCP member call through its observable
+    functions.exec transport.  The transport shell is not qualification work
+    when it contains exactly that one literal public call.  Any alias, second
+    nested tool, or dynamic source remains a wrapped/ambiguous action.
+    """
+    if not isinstance(source,str) or len(nested)!=1 or nested[0][0]!='mcp__cortex__create_task':
+        return False
+    return re.search(
+        r'\btools(?:\.mcp__cortex__create_task|\[\s*["\']mcp__cortex__create_task["\']\s*\])\s*\(',
+        source) is not None
+
+
+def approved_tool_catalogue_envelope(source, nested):
+    """Recognize the one value-free current-host tool catalogue observation.
+
+    ``functions.exec`` may expose the public tool catalogue before the first
+    direct MCP call.  That observation is not a general JavaScript or wrapper
+    privilege: only the bounded catalogue or a literal word filter over its
+    public names/descriptions qualifies. Keep this grammar
+    deliberately small so paths, dynamic queries, content extraction, mutations and
+    mixed wrappers remain ordinary pre-binding host actions.
+    """
+    if not isinstance(source,str) or nested:
+        return False
+    compact=re.sub(r'\s+',' ',source).strip()
+    binding=re.fullmatch(r'const ([A-Za-z_][A-Za-z0-9_]*) = (ALL_TOOLS\.filter\(.*\)); text\(\1\);?',compact)
+    if binding:
+        compact='text('+binding.group(2)+')'
+    if compact in {'text(ALL_TOOLS)','text(ALL_TOOLS);'}:return True
+    if re.fullmatch(
+        r'''text\(\s*ALL_TOOLS\.filter\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*=>\s*'''
+        r'''\1\.name\.startsWith\((["'])mcp__cortex__\2\)\s*\)\s*\)\s*;?''',compact):
+        return True
+    # Current host discovery commonly filters the advertised names/descriptions.
+    # Accept only literal word alternatives over those two fields: no arbitrary
+    # callbacks, regex operators, computed properties, calls or extra statements.
+    return len(source)<=2048 and re.fullmatch(
+        r'''text\(\s*ALL_TOOLS\.filter\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*=>\s*'''
+        r'''/[A-Za-z_][A-Za-z0-9_]*(?:\|[A-Za-z_][A-Za-z0-9_]*)*/i?\.test\(\s*'''
+        r'''\1\.name\s*\+\s*(["']) \2\s*\+\s*\1\.description\s*\)\s*\)\s*\)\s*;?''',
+        compact) is not None
 
 
 def observed_cell_ids(raw):
@@ -677,9 +822,64 @@ def delivered_request_digests(state,text):
 
 POLICY_CLASS_VALUES={
     'research','exploration','analysis','ordinary','complex',
+    'decision','decision-hard','decision-exceptional',
     'security-analysis-microtask','security-implementation','review',
     'consultation','consultation-narrow','consultation-hard','consultation-deeper',
 }
+NATIVE_WORKER_RESULT_SCHEMA='cortex-native-worker-result-v1'
+NATIVE_WORKER_RESULT_FIELDS=frozenset({
+    'schema','worker_thread_id','parent_thread_id','task_id','profile','status',
+    'worker_mcp','assignment_digest','artifacts','checks','limits','result_digest',
+})
+NATIVE_WORKER_RESULT_STATUSES=frozenset({'success','failed','blocked'})
+
+
+def canonical_native_worker_result(value):
+    """Hash the closed native-result evidence body, never its prose wrapper."""
+    body={key:value[key] for key in NATIVE_WORKER_RESULT_FIELDS-{'result_digest'}}
+    return hashlib.sha256(json.dumps(body,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def parse_native_worker_result(rendered):
+    """Validate the current-host fallback's closed, model-supplied result body.
+
+    This is intentionally evidence parsing, not worker authentication.  It accepts
+    one labelled JSON block only and retains no free-form final-answer content.
+    """
+    if not isinstance(rendered,str):return None,'native_worker_result_missing'
+    matches=re.findall(r'(?s)\ACortex native worker result:\s*\n```json\s*\n(.*?)\n```\s*\Z',rendered)
+    if len(matches)!=1:return None,'native_worker_result_missing'
+    try:value=json.loads(matches[0])
+    except (TypeError,ValueError):return None,'native_worker_result_malformed'
+    if not isinstance(value,dict) or set(value)!=NATIVE_WORKER_RESULT_FIELDS:
+        return None,'native_worker_result_schema_invalid'
+    required_text=('worker_thread_id','parent_thread_id','task_id','profile','assignment_digest','result_digest')
+    if any(not isinstance(value.get(key),str) or not value[key] for key in required_text):
+        return None,'native_worker_result_schema_invalid'
+    if (value.get('schema')!=NATIVE_WORKER_RESULT_SCHEMA
+            or value.get('status') not in NATIVE_WORKER_RESULT_STATUSES
+            or value.get('worker_mcp') not in {'available','unavailable'}
+            or assigned_worker_profile('$cortex:worker-'+value['profile'].replace('_','-'))!=value['profile']
+            or not re.fullmatch(r'[0-9a-f]{64}',value['assignment_digest'])
+            or not re.fullmatch(r'[0-9a-f]{64}',value['result_digest'])):
+        return None,'native_worker_result_schema_invalid'
+    artifacts=value.get('artifacts');checks=value.get('checks');limits=value.get('limits')
+    if (not isinstance(artifacts,list) or not isinstance(checks,list) or not isinstance(limits,list)
+            or not all(isinstance(item,dict) and set(item)=={'reference','sha256'}
+                       and isinstance(item['reference'],str) and 0<len(item['reference'])<=256
+                       and not item['reference'].startswith('/') and '..' not in Path(item['reference']).parts
+                       and isinstance(item['sha256'],str) and re.fullmatch(r'[0-9a-f]{64}',item['sha256'])
+                       for item in artifacts)
+            or not all(isinstance(item,dict) and set(item)=={'command','exit_code','receipt_digest'}
+                       and isinstance(item['command'],str) and re.fullmatch(r'[A-Za-z0-9_.:/ -]{1,160}',item['command'])
+                       and isinstance(item['exit_code'],int) and not isinstance(item['exit_code'],bool)
+                       and -255<=item['exit_code']<=255
+                       and isinstance(item['receipt_digest'],str) and re.fullmatch(r'[0-9a-f]{64}',item['receipt_digest'])
+                       for item in checks)
+            or not all(isinstance(item,str) and 0<len(item)<=320 for item in limits)
+            or value['result_digest']!=canonical_native_worker_result(value)):
+        return None,'native_worker_result_schema_invalid'
+    return value,None
 
 
 def assignment_policy_metadata(text):
@@ -778,6 +978,70 @@ def shell_command_parts(arguments):
     return parts or None
 
 
+def bounded_static_read_wrapper(command):
+    """Return the one literal payload of the supported shell read wrapper.
+
+    The interactive host may put its otherwise literal instruction read behind
+    ``bash -lc``.  Treat that as transport only when it has exactly one quoted
+    payload; callers must still validate the payload with the closed static
+    read grammar below.  This deliberately admits neither nested shells nor
+    arbitrary shell options, environment prefixes, redirections, or commands.
+    """
+    if not isinstance(command,str):
+        return None
+    try:
+        parts=shlex.split(command,posix=True)
+    except (ValueError,SyntaxError):
+        return None
+    if (len(parts)==3 and parts[0] in {'bash','/bin/bash'} and parts[1]=='-lc'
+            and isinstance(parts[2],str) and parts[2]):
+        return parts[2]
+    return None
+
+
+def bounded_static_read_transport(source, nested):
+    """Recognize the sole installed-host functions.exec static-read envelope.
+
+    The current host forwards one nested ``tools.exec_command`` result through
+    ``text(<same-identifier>)``.  Keep this a syntax-only, value-free
+    exception: exactly one direct call, one ``const`` binding to a safe
+    JavaScript identifier, and one complete forwarding statement using that
+    same identifier are required.  The nested command still goes through
+    ``skill_instruction_read`` and its manifest checks; this helper only
+    prevents an unrelated wrapper from borrowing that nested row's
+    classification.
+    """
+    if not isinstance(source, str) or not isinstance(nested, list) or len(nested) != 1:
+        return False
+    if not isinstance(nested[0], tuple) or len(nested[0]) != 3 or nested[0][0] != 'exec_command':
+        return False
+    match = re.fullmatch(
+        r'\s*const\s+(?P<binding>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*'
+        r'await\s+tools\.exec_command\((?P<arguments>.*)\)\s*;\s*'
+        r'(?:text\((?P=binding)\)\s*;|text\(JSON\.stringify\((?P=binding)\)\)\s*;|'
+        r'text\((?P=binding)\.output\)\s*;\s*'
+        r'text\(`exit_code=\$\{(?P=binding)\.exit_code\}`\)\s*;'
+        r'(?:\s*if\s*\((?P=binding)\.session_id\)\s*'
+        r'text\(`session_id=\$\{(?P=binding)\.session_id\}`\)\s*;)?)\s*',
+        source, re.DOTALL,
+    )
+    if match is None or match.group('arguments') != nested[0][2]:
+        return False
+    # Reject JavaScript keywords/literals even though they lexically resemble
+    # identifiers; accepting one would make the transport grammar ambiguous.
+    return match.group('binding') not in {
+        # ECMAScript keywords/literals, strict-mode future-reserved words, and
+        # the two names forbidden as bindings by the strict-mode grammar.
+        'arguments', 'await', 'break', 'case', 'catch', 'class', 'const',
+        'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum',
+        'eval', 'export', 'extends', 'false', 'finally', 'for', 'function',
+        'if', 'implements', 'import', 'in', 'instanceof', 'interface', 'let',
+        'new', 'null', 'package', 'private', 'protected', 'public', 'return',
+        'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof',
+        'var', 'void', 'while', 'with', 'yield',
+    }
+
+
 def python_skill_read_paths(command):
     """Return literal skill paths from a tiny static pathlib read program.
 
@@ -816,8 +1080,9 @@ def python_skill_read_paths(command):
             imported=True
             continue
         if isinstance(statement,ast.Assign):
-            if (inline_literal or not imported or binding is not None or len(statement.targets)!=1
-                    or not isinstance(statement.targets[0],ast.Name)):
+            if (not imported or binding is not None or len(statement.targets)!=1
+                    or not isinstance(statement.targets[0],ast.Name)
+                    or statement.targets[0].id in {'Path','print'}):
                 return []
             value=statement.value
             if (not isinstance(value,ast.Call) or not isinstance(value.func,ast.Name)
@@ -840,7 +1105,7 @@ def python_skill_read_paths(command):
                     or read.args or read.keywords):
                 return []
             receiver=read.func.value
-            if inline_literal:
+            if inline_literal and binding is None:
                 if (not isinstance(receiver,ast.Call) or not isinstance(receiver.func,ast.Name)
                         or receiver.func.id!='Path' or len(receiver.args)!=1 or receiver.keywords
                         or not isinstance(receiver.args[0],ast.Constant)
@@ -854,37 +1119,68 @@ def python_skill_read_paths(command):
         # No docstrings, arbitrary expressions, imports, calls or mutations.
         return []
     if (not imported or literal_path is None or not printed
-            or inline_literal and binding is not None
             or not inline_literal and binding is None):
         return []
     return [literal_path]
 
 
 def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False):
-    """Validate exact advertised SKILL.md/reference paths and local existence."""
+    """Validate exact advertised skill or public tool-definition reads.
+
+    Coordinator bootstrap may read only a released SKILL/reference document or
+    the two fixed plugin declarations needed to discover the public Cortex
+    tool surface.  This validates literal leaves below the installed isolated
+    cache; it deliberately does not admit directories, globs, registries,
+    database/state files, runtime code, or arbitrary cache content.
+    """
     expected=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
     advertised=False
     for path in read_paths:
         try:relative=path.relative_to(expected)
         except ValueError:return False
-        if '..' in relative.parts or len(relative.parts)<4 or relative.parts[1]!='skills':return False
-        skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
-        if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
-        if coordinator_only and (skill_name!='orchestrator' or resource!=Path('SKILL.md')):return False
-        if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
-        source=ROOT/'plugins/cortex/skills'/skill_name/resource
+        if '..' in relative.parts or len(relative.parts)<2:return False
+        released=Path(*relative.parts[1:])
+        declaration=released in {Path('.mcp.json'),Path('.codex-plugin/plugin.json')}
+        if declaration:
+            if worker_only or not coordinator_only:return False
+            source=ROOT/Path('plugins/cortex')/released
+        else:
+            if len(relative.parts)<4 or relative.parts[1]!='skills':return False
+            skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
+            if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
+            if coordinator_only:
+                if skill_name not in {'orchestrator','tool-discipline','content-safety',
+                                      'coordinator-communication','context-compaction'}:return False
+                if resource!=Path('SKILL.md'):
+                    entry=ROOT/'plugins/cortex/skills'/skill_name/'SKILL.md'
+                    if (len(resource.parts)!=2 or resource.parts[0]!='references'
+                            or resource.as_posix() not in re.findall(r'\]\((references/[^)]+)\)',entry.read_text())):
+                        return False
+            if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
+            source=ROOT/'plugins/cortex/skills'/skill_name/resource
         if not source.is_file() or not path.is_file():return False
+        if coordinator_only and not declaration and (resource!=Path('SKILL.md') or skill_name!='orchestrator'):
+            if path.is_symlink() or path.read_bytes()!=source.read_bytes():return False
         try:path.resolve().relative_to(expected.resolve())
         except ValueError:return False
         advertised=True
     return advertised
 
 
-def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=False):
+def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=False,
+                           _allow_bounded_wrapper=True):
     # Recognize a targeted standard skill read, never installation exploration.
     if tool!='exec_command':return False
     command=shell_command_text(arguments)
     if command is None:return False
+    # Current Codex sometimes transports a literal read through one ``bash
+    # -lc`` envelope.  Reparse only that exact payload; the recursive call
+    # disables another envelope so nested shells cannot widen this exception.
+    wrapped=bounded_static_read_wrapper(command) if _allow_bounded_wrapper else None
+    if wrapped is not None:
+        return skill_instruction_read(
+            tool,json.dumps({'cmd':wrapped}),worker_only,coordinator_only,
+            _allow_bounded_wrapper=False)
     python_paths=python_skill_read_paths(command)
     if python_paths is not None:
         return advertised_skill_paths(python_paths,worker_only,coordinator_only)
@@ -941,6 +1237,34 @@ def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=Fal
         else:return False
         read_paths.append(path)
     return advertised_skill_paths(read_paths,worker_only,coordinator_only)
+
+
+def active_coordinator_skill_read(tool,arguments):
+    """Prove the one active isolated candidate orchestrator skill read.
+
+    The current host performs this read before task creation.  It is not a
+    generic cache exception: the literal leaf must equal the owner-private
+    candidate's installed version and pass the existing bounded reader grammar.
+    """
+    if not skill_instruction_read(tool,arguments,coordinator_only=True):return False
+    command=shell_command_text(arguments)
+    if not isinstance(command,str):return False
+    matches=re.findall(r'(/[A-Za-z0-9_./+@=-]+/skills/(?:orchestrator|tool-discipline|content-safety|coordinator-communication|context-compaction)/(?:SKILL\.md|references/[A-Za-z0-9_-]+\.md))(?![A-Za-z0-9_.-])',command)
+    if not 1<=len(matches)<=4 or len(set(matches))!=len(matches):return False
+    metadata=Path.home()/'.cortex-dev/.codex/cortex-candidate.json'
+    try:
+        info=metadata.lstat()
+        if (metadata.is_symlink() or not metadata.is_file() or info.st_uid!=os.getuid()
+                or info.st_mode&0o077):return False
+        value=json.loads(metadata.read_text(encoding='utf-8'))
+    except (OSError,ValueError):return False
+    version=value.get('version') if isinstance(value,dict) else None
+    if not isinstance(version,str) or not version:return False
+    base=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'/version/'skills'
+    return all(Path(path).is_relative_to(base) and Path(path).is_file()
+               and not Path(path).is_symlink()
+               and Path(path).read_bytes()==(ROOT/'plugins/cortex/skills'/Path(path).relative_to(base)).read_bytes()
+               for path in matches)
 
 
 PRIVATE_CORTEX_MARKER=re.compile(
@@ -1173,6 +1497,13 @@ def path_policy_marker_classes(tool,arguments,workdir):
         return matched
     command=shell_command_text(arguments)
     parts=shell_command_parts(arguments)
+    # Preserve the literal operand classification of the one bounded shell
+    # envelope.  A non-static payload will still be rejected by
+    # ``skill_instruction_read`` and therefore remains an unauthorized access.
+    wrapped=bounded_static_read_wrapper(command)
+    if wrapped is not None:
+        matched.update(_path_policy_marker_classes(wrapped))
+        return matched
     if _python_static_marker_classes(command) is not None and not matched:
         return matched
     if command is None or parts is None:
@@ -1288,7 +1619,8 @@ def path_policy_metadata(tool,arguments,role,workdir):
             'path_access_kind':'ordinary_tooling',
             'path_policy_decision':'diagnostic_only',
         }
-    instruction_read=skill_instruction_read(tool,arguments)
+    instruction_read=skill_instruction_read(
+        tool,arguments,coordinator_only=role in {'coordinator','runtime'})
     valid=plugin_cache_access_is_valid(tool,arguments,workdir)
     if instruction_read or valid:
         return {**safe,
@@ -1313,9 +1645,461 @@ def worker_skill_read(tool,arguments):
     return skill_instruction_read(tool,arguments,worker_only=True)
 
 
+def worker_skill_profile(tool, arguments):
+    """Return the one advertised worker profile read by this exact command."""
+    if not worker_skill_read(tool, arguments):
+        return None
+    command = shell_command_text(arguments)
+    if not isinstance(command, str):
+        return None
+    command = bounded_static_read_wrapper(command) or command
+    profiles = {
+        match.replace('-', '_')
+        for match in re.findall(r'(?:^|/)skills/worker-([a-z][a-z-]*)/SKILL\.md(?:$|[\s"\'])', command)
+    }
+    if len(profiles) != 1:
+        return None
+    profile = next(iter(profiles))
+    return profile if assigned_worker_profile('$cortex:worker-' + profile.replace('_', '-')) == profile else None
+
+
+def worker_skill_assignment_receipt(profile, observed_profile, complete):
+    """Return the sole receipt value that can authorize worker project work."""
+    return ('complete_exact_assigned' if complete is True and isinstance(profile, str)
+            and observed_profile == profile else None)
+
+
+def task_source_revision_violations(rows):
+    """Validate source revisions only within one observed task provenance.
+
+    Prefer the explicit task identity when a row carries one, falling back to the
+    thread identity for older host rows. A child task starts at one; a parent or
+    assignment revision is provenance, never a numeric prefix to compare.
+    """
+    latest={}; findings=[]
+    for index,row in enumerate(rows):
+        thread=row.get('thread_id');task_id=row.get('task_id');revision=row.get('source_revision')
+        if not isinstance(thread,str) or not thread:thread=None
+        if not isinstance(task_id,str) or not task_id:task_id=None
+        task=task_id or thread
+        if task is None or isinstance(revision,bool) or not isinstance(revision,int):
+            continue
+        provenance=('task',task) if task_id is not None else ('thread',task)
+        if revision < 0:
+            finding={'index':index,'thread_id':thread or task,
+                     'violation':'task_source_revision_invalid'}
+            if task_id is not None:finding['task_id']=task_id
+            findings.append(finding)
+        elif provenance in latest and revision < latest[provenance]:
+            finding={'index':index,'thread_id':thread or task,
+                     'violation':'task_source_revision_nonmonotonic'}
+            if task_id is not None:finding['task_id']=task_id
+            findings.append(finding)
+        else:
+            latest[provenance]=revision
+    return findings
+
+
+MCP_FIRST_BOOTSTRAP_ROUTE='current_host_mcp_first'
+MCP_FIRST_PROVENANCE_SCHEMA='cortex-mcp-first-root-v1'
+MCP_FIRST_LAUNCH_STATE=Path(tempfile.gettempdir())/f'cortex-markdown-smoke-{os.getuid()}'
+_PRE_BINDING_HOST_TOOLS={
+    'functions.exec','exec_command','write_stdin','command_execution','bash','Bash',
+    'terminal','read_file','write_file','apply_patch','js',
+}
+
+
+def _observational_pre_task_setup(row):
+    """Recognize one narrow, complete coordinator discovery observation.
+
+    This is a classifier for retained host evidence, not a shell allowlist.
+    It accepts only a bounded static skill/tool-catalogue read with explicit
+    negative project/private/mutation facts.  Any unknown operand class stays
+    outside this class and fails the bootstrap contract.
+    """
+    explicit_scope=(row.get('project_target_access') is False
+                    and row.get('private_target_access') is False
+                    and row.get('mutation_observed') is False)
+    # Current-host nested wrapper receipts preserve the exact bounded static
+    # classification but omit redundant false booleans. Treat that omission as
+    # complete only for the collector's bounded metadata form; an explicit
+    # unknown/true scope value remains outside the exception.
+    bounded_transport_scope=(row.get('bounded_metadata_observed') is True
+                             and all(key not in row for key in
+                                     ('project_target_access','private_target_access','mutation_observed')))
+    # The current host's covered wrapper row preserves the positive,
+    # manifest-bound ``active_coordinator_skill_read`` proof and the bounded
+    # metadata marker, but does not serialize a redundant ``truncated: false``
+    # member.  That omission is complete only in this exact collector form;
+    # an explicit true/unknown value, or a row without bounded metadata, stays
+    # outside the exception and is a pre-binding invalidator.
+    bounded_transport_not_truncated=(row.get('bounded_metadata_observed') is True
+                                     and 'truncated' not in row)
+    static_instruction=(
+        row.get('role')=='coordinator'
+        and row.get('tool') in {'functions.exec','exec_command','command_execution'}
+        and row.get('pre_binding_static_read') is True
+        and row.get('skill_instruction_read') is True
+        and row.get('active_coordinator_skill_read') is True
+        and row.get('bounded_wrapper') is True
+        and (explicit_scope or bounded_transport_scope)
+        and row.get('path_target_class')=='approved_instruction_or_static_mention'
+        and row.get('path_access_kind')=='approved_instruction_read'
+        and row.get('path_policy_decision')=='allowed'
+        # A single wrapper cannot be both the exact literal skill read and an
+        # ALL_TOOLS/catalogue envelope.  Preserve the classifier split rather
+        # than letting a mixed wrapper inherit the skill-read exception.
+        and row.get('catalogue_mixed') is not True
+        and row.get('directory_enumeration') is not True
+        and row.get('path_enumeration') is not True
+        and row.get('replayed') is not True
+        and row.get('replay_marker') is not True
+        and row.get('actor_attribution_ambiguous') is not True
+        # Current covered-read rows carry no execution-status member.  Preserve
+        # that observed form, but reject an explicit dispatch/execution claim:
+        # a static SKILL read may not disguise a side-effecting wrapper.
+        and row.get('execution_status') in {None,'denied_before_dispatch'}
+        and (row.get('truncated') is False or bounded_transport_not_truncated)
+        and (row.get('outcome') in {'success','covered_by_command_execution'}
+             or (row.get('outcome')=='covered_by_nested'
+                 and row.get('bounded_metadata_observed') is True))
+        and (row.get('host_receipt_observed') is True
+             or row.get('bounded_metadata_observed') is True)
+    )
+    catalogue=(
+        row.get('role')=='coordinator'
+        and row.get('tool') in {'functions.exec','tool_catalogue_search'}
+        and row.get('catalogue_discovery') is True
+        and row.get('catalogue_value_free') is True
+        and row.get('catalogue_bounded') is True
+        and row.get('catalogue_project_free') is True
+        and row.get('catalogue_private_free') is True
+        and row.get('catalogue_mutation_free') is True
+        and row.get('catalogue_mixed') is False
+        and row.get('truncated') is False
+        and row.get('outcome') in {'success','covered_by_command_execution'}
+        and row.get('host_receipt_observed') is True
+    )
+    return static_instruction or catalogue
+
+
+def _mcp_first_provenance(state):
+    """Read and authenticate the sealed root receipt for this exact CLI launch.
+
+    Session JSON is observation transport, not acceptance evidence.  The
+    expected root can be consumed only after an owner-private, create-once
+    provenance file is opened without following links, hashed as complete
+    bytes, and bound back to the current launch identities.
+    """
+    workdir=state.get('workdir')
+    request_digest=state.get('original_request_sha256')
+    expected_thread=state.get('bootstrap_expected_child_thread_id')
+    native_digest=state.get('bootstrap_native_user_turn_sha256')
+    session_id=state.get('tmux_session_id');pane_id=state.get('tmux_pane_id')
+    session_created=state.get('tmux_session_created')
+    pane_pid=state.get('tmux_pane_pid');pane_start=state.get('tmux_pane_start_ticks')
+    provenance_device=state.get('bootstrap_provenance_device')
+    provenance_inode=state.get('bootstrap_provenance_inode')
+    digest=state.get('bootstrap_provenance_sha256')
+    path_value=state.get('bootstrap_provenance_path')
+    if (not isinstance(workdir,str) or not workdir or not isinstance(request_digest,str)
+            or not isinstance(expected_thread,str) or not expected_thread
+            or not isinstance(native_digest,str) or not isinstance(session_id,str) or not session_id
+            or not isinstance(pane_id,str) or not pane_id or not isinstance(digest,str)
+            or not isinstance(path_value,str) or not path_value
+            or state.get('bootstrap_provenance_schema')!=MCP_FIRST_PROVENANCE_SCHEMA
+            or state.get('host_enforcement_state')!='unverified'
+            or not re.fullmatch(r'[0-9a-f]{64}',request_digest)
+            or not re.fullmatch(r'[0-9a-f]{64}',native_digest)
+            or not re.fullmatch(r'[0-9a-f]{64}',digest)
+            or any(isinstance(value,bool) or not isinstance(value,int) or value<1
+                   for value in (session_created,pane_pid,pane_start,provenance_device,provenance_inode))):
+        return None,'bootstrap_context_missing'
+    canonical_workdir=str(Path(workdir).resolve())
+    if canonical_workdir!=workdir:
+        return None,'bootstrap_provenance_binding_mismatch'
+    identity=hashlib.sha256((session_id+'\0'+pane_id+'\0'+str(session_created)+'\0'
+                             +str(pane_pid)+'\0'+str(pane_start)+'\0'+canonical_workdir).encode()).hexdigest()
+    expected_path=MCP_FIRST_LAUNCH_STATE/f'mcp-first-root-{identity}.json'
+    path=Path(path_value)
+    if path!=expected_path:
+        return None,'bootstrap_provenance_path_mismatch'
+    try:
+        info=path.lstat()
+    except FileNotFoundError:
+        return None,'bootstrap_provenance_missing'
+    except OSError:
+        return None,'bootstrap_provenance_unreadable'
+    if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+            or info.st_mode&0o077 or (info.st_mode&0o777)!=0o600):
+        return None,'bootstrap_provenance_untrusted'
+    flags=os.O_RDONLY|getattr(os,'O_CLOEXEC',0)|getattr(os,'O_NOFOLLOW',0)
+    try:
+        descriptor=os.open(path,flags)
+        try:
+            opened=os.fstat(descriptor)
+            if (opened.st_dev!=info.st_dev or opened.st_ino!=info.st_ino
+                    or opened.st_dev!=provenance_device or opened.st_ino!=provenance_inode
+                    or opened.st_uid!=os.getuid() or opened.st_mode&0o077
+                    or (opened.st_mode&0o777)!=0o600):
+                return None,'bootstrap_provenance_replaced'
+            with os.fdopen(descriptor,'rb') as source:
+                descriptor=None;raw=source.read()
+        finally:
+            if descriptor is not None:os.close(descriptor)
+        current=path.lstat()
+    except OSError:
+        return None,'bootstrap_provenance_unreadable'
+    if (current.st_dev!=opened.st_dev or current.st_ino!=opened.st_ino
+            or current.st_dev!=provenance_device or current.st_ino!=provenance_inode):
+        return None,'bootstrap_provenance_replaced'
+    if hashlib.sha256(raw).hexdigest()!=digest:
+        return None,'bootstrap_provenance_digest_mismatch'
+    try:
+        receipt=json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError,ValueError):
+        return None,'bootstrap_provenance_malformed'
+    if not isinstance(receipt,dict):
+        return None,'bootstrap_provenance_malformed'
+    canonical=(json.dumps(receipt,sort_keys=True,separators=(',',':'))+'\n').encode()
+    if raw!=canonical:
+        return None,'bootstrap_provenance_malformed'
+    expected={
+        'schema_version':MCP_FIRST_PROVENANCE_SCHEMA,
+        'bootstrap_route':MCP_FIRST_BOOTSTRAP_ROUTE,
+        'host_enforcement_state':'unverified',
+        'thread_id':expected_thread,
+        'workdir':canonical_workdir,
+        'original_request_sha256':request_digest,
+        'tmux_session_id':session_id,
+        'tmux_session_created':session_created,
+        'tmux_pane_id':pane_id,
+        'tmux_pane_pid':pane_pid,
+        'tmux_pane_start_ticks':pane_start,
+        'native_user_turn_sha256':native_digest,
+    }
+    if set(receipt)!=set(expected) or any(receipt.get(key)!=value for key,value in expected.items()):
+        return None,'bootstrap_provenance_binding_mismatch'
+    return receipt,None
+
+
+def mcp_first_bootstrap_receipt(rows,state):
+    """Derive a child-owned direct-MCP bootstrap receipt, or a safe failure.
+
+    The current host has no typed pre-dispatch attestation. A valid result proves
+    only observed ordering and exact native/MCP binding; it never proves host
+    enforcement and cannot be supplied by the caller.
+    """
+    if state.get('bootstrap_route') != MCP_FIRST_BOOTSTRAP_ROUTE:
+        return None
+    provenance,reason=_mcp_first_provenance(state)
+    if provenance is None:
+        return {'status':'unverified','reason':reason}
+    workdir=provenance['workdir']
+    request_digest=provenance['original_request_sha256']
+    expected_thread=provenance['thread_id']
+    provenance_digest=state['bootstrap_provenance_sha256']
+    expected_project=hashlib.sha256(workdir.encode()).hexdigest()
+    relevant=[(index,row) for index,row in enumerate(rows)
+              if isinstance(row,dict) and row.get('role')!='runtime']
+    roots={row.get('thread_id') for _,row in relevant
+           if row.get('parent_thread_id') is None
+           and isinstance(row.get('thread_id'),str) and row['thread_id']}
+    if expected_thread not in roots:
+        return {'status':'unverified','reason':'bootstrap_expected_root_absent'}
+    if roots != {expected_thread}:
+        return {'status':'unverified','reason':'bootstrap_competing_root'}
+    qualifying=None
+    for index,row in relevant:
+        tool=row.get('tool')
+        if tool in {'native_user_input','launcher_transport'} or row.get('direct_public_mcp_transport') is True:
+            continue
+        if qualifying is None and _observational_pre_task_setup(row):
+            continue
+        if qualifying is not None:
+            # The first other action begins the post-binding segment.  A second
+            # direct create receipt before that boundary is ambiguous evidence,
+            # including an identical replay or a differently labelled copy.
+            if tool=='mcp__cortex__create_task':
+                return {'status':'unverified','reason':'bootstrap_duplicate_receipt','index':index}
+            break
+        # A direct public create_task is the pre-binding -> bound transition.
+        # When current-host transport serializes it inside functions.exec, the
+        # collector marks that sole literal MCP member call explicitly.  Other
+        # nested/wrapped create calls remain inadmissible.
+        if (tool=='mcp__cortex__create_task' and row.get('nested') is True
+                and row.get('direct_public_mcp') is not True):
+            return {'status':'unverified','reason':'bootstrap_wrapped_receipt','index':index}
+        if (tool in _PRE_BINDING_HOST_TOOLS
+                or (row.get('nested') is True and tool!='mcp__cortex__create_task')
+                or row.get('path_target_class') in {'plugin','plugin_cache','cache','candidate','registry','internal'}
+                or row.get('path_policy_decision') == 'unauthorized_access'):
+            return {'status':'unverified','reason':'pre_binding_host_action','index':index}
+        if tool!='mcp__cortex__create_task':
+            return {'status':'unverified','reason':'bootstrap_not_first','index':index}
+        if row.get('outcome')!='success' or row.get('host_receipt_outcome')!='success':
+            return {'status':'unverified','reason':'bootstrap_mcp_failed','index':index}
+        if row.get('replayed') is True or row.get('replay_marker') is True:
+            return {'status':'unverified','reason':'bootstrap_replayed_receipt','index':index}
+        if (row.get('host_receipt_observed') is not True
+                or (row.get('server_observed') is not True
+                    and row.get('result_receipt_observed') is not True)
+                or row.get('parent_thread_id') is not None
+                or not isinstance(row.get('thread_id'),str) or not row['thread_id']):
+            return {'status':'unverified','reason':'bootstrap_native_receipt_invalid','index':index}
+        if row['thread_id'] != expected_thread:
+            return {'status':'unverified','reason':'bootstrap_child_thread_mismatch','index':index}
+        if row.get('bootstrap_project_digest') != expected_project:
+            return {'status':'unverified','reason':'bootstrap_project_mismatch','index':index}
+        if row.get('original_request_preserved') is not True:
+            return {'status':'unverified','reason':'bootstrap_request_mismatch','index':index}
+        result_digest=row.get('host_result_digest')
+        # Host result digests are intentionally bounded by the existing
+        # observer protocol; their source is still the exact MCP receipt.
+        if not isinstance(result_digest,str) or not re.fullmatch(r'[0-9a-f]{12}',result_digest):
+            return {'status':'unverified','reason':'bootstrap_native_receipt_invalid','index':index}
+        task_id=row.get('task_id')
+        if task_id is not None and (not isinstance(task_id,str) or not task_id):
+            return {'status':'unverified','reason':'bootstrap_task_receipt_invalid','index':index}
+        task_binding=({'task_binding':'opaque_root_binding'} if task_id is None else
+                      {'task_digest':hashlib.sha256(task_id.encode()).hexdigest()})
+        qualifying={
+            'status':'complete','route':MCP_FIRST_BOOTSTRAP_ROUTE,
+            'host_enforcement_state':'unverified','thread_id':row['thread_id'],
+            'bootstrap_provenance_sha256':provenance_digest,
+            **task_binding,
+            'project_digest':expected_project,'original_request_sha256':request_digest,
+            'native_receipt_digest':result_digest,
+            'result_receipt_observed':row.get('result_receipt_observed') is True,
+            'server_event_observed':row.get('server_observed') is True,
+        }
+    if qualifying is not None:
+        return qualifying
+    return {'status':'unverified','reason':'bootstrap_receipt_missing'}
+
+
+def current_host_observational_qualification(rows,state,classification,bootstrap_receipt,
+                                             *,capture_complete,events_complete,
+                                             terminal_complete,exit_complete):
+    """Return the honest current-host acceptance label from complete evidence.
+
+    It proves an observed public workflow only.  It never converts an absent
+    host authorization receipt into an enforcement claim.
+    """
+    if state.get('bootstrap_route')!=MCP_FIRST_BOOTSTRAP_ROUTE:
+        return None
+    outcome,outcome_reason=current_host_outcome_receipt(rows,state)
+    bootstrap_complete=(isinstance(bootstrap_receipt,dict)
+                        and bootstrap_receipt.get('status')=='complete')
+    # Capture, audit, and terminal completion are observable current-host facts,
+    # not optional host attestations.  Keep their failure distinct from an
+    # unavailable bootstrap/assignment/skill/server/exit signal so the latter
+    # can be retained as a diagnostic after the complete outcome correlation.
+    if not (capture_complete is True and events_complete is True
+            and terminal_complete is True and exit_complete is True
+            and isinstance(classification,dict)
+            and classification.get('evidence_valid') is True):
+        return {'status':'BLOCK','qualification_contract':'observational_accept',
+                'host_enforcement_state':'unverified',
+                'reason':'observational_evidence_incomplete'}
+    if not (bootstrap_complete or outcome is not None):
+        return {'status':'BLOCK','qualification_contract':'observational_accept',
+                'host_enforcement_state':'unverified',
+                'reason':outcome_reason if outcome_reason not in {None,'not_current_host_route'}
+                else 'observational_evidence_incomplete'}
+    if outcome is not None:
+        return {'status':'observational_accept','qualification_contract':'observational_accept',
+                'host_enforcement_state':'unverified','assignment_enforcement_state':'unverified',
+                'bootstrap_thread_id':outcome['thread_id'],'outcome_receipt':outcome}
+    # A successful native worker result must remain tied to exactly one
+    # task-bound published report.  ``call_policy_violations`` emits a blocking
+    # finding for absent, foreign, duplicate, or post-publication activity.
+    results=[row for row in rows if row.get('tool')=='native_agent_result'
+             and row.get('outcome')=='success']
+    if any(not row.get('report_id') for row in results):
+        return {'status':'BLOCK','qualification_contract':'observational_accept',
+                'host_enforcement_state':'unverified','reason':'worker_report_provenance_missing'}
+    # Some current-host envelopes expose a complete public MCP result but no
+    # separate server event. That is not host enforcement. It is admissible
+    # only when one later, non-replayed task-thread publication receipt binds
+    # the observed bootstrap; missing or competing publications stay blocked.
+    if (bootstrap_receipt.get('result_receipt_observed') is True
+            and bootstrap_receipt.get('server_event_observed') is not True):
+        publications=[row for row in rows
+                      if row.get('thread_id')==bootstrap_receipt.get('thread_id')
+                      and row.get('tool')=='mcp__cortex__write_report'
+                      and row.get('outcome')=='success'
+                      and row.get('host_receipt_outcome')=='success'
+                      and row.get('result_receipt_observed') is True
+                      and isinstance(row.get('report_id'),str)
+                      and row.get('replayed') is not True and row.get('truncated') is not True]
+        if len(publications)!=1:
+            return {'status':'BLOCK','qualification_contract':'observational_accept',
+                    'host_enforcement_state':'unverified',
+                    'reason':'observational_publication_correlation_missing'}
+    return {'status':'observational_accept','qualification_contract':'observational_accept',
+            'host_enforcement_state':'unverified',
+            'assignment_enforcement_state':'unverified',
+            'bootstrap_thread_id':bootstrap_receipt.get('thread_id')}
+
+
+def mcp_first_bootstrap_violations(rows,state):
+    """Return one fail-closed finding for a requested MCP-first bootstrap."""
+    receipt=mcp_first_bootstrap_receipt(rows,state)
+    if receipt is None or receipt.get('status')=='complete':
+        return []
+    reason=receipt.get('reason','bootstrap_receipt_missing')
+    violation=('pre_binding_host_action' if reason=='pre_binding_host_action'
+               else 'mcp_first_bootstrap_'+reason)
+    index=receipt.get('index')
+    offending=(rows[index] if isinstance(index,int) and 0<=index<len(rows)
+               and isinstance(rows[index],dict) else {})
+    finding={'thread_id':offending.get('thread_id'),'role':offending.get('role','runtime'),
+             'tool':offending.get('tool','unknown'),'violation':violation,
+             'bootstrap_route':MCP_FIRST_BOOTSTRAP_ROUTE}
+    if isinstance(index,int):
+        finding['index']=index
+    # Keep a bounded causal reference without retaining raw command operands.
+    for key in ('nested','argument_digest','wrapper_argument_digest','result_digest',
+                'host_result_digest','tool_namespace'):
+        value=offending.get(key)
+        if isinstance(value,(str,bool)):
+            finding[key]=value
+    return [finding]
+
+
+def canonical_mcp_call_key(row):
+    """Return a bounded semantic identity for an observed Cortex MCP call.
+
+    Event ordering is transport timing, not provenance.  A key combines the
+    owning thread, canonical operation and an operation-specific public
+    identity.  It contains no raw arguments and is absent rather than guessed
+    when the host did not expose a usable identity.
+    """
+    if not isinstance(row,dict):
+        return None
+    thread=row.get('thread_id')
+    tool=canonical_tool_name(row)
+    if not isinstance(thread,str) or not thread or not isinstance(tool,str) or not tool.startswith('mcp__cortex__'):
+        return None
+    task=row.get('task_id')
+    report=row.get('report_id') or row.get('requested_report_id')
+    draft=row.get('draft_id')
+    template=row.get('template')
+    identity=(('draft_id',draft) if tool=='mcp__cortex__write_report' and isinstance(draft,str) and draft else
+              ('task_id',task) if isinstance(task,str) and task else
+              ('report_id',report) if isinstance(report,str) and report else
+              ('draft_id',draft) if isinstance(draft,str) and draft else
+              ('template',template) if isinstance(template,str) and template else None)
+    if identity is None:
+        return None
+    material=json.dumps((thread,tool,identity),separators=(',',':'))
+    return hashlib.sha256(material.encode()).hexdigest()[:24]
+
+
 def safe_call_metadata(tool,arguments):
     """Expose only bounded routing fields needed to audit native delegation."""
-    if tool not in {'spawn_agent','followup_task','send_message'}:return {}
+    if tool not in {'spawn_agent','followup_task','send_message','wait_agent'}:return {}
     try:value=json.loads(arguments)
     except (TypeError,ValueError):return {}
     if not isinstance(value,dict):return {}
@@ -1323,6 +2107,16 @@ def safe_call_metadata(tool,arguments):
         target=value.get('target')
         return ({'target_agent':target} if isinstance(target,str)
                 and re.fullmatch(r'[A-Za-z0-9_/-]{1,256}',target) else {})
+    if tool=='wait_agent':
+        targets=value.get('targets')
+        if (not isinstance(targets,list) or not targets
+                or not all(isinstance(target,dict) and set(target)<= {'threadId','thread_id','afterCursor'}
+                           and isinstance(target.get('threadId',target.get('thread_id')),str)
+                           and target.get('threadId',target.get('thread_id'))
+                           for target in targets)):
+            return {}
+        identifiers=[target.get('threadId',target.get('thread_id')) for target in targets]
+        return {'wait_target_thread_ids':sorted(identifiers)} if len(set(identifiers))==len(identifiers) else {}
     # Keep this aligned with the native ``spawn_agent`` contract.  Policy
     # provenance belongs in the bounded assignment message, not invented
     # top-level arguments.
@@ -1331,6 +2125,7 @@ def safe_call_metadata(tool,arguments):
     if isinstance(value.get('model'),str):result['requested_model']=value['model']
     if isinstance(value.get('reasoning_effort'),str):result['requested_reasoning_effort']=value['reasoning_effort']
     message=value.get('message','')
+    if isinstance(message,str):result['assignment_digest']=hashlib.sha256(message.encode()).hexdigest()
     if isinstance(message,str) and re.fullmatch(r'gAAAAA[A-Za-z0-9_=-]{80,}',message):
         result['assignment_content_unavailable']=True
     result.update(assignment_policy_metadata(message))
@@ -1356,6 +2151,11 @@ def native_agent_result_metadata(payload):
     if failed:
         result['error_code']=('agent_model_capacity' if 'model is at capacity' in rendered.lower()
                               else 'native_agent_error')
+    body,error=parse_native_worker_result(rendered.split('\n',1)[1])
+    if body is not None:
+        result['native_worker_result']=body
+    elif 'Cortex native worker result:' in rendered:
+        result['native_worker_result_error']=error
     return result
 
 
@@ -1421,19 +2221,186 @@ def draft_call_metadata(tool,arguments):
     return {}
 
 
+def python_artifact_read_paths(command):
+    """Recognize a closed, side-effect-free root-file byte/text reconciliation.
+
+    This is syntax/type inspection, never execution of the submitted program.
+    Unknown Python, shell syntax, writes and computed paths stay unrecognized.
+    """
+    try:
+        heredoc=re.fullmatch(r"python3(?: -B)? - <<'PY'\n(.*?)\nPY\s*",command,re.S)
+        if heredoc:
+            program=heredoc[1]
+        else:
+            tokens=shlex.split(command)
+            if tokens[:2]==['python3','-B']:tokens=tokens[:1]+tokens[2:]
+            if len(tokens)!=3 or tokens[:2]!=['python3','-c']:return []
+            program=tokens[2]
+        tree=ast.parse(program)
+    except (ValueError,SyntaxError):return []
+    bindings={};imports=set();paths=set();printed=False
+    def kind(node):
+        if isinstance(node,ast.Constant):
+            return {str:'text',bytes:'bytes',int:'int',bool:'bool'}.get(type(node.value))
+        if isinstance(node,ast.Name):return bindings.get(node.id)
+        if isinstance(node,ast.Attribute):
+            if node.attr=='returncode' and kind(node.value)=='git-result':return 'int'
+            return None
+        if isinstance(node,ast.Compare):
+            if (len(node.ops)==1 and isinstance(node.ops[0],ast.Eq)
+                    and kind(node.left) in {'bytes','text','int','bool'}
+                    and kind(node.left)==kind(node.comparators[0])):return 'bool'
+            return None
+        if not isinstance(node,ast.Call):return None
+        if isinstance(node.func,ast.Name):
+            if node.keywords:return None
+            name=node.func.id
+            if name=='Path' and 'Path' in imports and len(node.args)==1:
+                value=node.args[0]
+                if (isinstance(value,ast.Constant) and isinstance(value.value,str)
+                        and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',value.value)):
+                    paths.add(value.value);return 'path'
+            if name in {'len','repr'} and len(node.args)==1:
+                value=kind(node.args[0])
+                if value in {'bytes','text','lines'}:return 'int' if name=='len' else 'text'
+            if name=='all' and len(node.args)==1 and isinstance(node.args[0],ast.GeneratorExp):
+                generator=node.args[0]
+                if len(generator.generators)!=1:return None
+                clause=generator.generators[0]
+                if (clause.ifs or clause.is_async or not isinstance(clause.target,ast.Name)
+                        or clause.target.id in {*bindings,'Path','hashlib','subprocess','print','len','repr','all'}
+                        or kind(clause.iter)!='lines' or not isinstance(clause.iter,ast.Call)
+                        or not isinstance(clause.iter.func,ast.Attribute)):return None
+                bindings[clause.target.id]=kind(clause.iter.func.value)
+                result=kind(generator.elt)
+                del bindings[clause.target.id]
+                return 'bool' if result=='bool' else None
+            return None
+        if not isinstance(node.func,ast.Attribute):return None
+        receiver=node.func.value;method=node.func.attr
+        receiver_kind=kind(receiver)
+        if receiver_kind in {'bytes','text'} and method=='splitlines' and not node.args:
+            if (not node.keywords or len(node.keywords)==1
+                    and node.keywords[0].arg=='keepends'
+                    and isinstance(node.keywords[0].value,ast.Constant)
+                    and type(node.keywords[0].value.value) is bool):return 'lines'
+            return None
+        if node.keywords:return None
+        if (isinstance(receiver,ast.Name) and receiver.id=='subprocess'
+                and 'subprocess' in imports and method=='run' and len(node.args)==1
+                and isinstance(node.args[0],ast.List)):
+            values=node.args[0].elts
+            if not all(isinstance(value,ast.Constant) and isinstance(value.value,str) for value in values):return None
+            args=[value.value for value in values]
+            if (args[:4]==['git','diff','--quiet','--'] and len(args)>4
+                    and all(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_./-]*',path)
+                            and '..' not in path.split('/') for path in args[4:])):return 'git-result'
+            return None
+        if (isinstance(receiver,ast.Name) and receiver.id=='hashlib'
+                and 'hashlib' in imports and method=='sha256'
+                and len(node.args)==1 and kind(node.args[0])=='bytes'):return 'digest'
+        if receiver_kind=='path' and not node.args:
+            return {'read_bytes':'bytes','read_text':'text'}.get(method)
+        if receiver_kind=='digest' and method=='hexdigest' and not node.args:return 'text'
+        if receiver_kind in {'bytes','text'}:
+            if method=='splitlines' and not node.args:return 'lines'
+            if method in {'count','endswith'} and len(node.args)==1:
+                if isinstance(node.args[0],ast.Constant) and kind(node.args[0])==receiver_kind:
+                    return 'int' if method=='count' else 'bool'
+            if (receiver_kind=='bytes' and method=='decode' and len(node.args)==1
+                    and isinstance(node.args[0],ast.Constant)
+                    and node.args[0].value=='utf-8'):return 'text'
+        return None
+    for statement in tree.body:
+        if (isinstance(statement,ast.ImportFrom) and statement.module=='pathlib'
+                and statement.level==0 and len(statement.names)==1
+                and statement.names[0].name=='Path' and statement.names[0].asname is None):
+            imports.add('Path');continue
+        if (isinstance(statement,ast.Import) and statement.names
+                and all(name.name in {'hashlib','subprocess'} and name.asname is None for name in statement.names)):
+            imports.update(name.name for name in statement.names);continue
+        if (isinstance(statement,ast.Assign) and len(statement.targets)==1
+                and isinstance(statement.targets[0],ast.Name)):
+            name=statement.targets[0].id
+            if name in {'Path','hashlib','subprocess','print','len','repr','all'} or name in bindings:return []
+            value=kind(statement.value)
+            if value is None:return []
+            bindings[name]=value;continue
+        if isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Call):
+            call=statement.value
+            if (isinstance(call.func,ast.Name) and call.func.id=='print'
+                    and call.args and not call.keywords
+                    and all(kind(arg) in {'text','bytes','int','bool','lines'} for arg in call.args)):
+                printed=True;continue
+        return []
+    return sorted(paths) if printed and len(paths)==1 else []
+
+
 def coordinator_source_read(tool,arguments):
     """Recognize a single bounded read command used for a user-provided source."""
+    if tool == 'read_file':
+        return True  # Independent path classification still rejects private operands.
     if tool!='exec_command':return False
     try:command=json.loads(arguments).get('cmd')
     except (AttributeError,ValueError):
-        match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*(["\'])(.*?)\1',arguments,re.S)
-        command=match.group(2) if match else None
-    if not isinstance(command,str) or re.search(r'[;|><`]|\$\(',command):return False
-    try:tokens=shlex.split(command)
+        command=shell_command_text(arguments)
+    if not isinstance(command,str):return False
+    if python_skill_read_paths(command):
+        return True  # Closed one-literal-path read grammar; path policy still applies.
+    if python_artifact_read_paths(command):
+        return True
+    status_envelope=re.fullmatch(
+        r'(.+?);\s*([A-Za-z_][A-Za-z0-9_]*)=\$\?;\s*(.+);\s*exit \$\2',command)
+    if status_envelope and status_envelope[2] not in {'HOME','PATH','CODEX_HOME','SHELL','IFS','ENV','BASH_ENV'}:
+        command=status_envelope[1]+'; '+status_envelope[3]
+    if re.search(r'[`$\r]',command):return False
+    try:
+        lexer=shlex.shlex(command,posix=True,punctuation_chars=';&|<>\n')
+        lexer.whitespace=' \t'
+        lexer.whitespace_split=True;lexer.commenters=''
+        shell_tokens=list(lexer)
     except ValueError:return False
+    groups=[];tokens=[]
+    for token in shell_tokens:
+        if token in {'&&','||',';','|'} or token and not token.strip('\n'):
+            if not tokens:return False
+            groups.append(tokens);tokens=[]
+        elif token!='<' and token and all(char in ';&|<>\n' for char in token):
+            return False  # Redirection, background dispatch or unsupported syntax.
+        else:tokens.append(token)
+    if not tokens:return False
+    groups.append(tokens)
+    if len(groups)>12:return False
+    return all(_coordinator_read_tokens(tokens) for tokens in groups)
+
+
+def _coordinator_read_tokens(tokens):
+    """Closed read/compare command set; shell syntax was parsed separately."""
     if not tokens:return False
     if any(token in {'&&','||','&'} for token in tokens):return False
-    if tokens[0]=='sed':return '-n' in tokens and not any(token.startswith('-i') for token in tokens)
+    if '<' in tokens:
+        if (tokens.count('<')!=1 or tokens.index('<')!=len(tokens)-2
+                or tokens[0] not in {'cat','wc','head','tail','sha256sum'}
+                or not tokens[-1] or tokens[-1].startswith('-')):
+            return False
+        tokens=tokens[:-2]+tokens[-1:]
+    if tokens in (['set','-o','pipefail'],['exit','0']):return True
+    if tokens[0]=='PYTHONDONTWRITEBYTECODE=1':tokens=tokens[1:]
+    if not tokens:return False
+    if tokens[:2] in (['git','status'],['git','diff'],['git','log'],['git','show']):
+        return not any(token.startswith(('--output','--ext-diff','--textconv')) for token in tokens)
+    if tokens[0] in {'sha256sum','nl','cmp','pwd'}:return True
+    if tokens[0] in {'echo','true'}:return True
+    if tokens[0]=='printf':return len(tokens)>1 and tokens[1]!='-v'
+    if tokens[:3]==['python3','-m','unittest'] or tokens[:4]==['python3','-B','-m','unittest']:
+        return True
+    if tokens[0] == 'cat':
+        return len(tokens)>=2 and not any(token.startswith('-') and token!='--' for token in tokens[1:])
+    if tokens[0]=='sed':
+        return (len(tokens)>=4 and tokens[1]=='-n'
+                and re.fullmatch(r'[0-9]+(?:,[0-9]+)?[pl]',tokens[2]) is not None
+                and not any(token.startswith('-') for token in tokens[3:]))
+    if tokens[0]=='rg' and any(token=='--pre' or token.startswith('--pre=') for token in tokens):return False
     return tokens[0] in {'head','tail','rg','grep','wc','stat'}
 
 
@@ -1561,12 +2528,41 @@ def report_read_metadata(tool,arguments,wrapper=''):
 
 
 def event_call_candidate(candidates,event_time_ns,report_id=None,event=None):
-    """Match execution intervals, not the order of syntactically possible calls."""
+    """Match a canonical call key before considering execution intervals."""
     def ns(stamp):
         try:
             value=datetime.fromisoformat(stamp.replace('Z','+00:00'))
             return int(value.timestamp())*1_000_000_000+value.microsecond*1_000
         except (AttributeError,ValueError):return None
+    # When both sides expose a canonical semantic identity, it is the only
+    # admissible correlation.  Do not let list insertion order or nearby clock
+    # values replace an exact binding; duplicate matches are invalid evidence.
+    if isinstance(event,dict):
+        event_row=dict(event)
+        operation=event_row.get('operation')
+        if isinstance(operation,str) and operation:
+            event_row['tool']='mcp__cortex__'+operation
+        event_key=canonical_mcp_call_key(event_row)
+        if event_key is not None:
+            keyed=[candidate for candidate in candidates
+                   if candidate.get('canonical_call_key')==event_key]
+            if len(keyed)==1:
+                return keyed[0]
+            if operation=='read_report' and len(keyed)>1:
+                # Pages share a report identity. Match only an unpaired exact-key
+                # call whose observed interval contains this event; concurrent
+                # or duplicate intervals remain ambiguous, never timing guesses.
+                within=[]
+                for candidate in keyed:
+                    if candidate.get('server_observed'):continue
+                    start=ns(candidate.get('timestamp'))
+                    end=ns(candidate.get('completed_timestamp'))
+                    if start is not None and end is not None and start<=event_time_ns<=end:
+                        within.append(candidate)
+                return within[0] if len(within)==1 else None
+            # A server event that carries a semantic key cannot be attached to
+            # a different receipt by timing alone.
+            return None
     matches=[]
     for row in candidates:
         if row.get('server_observed') or row.get('outcome')=='not_dispatched':continue
@@ -1676,7 +2672,8 @@ def native_spawn_route_metadata(row,agent_paths,edges,thread_details,calls,
     # route; otherwise normal progressive loading makes an otherwise verified
     # opaque assignment look ambiguous.
     skill_reads=[call for call in calls if call.get('thread_id')==child
-                 and call.get('worker_skill_complete')]
+                 and call.get('worker_skill_complete')
+                 and call.get('worker_skill_profile')==profile]
     complete_reads=[call for call in skill_reads if call.get('worker_skill_complete')
                     and call.get('outcome') in {'success','covered_by_command_execution'}
                     and call.get('wrapper_outcome','success')=='success']
@@ -1831,7 +2828,8 @@ def observed_tool_calls(state):
                                        tool='native_agent_result',
                                        argument_digest=hashlib.sha256(str(author).encode()).hexdigest()[:12],
                                        outcome=result['outcome'],agent_path=author)
-                        for key in ('report_id','report_ids','error_code'):
+                        for key in ('report_id','report_ids','error_code','native_worker_result',
+                                    'native_worker_result_error'):
                             if key in result:lifecycle[key]=result[key]
                         calls.append(lifecycle)
                 receipt=mcp_receipt_metadata(item)
@@ -1857,16 +2855,25 @@ def observed_tool_calls(state):
                     row.update({key:value for key,value in receipt.items() if key!='tool'})
                     row.update(mcp_argument_metadata(receipt['tool'],encoded))
                     if row.get('tool') is None:row['tool']=receipt_tool
-                    if receipt['tool']=='mcp__cortex__create_task' and state.get('original_request_sha256'):
+                    if receipt['tool']=='mcp__cortex__create_task':
                         result=item.get('result') or {}
-                        captured=(result.get('structuredContent') or {}).get('original_request_sha256')
-                        # Historical observations used model-authored request bodies.
-                        original=arguments.get('request')
-                        source_digest=captured or (original_request_digest(original) if isinstance(original,str) else None)
-                        row['original_request_preserved']=source_digest in request_digests
-                        if row['original_request_preserved'] and source_digest!=state['original_request_sha256']:
-                            row['desktop_editor_formatting_observed']=True
+                        content=result.get('structuredContent') or {}
+                        if state.get('original_request_sha256'):
+                            captured=content.get('original_request_sha256')
+                            # Historical observations used model-authored request bodies.
+                            original=arguments.get('request')
+                            source_digest=captured or (original_request_digest(original) if isinstance(original,str) else None)
+                            row['original_request_preserved']=source_digest in request_digests
+                            if row['original_request_preserved'] and source_digest!=state['original_request_sha256']:
+                                row['desktop_editor_formatting_observed']=True
+                        task_id=content.get('task_id')
+                        if isinstance(task_id,str) and task_id:
+                            row['task_id']=task_id
+                    key=canonical_mcp_call_key(row)
+                    if key is not None:
+                        row['canonical_call_key']=key
                     row['host_receipt_observed']=True
+                    row['result_receipt_observed']=True
                     row['host_receipt_timestamp']=entry.get('timestamp')
                     if row.get('outcome') in {None,'pending'}:row['outcome']=receipt['host_receipt_outcome']
                     if receipt.get('host_error_code'):row['error_code']=receipt['host_error_code']
@@ -1886,6 +2893,7 @@ def observed_tool_calls(state):
                     row=dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
                              parent_thread_id=edges.get(thread['id']),role=thread['agent_role'] or 'coordinator',
                              model=thread['model'],reasoning_effort=thread['reasoning_effort'],
+                             worker_skill_receipt_required=thread['agent_role'] is not None,
                              tool='command_execution',argument_digest=hashlib.sha256(rendered.encode()).hexdigest()[:12],
                              intent_digest=raw_command_intent_digest(intent_source),outcome=outcome,
                              source='host_command_execution')
@@ -1907,6 +2915,10 @@ def observed_tool_calls(state):
                     if no_match:
                         row['semantic_result']='no_match'
                         row['semantic_nonfailure']=True
+                    elif semantic_absent_path(intent_source,exit_code,
+                                              item.get('aggregated_output'),item.get('stderr')):
+                        row['semantic_result']='predicate_false'
+                        row['semantic_nonfailure']=True
                     origin=local_http_origin(intent_source)
                     if origin:row['local_http_origin']=origin
                     if isinstance(exit_code,int):row['exit_code']=exit_code
@@ -1918,7 +2930,8 @@ def observed_tool_calls(state):
                     digest=hashlib.sha256(arguments.encode()).hexdigest()[:12]
                     common=dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
                                 parent_thread_id=edges.get(thread['id']),role=thread['agent_role'] or 'coordinator',
-                                model=thread['model'],reasoning_effort=thread['reasoning_effort'])
+                                model=thread['model'],reasoning_effort=thread['reasoning_effort'],
+                                worker_skill_receipt_required=thread['agent_role'] is not None)
                     selected=[];nested=nested_tool_invocations(arguments) if payload.get('type')=='custom_tool_call' else []
                     if payload.get('type')=='custom_tool_call':
                         wrapper=dict(common,tool='functions.exec',argument_digest=digest,outcome='pending')
@@ -1928,6 +2941,9 @@ def observed_tool_calls(state):
                             row=dict(common,tool=name,argument_digest=nested_digest,
                                      wrapper_argument_digest=digest,outcome='pending',nested=True,
                                      server_observed=False)
+                            if (name=='mcp__cortex__create_task'
+                                    and direct_public_cortex_create_task(arguments,nested)):
+                                row['direct_public_mcp']=True
                             row.update(mcp_argument_metadata(name,nested_arguments))
                             row.update(report_read_metadata(name,nested_arguments,arguments))
                             calls.append(row);selected.append(row)
@@ -1944,8 +2960,23 @@ def observed_tool_calls(state):
                             if intent:row['intent_digest']=intent
                         row.update(path_policy_metadata(name,nested_arguments,common['role'],state['workdir']))
                         instruction_read=skill_instruction_read(name,nested_arguments)
+                        coordinator_instruction_read=(
+                            common['role'] in {'coordinator','runtime'}
+                            and skill_instruction_read(name,nested_arguments,coordinator_only=True))
                         flags=call_policy_flags(name,arguments if name=='apply_patch' else nested_arguments,common['role'],state['workdir'])
-                        if instruction_read:row['skill_instruction_read']=True
+                        if instruction_read:
+                            row['skill_instruction_read']=True
+                            # Keep the non-secret registered leaf/profile marker
+                            # even when the host denies the read before dispatch.
+                            # This is needed to reconcile an exact worker read;
+                            # it never creates a completion receipt by itself.
+                            if common['role'] not in {'coordinator','runtime'}:
+                                profile=worker_skill_profile(name,nested_arguments)
+                                if profile:row['worker_skill_profile']=profile
+                        if coordinator_instruction_read:row['pre_binding_static_read']=True
+                        if (common['role']=='coordinator'
+                                and active_coordinator_skill_read(name,nested_arguments)):
+                            row['active_coordinator_skill_read']=True
                         if flags:row['policy_flags']=flags
                         calls.append(row);selected.append(row)
                     if not nested and payload.get('type')=='function_call':
@@ -1961,13 +2992,73 @@ def observed_tool_calls(state):
                             row['browser_mutations']=browser_mutation_count(arguments)
                         flags=call_policy_flags(row['tool'],arguments,common['role'],state['workdir'])
                         if skill_instruction_read(row['tool'],arguments):row['skill_instruction_read']=True
+                        if (common['role']=='coordinator'
+                                and active_coordinator_skill_read(row['tool'],arguments)):
+                            row['active_coordinator_skill_read']=True
                         if flags:row['policy_flags']=flags
                         calls.append(row);selected.append(row)
                         if row['tool'].startswith('mcp__cortex__'):
                             row['server_observed']=False
+                            if row['tool']=='mcp__cortex__create_task':row['direct_public_mcp']=True
                             cortex_calls.setdefault((thread['id'],row['tool'].rsplit('__',1)[-1]),[]).append(row)
+                    # A custom functions.exec wrapper may receive the exact
+                    # current-host skill/declaration read as one nested command.
+                    # Preserve the one-call/two-label accounting while allowing
+                    # the pre-binding classifier to recognize only that same
+                    # fully static observation.  Multiple nested members,
+                    # generic wrappers, and anything without the exact parser
+                    # proof remain blocked.
+                    bounded_static_transport=bounded_static_read_transport(arguments,nested)
+                    nested_static=[row for row in selected
+                                   if row.get('nested') is True
+                                   and (row.get('pre_binding_static_read') is True
+                                        or row.get('worker_skill_profile') is not None)]
+                    nested_operands=[row for row in selected if row.get('nested') is True]
+                    if (bounded_static_transport and len(nested_static)==1
+                            and len(nested_operands)==1):
+                        nested_row=nested_static[0]
+                        for row in selected:
+                            row.setdefault('pre_binding_static_read',True)
+                            row.setdefault('skill_instruction_read',True)
+                            row.setdefault('bounded_wrapper',True)
+                            row.setdefault('active_coordinator_skill_read',
+                                           nested_row.get('active_coordinator_skill_read'))
+                            row.setdefault('worker_skill_profile',
+                                           nested_row.get('worker_skill_profile'))
+                            for key in ('path_target_class','path_access_kind','path_policy_decision'):
+                                row.setdefault(key,nested_row.get(key))
+                    direct_bootstrap=[row for row in selected
+                                      if row.get('tool')=='mcp__cortex__create_task'
+                                      and row.get('direct_public_mcp') is True]
+                    if len(direct_bootstrap)==1 and len(nested_operands)==1:
+                        for row in selected:
+                            if row.get('tool')=='functions.exec':
+                                row['direct_public_mcp_transport']=True
                     if 'ALL_TOOLS' in arguments:
-                        row=dict(common,tool='tool_catalogue_search',argument_digest=digest,outcome='pending',nested=True)
+                        # A catalogue mention is not a wrapper permission.  We
+                        # recognize only the exact current-host metadata
+                        # envelope; all neighboring forms remain fail-closed.
+                        catalogue=approved_tool_catalogue_envelope(arguments,nested)
+                        row=dict(common,tool='tool_catalogue_search',argument_digest=digest,
+                                 outcome='pending',nested=True,
+                                 catalogue_discovery=catalogue,
+                                 catalogue_value_free=catalogue,
+                                 catalogue_bounded=catalogue,
+                                 catalogue_project_free=catalogue,
+                                 catalogue_private_free=catalogue,
+                                 catalogue_mutation_free=catalogue,
+                                 catalogue_mixed=not catalogue)
+                        if catalogue:
+                            for transport in selected:
+                                transport.update({
+                                    'catalogue_discovery':True,
+                                    'catalogue_value_free':True,
+                                    'catalogue_bounded':True,
+                                    'catalogue_project_free':True,
+                                    'catalogue_private_free':True,
+                                    'catalogue_mutation_free':True,
+                                    'catalogue_mixed':False,
+                                })
                         calls.append(row);selected.append(row)
                     pending[payload.get('call_id')]=selected
                     pending_arguments[payload.get('call_id')]=arguments
@@ -1989,6 +3080,12 @@ def observed_tool_calls(state):
                         if row.get('host_receipt_outcome')=='error':
                             outcome='error'
                             code=row.get('host_error_code') or code
+                        # Preserve the underlying nested result before the
+                        # wrapper accounting labels it covered_by_wrapper or
+                        # covered_by_nested.  Skill completion is a receipt
+                        # property of that one successful read, not of the
+                        # transport's bookkeeping label.
+                        observed_result_outcome=outcome
                         if wrapper_syntax_error and row.get('nested'):
                             row['outcome']='not_dispatched'
                             row['completed_timestamp']=entry.get('timestamp')
@@ -2010,14 +3107,34 @@ def observed_tool_calls(state):
                         row['outcome']=outcome
                         row['completed_timestamp']=entry.get('timestamp')
                         row['result_digest']=result_digest
+                        # The current-host functions.exec transport can retain
+                        # its exact nested read as a covered wrapper rather
+                        # than emit a second host receipt. Preserve only the
+                        # already-classified bounded metadata so bootstrap
+                        # ordering can distinguish it from a generic wrapper.
+                        if (row.get('pre_binding_static_read') is True
+                                and row.get('skill_instruction_read') is True
+                                and row.get('bounded_wrapper') is True
+                                and outcome in {'success','covered_by_nested'}):
+                            row['bounded_metadata_observed']=True
+                        if row.get('catalogue_discovery') is True:
+                            row['host_receipt_observed']=(outcome in {'success','covered_by_command_execution'})
+                            row['truncated']=safe_receipt_provenance(payload.get('output',''))[1]
                         exit_code,truncated=safe_receipt_provenance(payload.get('output',''))
                         if exit_code is not None:row['exit_code']=exit_code
                         if truncated:row['truncated']=True
+                        worker_read=(row.get('worker_skill_profile') is not None
+                                     or worker_skill_read(row['tool'],arguments))
                         if (row.get('skill_instruction_read') and row.get('role') not in {'coordinator','runtime',None}
-                                and worker_skill_read(row['tool'],arguments)
+                                and worker_read
                                 and '<!-- END OF COMPLETE CORTEX WORKER SKILL -->' in rendered_output
-                                and outcome=='success'):
+                                and observed_result_outcome=='success'):
                             row['worker_skill_complete']=True
+                            profile=worker_skill_profile(row['tool'],arguments)
+                            if profile:row['worker_skill_profile']=profile
+                            receipt=worker_skill_assignment_receipt(
+                                thread['agent_role'],profile,row['worker_skill_complete'])
+                            if receipt:row['worker_skill_assignment_receipt']=receipt
                         sessions=observed_session_ids(payload.get('output',''))
                         if sessions:row['session_ids']=sessions
                         if row['tool']=='write_stdin':
@@ -2047,10 +3164,15 @@ def observed_tool_calls(state):
             row['timestamp_ns']=event.get('time_ns',0)
             row.setdefault('tool_namespace','mcp__cortex')
         row['server_observed']=True
+        row['server_event_observed']=True
         row['outcome']=event.get('outcome','unverified')
         row['replayed']=bool(event.get('replayed'))
-        for key in ('document_kind','report_id','draft_id','page','template','requested_limit','summary_characters'):
+        for key in ('document_kind','report_id','draft_id','page','template','requested_limit',
+                    'summary_characters','source_revision','source_capture_status','task_id'):
             if key in event:row[key]=event[key]
+        key=canonical_mcp_call_key(row)
+        if key is not None:
+            row['canonical_call_key']=key
         if event.get('error'):row['error_code']=event['error']
     def order(row):
         if row.get('timestamp_ns'):return row['timestamp_ns']
@@ -2120,10 +3242,21 @@ def observed_tool_calls(state):
                     and candidate.get('intent_digest')==row.get('intent_digest')
                     and start<=order(candidate)<=end]
         if len(executions)==1 and executions[0].get('semantic_nonfailure'):
-            row['semantic_result']='no_match'
+            row['semantic_result']=executions[0]['semantic_result']
             row['semantic_nonfailure']=True
+        if (len(executions)==1 and row.get('bounded_metadata_observed') is True
+                and row.get('active_coordinator_skill_read') is True
+                and executions[0].get('outcome')=='success'):
+            # This is the native receipt of that same exact static read, not
+            # a second pre-binding action. Identity and execution interval must
+            # both match; ambiguous executions cannot inherit the proof.
+            for key in ('pre_binding_static_read','skill_instruction_read',
+                        'active_coordinator_skill_read','bounded_wrapper',
+                        'bounded_metadata_observed','path_target_class',
+                        'path_access_kind','path_policy_decision'):
+                if key in row:executions[0][key]=row[key]
     semantic_no_match_wrappers={
-        (row.get('thread_id'),row.get('wrapper_argument_digest'),row.get('timestamp'))
+        (row.get('thread_id'),row.get('wrapper_argument_digest'),row.get('timestamp')):row['semantic_result']
         for row in ordered if row.get('tool')=='exec_command'
         and row.get('semantic_nonfailure') and row.get('wrapper_argument_digest')
     }
@@ -2131,7 +3264,8 @@ def observed_tool_calls(state):
         if (row.get('tool')=='functions.exec'
                 and (row.get('thread_id'),row.get('argument_digest'),row.get('timestamp'))
                 in semantic_no_match_wrappers):
-            row['semantic_result']='no_match'
+            row['semantic_result']=semantic_no_match_wrappers[
+                (row.get('thread_id'),row.get('argument_digest'),row.get('timestamp'))]
             row['semantic_nonfailure']=True
     return completed_assignment_snapshots(prior_assignments)+ordered
 
@@ -2211,7 +3345,7 @@ def classify_host_failures(rows):
               and terminal_sessions.intersection(row.get('session_ids',[]))):
             later_success.add(key)
         elif effective_outcome in {'error','truncated','unverified','pending'}:
-            if row.get('semantic_nonfailure') and row.get('semantic_result')=='no_match':
+            if row.get('semantic_nonfailure') and row.get('semantic_result') in {'no_match','predicate_false'}:
                 continue
             failure_row=dict(row)
             if effective_outcome!=row.get('outcome'):
@@ -2240,7 +3374,7 @@ def tool_error_history(rows):
     for row in rows:
         outcome=row.get('wrapper_outcome') if row.get('wrapper_outcome')=='error' else row.get('outcome')
         if outcome!='error':continue
-        if row.get('semantic_nonfailure') and row.get('semantic_result')=='no_match':continue
+        if row.get('semantic_nonfailure') and row.get('semantic_result') in {'no_match','predicate_false'}:continue
         identity=(row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
         if identity in intentional_stops:continue
         history.append({key:row.get(key) for key in (
@@ -2331,6 +3465,149 @@ def worker_policy_violations(violations):
 
 AUDIT_CLASSIFICATION_SCHEMA='cortex-evidence-quality-classification-v1'
 INCOMPLETE_OUTCOMES={'truncated','unverified','pending','not_dispatched'}
+DESKTOP_CURRENT_HOST_ROUTE='current_host_desktop'
+
+
+def desktop_supported_outcome_receipt(rows, state, *, open_sessions, open_cells):
+    """Bind the bounded evidence the current Desktop host can actually emit.
+
+    Desktop has a durable submitted root and observable child activity, but does
+    not currently expose an authenticated assignment packet, terminal native
+    result, or worker-owned report receipt.  This is not a substitute for those
+    receipts on another route.  In this route only, a caller must have committed
+    the expected artifact identity before submission; the final audit verifies
+    the exact leaf below the isolated workdir rather than trusting a worker
+    assertion or an inferred report ID.
+    """
+    if not isinstance(state,dict) or state.get('qualification_route') != DESKTOP_CURRENT_HOST_ROUTE:
+        return None,'not_current_host_desktop_route'
+    expected=state.get('desktop_expected_artifact')
+    if not (isinstance(expected,dict) and set(expected)=={'path','sha256'}
+            and isinstance(expected.get('path'),str)
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',expected['path'])
+            and isinstance(expected.get('sha256'),str)
+            and re.fullmatch(r'[0-9a-f]{64}',expected['sha256'])):
+        return None,'desktop_expected_artifact_missing'
+    workdir=Path(state.get('workdir',''))
+    try:
+        root=workdir.resolve(strict=True)
+        leaf=root/expected['path']
+        if leaf.is_symlink():return None,'desktop_expected_artifact_missing'
+        artifact=leaf.resolve(strict=True)
+    except (OSError,ValueError):
+        return None,'desktop_expected_artifact_missing'
+    if artifact.parent!=root or not artifact.is_file() or artifact.is_symlink():
+        return None,'desktop_expected_artifact_missing'
+    if hashlib.sha256(artifact.read_bytes()).hexdigest()!=expected['sha256']:
+        return None,'desktop_expected_artifact_mismatch'
+    if state.get('desktop_transport_receipt')!='success':
+        return None,'desktop_transport_receipt_missing'
+    if open_sessions or open_cells:
+        return None,'desktop_open_work_remaining'
+    if any(row.get('truncated') is True or row.get('replayed') is True
+           or row.get('replay_marker') is True for row in rows if isinstance(row,dict)):
+        return None,'desktop_capture_integrity_invalid'
+    if any((row.get('mutation_observed') is True
+            or row.get('private_target_access') is True
+            or row.get('project_target_access') is True
+            or row.get('path_policy_decision')=='unauthorized_access'
+            or row.get('path_target_class') in {'plugin','plugin_cache','cache','candidate','registry','internal'})
+           for row in rows if isinstance(row,dict)):
+        return None,'desktop_unsafe_access_observed'
+    roots={row.get('thread_id') for row in rows if isinstance(row,dict)
+           and row.get('role')=='coordinator' and row.get('parent_thread_id') is None
+           and isinstance(row.get('thread_id'),str) and row.get('thread_id')}
+    expected_root=state.get('thread_id')
+    if roots!={expected_root}:
+        return None,'desktop_root_missing_or_ambiguous'
+    creates=[row for row in rows if isinstance(row,dict)
+             and row.get('thread_id')==expected_root
+             and row.get('tool')=='mcp__cortex__create_task'
+             and row.get('direct_public_mcp') is True
+             and row.get('outcome')=='success'
+             and row.get('host_receipt_observed') is True
+             and row.get('host_receipt_outcome')=='success'
+             and row.get('replayed') is not True and row.get('truncated') is not True]
+    if len(creates)!=1:return None,'desktop_task_missing_or_ambiguous'
+    workers={row.get('thread_id') for row in rows if isinstance(row,dict)
+             and row.get('parent_thread_id')==expected_root
+             and isinstance(row.get('thread_id'),str) and row.get('thread_id')}
+    if len(workers)!=1:return None,'desktop_worker_missing_or_ambiguous'
+    reports=[row for row in rows if isinstance(row,dict)
+             and row.get('thread_id')==expected_root
+             and row.get('tool')=='mcp__cortex__write_report'
+             and row.get('outcome')=='success'
+             and row.get('host_receipt_observed') is True
+             and row.get('host_receipt_outcome')=='success'
+             and isinstance(row.get('report_id'),str)
+             and row.get('replayed') is not True and row.get('truncated') is not True]
+    if not reports:return None,'desktop_coordinator_report_missing_or_ambiguous'
+    if len(reports)>1:
+        # A newest-first pipeline keeps one report identity across editions.
+        # Distinct successful drafts prove new publications, not a replay of
+        # the initial receipt. The final edition must follow worker activity.
+        drafts=[row.get('draft_id') for row in reports]
+        if (len({row['report_id'] for row in reports})!=1
+                or any(not isinstance(draft,str) or not draft for draft in drafts)
+                or len(set(drafts))!=len(drafts)
+                or rows.index(reports[-1])<=max(
+                    index for index,row in enumerate(rows)
+                    if row.get('thread_id') in workers)):
+            return None,'desktop_coordinator_report_missing_or_ambiguous'
+    return {'status':'complete','thread_id':expected_root,'worker_thread_id':workers.pop(),
+            'report_id':reports[-1]['report_id'],'artifact_path':expected['path'],
+            'artifact_sha256':expected['sha256'],'host_enforcement_state':'unverified'},None
+
+
+def desktop_current_host_partition(rows, state, host_failures, policy_violations,
+                                 *, open_sessions, open_cells):
+    """Keep only historically resolved Desktop gaps out of the final blocker set."""
+    outcome,reason=desktop_supported_outcome_receipt(
+        rows,state,open_sessions=open_sessions,open_cells=open_cells)
+    if outcome is None:
+        return list(host_failures),list(policy_violations),[],None,reason
+    worker=outcome['worker_thread_id']
+    diagnostics=[]
+    def diagnostic(row,reason):
+        diagnostics.append({**row,'observational_diagnostic':True,'not_applicable':True,
+                            'host_enforcement_state':'unverified','diagnostic_reason':reason})
+    retained_host=[]
+    for row in host_failures:
+        # A completed later outcome resolves a polling snapshot, not a pending
+        # worker/session/cell at the final observation.
+        if row.get('tool')=='wait_agent' and row.get('outcome')=='pending':
+            diagnostic(row,'historical_wait_resolved_by_final_desktop_outcome');continue
+        # Failed precondition checks may be retained only when they are the
+        # observed worker wc/truncate attempts, stayed inside the workdir, and
+        # the separately committed artifact bytes now match exactly.
+        if (row.get('thread_id')==worker and row.get('tool') in {'exec_command','command_execution'}
+                and row.get('error_code')=='command_exit_1'
+                and row.get('command_family') in {'wc','truncate'}
+                and row.get('mutation_observed') is not True
+                and row.get('private_target_access') is not True
+                and row.get('project_target_access') is not True
+                and row.get('truncated') is not True and row.get('replayed') is not True):
+            diagnostic(row,'historical_artifact_check_superseded_by_exact_final_hash');continue
+        retained_host.append(row)
+    retained_policy=[]
+    for row in policy_violations:
+        name=row.get('violation')
+        if name in {'worker_assignment_policy_unverified','worker_skill_load_failed',
+                    'worker_project_action_before_skill_receipt'}:
+            diagnostic(row,'unsupported_current_host_worker_receipt');continue
+        retained_policy.append(row)
+    return retained_host,retained_policy,diagnostics,outcome,None
+
+
+def desktop_final_acceptance(outcome, classification, participants):
+    """Evidence quality and native lifecycle completion are separate requirements."""
+    return (outcome is not None and classification.get('evidence_valid') is True
+            and classification.get('score_eligible') is True
+            and not classification.get('evidence_integrity_invalidators')
+            and not any(row.get('classification')=='product_quality_outcome'
+                        for row in classification.get('quality_findings',[]))
+            and bool(participants)
+            and all(row.get('terminal') is True for row in participants))
 
 
 def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violations,
@@ -2340,8 +3617,10 @@ def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violat
     invalidators=[];quality=[]
     safe_keys=('timestamp','thread_id','parent_thread_id','role','tool','operation',
                'violation','outcome','effective_outcome','wrapper_outcome',
-               'host_status','error_code','argument_digest','result_digest',
-               'path_policy_decision','content_delivery_status')
+               'host_status','error_code','error_class','error_stage','argument_digest','result_digest',
+               'path_policy_decision','content_delivery_status','authorization_outcome',
+               'authorization_capability','authorization_reason','execution_status',
+               'host_dispatch_decision','host_dispatch_execution')
     def add(target,source,index,row,classification,reason):
         item={'source':source,'index':index,'classification':classification,'reason':reason}
         if isinstance(row,dict):
@@ -2350,6 +3629,24 @@ def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violat
     def incomplete(row):
         return any(row.get(key) in INCOMPLETE_OUTCOMES
                    for key in ('outcome','effective_outcome','wrapper_outcome'))
+    def prevented_before_dispatch(row):
+        return (row.get('hook_event') == 'PreToolUse'
+                and row.get('action_status') == 'denied'
+                and row.get('authorization_outcome') == 'PERMISSION_DENIED'
+                and row.get('execution_status') == 'denied_before_dispatch'
+                and isinstance(row.get('task_id'),str) and bool(row['task_id'])
+                and isinstance(row.get('thread_id'),str) and bool(row['thread_id'])
+                and isinstance(row.get('role'),str) and bool(row['role'])
+                and row.get('binding_confidence') == 'receipt'
+                and row.get('binding_origin') in {'native_hook','native_mcp'}
+                and isinstance(row.get('authorization_capability'),str)
+                and bool(row['authorization_capability'])
+                and isinstance(row.get('authorization_reason'),str)
+                and bool(row['authorization_reason']))
+    def claimed_pre_dispatch_denial(row):
+        return (row.get('hook_event') == 'PreToolUse'
+                and row.get('action_status') == 'denied'
+                and row.get('authorization_outcome') == 'PERMISSION_DENIED')
     for source,rows in (('mcp_failure',failures),('host_failure',host_failures)):
         for index,row in enumerate(rows):
             if incomplete(row):
@@ -2359,11 +3656,34 @@ def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violat
             else:
                 add(quality,source,index,row,'product_quality_outcome','complete_attributable_failure')
     for index,row in enumerate(hook_failures):
-        add(invalidators,'hook_failure',index,row,'evidence_integrity_invalidator','observation_hook_failed')
+        if prevented_before_dispatch(row):
+            # The hook observed and stopped the operation.  It is not a failed
+            # receipt and never proves host execution or accepted evidence.
+            add(quality,'hook_prevented_attempt',index,row,
+                'prevented_attempt_diagnostic','authorization_denied_before_dispatch')
+        elif claimed_pre_dispatch_denial(row):
+            # A partial semantic denial receipt cannot establish that dispatch
+            # was prevented.  Keep it visible but make the audit fail closed.
+            add(invalidators,'hook_prevented_attempt',index,row,
+                'evidence_integrity_invalidator','pre_dispatch_denial_receipt_incomplete')
+        else:
+            add(invalidators,'hook_failure',index,row,'evidence_integrity_invalidator','observation_hook_failed')
     rejected={'rejected','none','no_content','blocked_before_delivery'}
     delivered={'delivered','returned','protected_content_returned','arm_specific_content_returned'}
     for index,row in enumerate(policy_violations):
         violation=row.get('violation')
+        if violation=='pre_binding_host_action' or str(violation).startswith('mcp_first_bootstrap_'):
+            add(invalidators,'policy_violation',index,row,
+                'evidence_integrity_invalidator','mcp_first_bootstrap_unverified')
+            continue
+        if violation=='host_dispatch_bypass':
+            add(invalidators,'policy_violation',index,row,
+                'evidence_integrity_invalidator','host_pre_dispatch_bypassed')
+            continue
+        if violation in {'task_source_revision_invalid','task_source_revision_nonmonotonic'}:
+            add(invalidators,'policy_violation',index,row,
+                'evidence_integrity_invalidator','task_local_source_revision_invalid')
+            continue
         if incomplete(row) or violation=='worker_assignment_policy_unverified':
             reason=('unverified_worker_assignment' if violation=='worker_assignment_policy_unverified'
                     else 'truncated_or_unverified_policy_observation')
@@ -2393,10 +3713,390 @@ def classify_audit_findings(*,failures,hook_failures,host_failures,policy_violat
             'evidence_integrity_invalidators':invalidators,'quality_findings':quality}
 
 
+def native_worker_result_fallback_violations(rows):
+    """Validate the observational native-worker fallback without inventing trust.
+
+    A worker result is model-supplied evidence.  It becomes usable only when one
+    native spawn, terminal wait, parent task receipt, profile, and assignment
+    digest agree exactly and the coordinator subsequently publishes the fixed
+    delegation-evidence report label.  Artifact hashes remain asserted fields.
+    """
+    findings=[]
+    results=[row for row in rows if row.get('tool')=='native_agent_result'
+             and ('native_worker_result' in row or 'native_worker_result_error' in row)]
+    for index,row in enumerate(results):
+        body=row.get('native_worker_result')
+        if body is None:
+            findings.append({'index':index,'thread_id':row.get('thread_id'),'role':row.get('role'),
+                             'tool':'native_agent_result','violation':row.get('native_worker_result_error',
+                             'native_worker_result_schema_invalid')})
+            continue
+        if body.get('worker_mcp')!='unavailable':
+            continue
+        worker=row.get('thread_id');parent=row.get('parent_thread_id')
+        def fail(code):
+            findings.append({'index':index,'thread_id':worker,'role':row.get('role'),
+                             'tool':'native_agent_result','violation':code,
+                             'result_digest':body.get('result_digest')})
+        if (row.get('outcome')!='success' or body.get('status')!='success'
+                or body.get('worker_thread_id')!=worker or body.get('parent_thread_id')!=parent
+                or body.get('profile')!=row.get('role') or row.get('truncated') is True
+                or row.get('replayed') is True or row.get('replay_marker') is True):
+            fail('native_worker_result_correlation_invalid');continue
+        duplicates=[candidate for candidate in results
+                    if candidate.get('thread_id')==worker
+                    and candidate.get('native_worker_result',{}).get('worker_mcp')=='unavailable']
+        if len(duplicates)!=1:
+            fail('native_worker_result_duplicate');continue
+        spawn=[candidate for candidate in rows if candidate.get('tool')=='spawn_agent'
+               and candidate.get('thread_id')==parent and candidate.get('outcome')=='success'
+               and candidate.get('spawned_thread_id')==worker]
+        if len(spawn)!=1 or spawn[0].get('assigned_profile') not in {None,body.get('profile')}:
+            fail('native_worker_result_spawn_mismatch');continue
+        assignment=spawn[0].get('assignment_digest')
+        if not isinstance(assignment,str) or assignment!=body.get('assignment_digest'):
+            fail('native_worker_result_assignment_mismatch');continue
+        waits=[candidate for candidate in rows if candidate.get('tool')=='wait_agent'
+               and candidate.get('thread_id')==parent and candidate.get('outcome')=='success'
+               and candidate.get('wait_target_thread_ids')==[worker]]
+        if len(waits)!=1:
+            fail('native_worker_result_wait_mismatch');continue
+        tasks=[candidate for candidate in rows if candidate.get('tool')=='mcp__cortex__create_task'
+               and candidate.get('thread_id')==parent and candidate.get('outcome')=='success'
+               and candidate.get('task_id')==body.get('task_id')]
+        if len(tasks)!=1:
+            fail('native_worker_result_task_mismatch');continue
+        reports=[candidate for candidate in rows if candidate.get('tool')=='mcp__cortex__write_report'
+                 and candidate.get('thread_id')==parent and candidate.get('role')=='coordinator'
+                 and candidate.get('outcome')=='success'
+                 and candidate.get('delegation_evidence_report') is True]
+        if len(reports)!=1:
+            fail('native_worker_result_delegation_evidence_missing');continue
+        row['worker_mcp_unavailable']=True
+        row['artifact_hashes']='asserted'
+        row['host_enforcement_state']='unverified'
+        row['delegation_evidence_report_id']=reports[0].get('report_id')
+    return findings
+
+
+def current_host_outcome_receipt(rows, state):
+    """Bind a completed interactive workload without claiming host enforcement.
+
+    This is intentionally stricter than a product artifact alone: one direct
+    bootstrap, one terminal native worker, one task-bound worker publication,
+    and one coordinator public report-read must agree on the worker's declared
+    artifact hashes.  It returns only bounded identity fields and a reason for
+    the first missing/ambiguous link.
+    """
+    if not isinstance(state,dict) or state.get('bootstrap_route')!=MCP_FIRST_BOOTSTRAP_ROUTE:
+        return None,'not_current_host_route'
+    if any(row.get('outcome') in INCOMPLETE_OUTCOMES
+           or row.get('wrapper_outcome') in INCOMPLETE_OUTCOMES for row in rows):
+        return None,'outcome_pending_or_incomplete_call'
+    expected=state.get('bootstrap_expected_child_thread_id')
+    if not isinstance(expected,str) or not expected:
+        return None,'outcome_expected_root_missing'
+    creates=[row for row in rows if row.get('tool')=='mcp__cortex__create_task'
+             and row.get('direct_public_mcp') is True and row.get('outcome')=='success'
+             and row.get('host_receipt_outcome')=='success' and row.get('host_receipt_observed') is True
+             and row.get('replayed') is not True and row.get('truncated') is not True]
+    if len(creates)!=1:return None,'outcome_create_task_missing_or_ambiguous'
+    create=creates[0]
+    root=create.get('thread_id');task=create.get('task_id')
+    if (not isinstance(root,str) or create.get('parent_thread_id') is not None or root!=expected
+            or (task is not None and (not isinstance(task,str) or not task))):
+        return None,'outcome_create_task_binding_mismatch'
+    workers=[row for row in rows if row.get('tool')=='native_agent_result'
+             and row.get('outcome')=='success' and row.get('parent_thread_id')==root
+             and row.get('truncated') is not True and row.get('replayed') is not True]
+    if len(workers)!=1:return None,'outcome_native_worker_missing_or_ambiguous'
+    worker=workers[0];worker_thread=worker.get('thread_id');report_id=worker.get('report_id')
+    # Native current-host result metadata can retain the authoritative plural
+    # form.  Accept it only when it carries exactly the one reported ID; never
+    # let the singleton convenience field hide a duplicate or competing report.
+    report_ids=worker.get('report_ids')
+    if report_id is None and isinstance(report_ids,list) and len(report_ids)==1:
+        report_id=report_ids[0]
+    elif report_ids is not None and report_ids != [report_id]:
+        return None,'outcome_native_worker_binding_mismatch'
+    body=worker.get('native_worker_result')
+    opaque_current_host_result=(
+        body is None and task is None and isinstance(worker.get('agent_path'),str)
+        and bool(worker['agent_path']) and isinstance(report_id,str)
+        and re.fullmatch(r'r_[0-9a-f]{12}',report_id) is not None)
+    if not isinstance(worker_thread,str):
+        return None,'outcome_native_worker_binding_mismatch'
+    if opaque_current_host_result:
+        expected_artifacts=None
+    else:
+        if (not isinstance(body,dict) or body.get('status')!='success'
+                or body.get('task_id')!=task or body.get('worker_thread_id')!=worker_thread):
+            return None,'outcome_native_worker_binding_mismatch'
+        artifacts=body.get('artifacts')
+        if not isinstance(artifacts,list) or not artifacts:
+            return None,'outcome_artifact_reconciliation_missing'
+        expected_artifacts=sorted({(hashlib.sha256(item['reference'].encode()).hexdigest()[:12],item['sha256'])
+                                   for item in artifacts
+                                   if isinstance(item,dict) and set(item)=={'reference','sha256'}
+                                   and isinstance(item.get('reference'),str)
+                                   and isinstance(item.get('sha256'),str)
+                                   and re.fullmatch(r'[0-9a-f]{64}',item['sha256'])})
+        if len(expected_artifacts)!=len(artifacts):
+            return None,'outcome_artifact_reconciliation_missing'
+    publications=[row for row in rows if row.get('tool')=='mcp__cortex__write_report'
+                  and row.get('thread_id')==worker_thread
+                  and row.get('outcome')=='success' and row.get('host_receipt_outcome')=='success'
+                  and row.get('host_receipt_observed') is True and row.get('replayed') is not True
+                  and row.get('truncated') is not True
+                  and isinstance(row.get('report_id'),str)
+                  and re.fullmatch(r'r_[0-9a-f]{12}',row['report_id'])]
+    if report_id is not None:
+        publications=[row for row in publications if row['report_id']==report_id]
+    if len(publications)!=1:return None,'outcome_worker_report_missing_or_ambiguous'
+    # Current native final bodies may omit a redundant report ID.  In the
+    # observational route only, the exact one task-bound publication supplies
+    # that identity after the worker/result/profile/task correlation above.
+    # Missing or competing publication remains a hard outcome failure.
+    report_id=publications[0]['report_id']
+    reconciliations=[row for row in rows if row.get('tool')=='mcp__cortex__read_report'
+                     and row.get('thread_id')==root and row.get('report_id')==report_id
+                     and row.get('outcome')=='success' and row.get('host_receipt_outcome')=='success'
+                     and row.get('host_receipt_observed') is True and row.get('replayed') is not True
+                     and row.get('truncated') is not True
+                     and (expected_artifacts is None or row.get('reported_artifact_bindings')==expected_artifacts)]
+    if len(reconciliations)!=1:return None,'outcome_artifact_reconciliation_missing'
+    if expected_artifacts is None:
+        bindings=reconciliations[0].get('reported_artifact_bindings')
+        expected_artifacts=sorted({tuple(item) for item in bindings
+                                  if isinstance(item,(tuple,list)) and len(item)==2
+                                  and isinstance(item[0],str) and re.fullmatch(r'[0-9a-f]{12}',item[0])
+                                  and isinstance(item[1],str) and re.fullmatch(r'[0-9a-f]{64}',item[1])}) \
+                           if isinstance(bindings,list) else []
+        if not expected_artifacts or len(expected_artifacts)!=len(bindings):
+            return None,'outcome_artifact_reconciliation_missing'
+    return {'status':'complete','thread_id':root,'task_id':task,'worker_thread_id':worker_thread,
+            'worker_profile':(body.get('profile') if isinstance(body,dict) else worker.get('role')),
+            'report_id':report_id,'artifact_binding_count':len(expected_artifacts),
+            'host_enforcement_state':'unverified',
+            **({'task_binding':'opaque_root_report_correlation'} if task is None else {})},None
+
+
+def observational_read_report_failure_diagnostic(rows, row, state=None):
+    """Recognize one harmless current-host report lookup after full outcome proof.
+
+    A malformed *lookup operand* is not a malformed evidence receipt.  This is
+    intentionally narrower than generic error recovery: it accepts only one
+    completed public ``read_report`` error with ``invalid_arguments``, explicit
+    no-mutation metadata, and a separate complete outcome that has already
+    bound the real publication and artifact hashes.  It never hides a failed
+    write, an unbound/ambiguous report, a truncated row, or an unsafe target.
+    """
+    if not isinstance(row,dict):return False
+    if not isinstance(state,dict):
+        state={'bootstrap_route':MCP_FIRST_BOOTSTRAP_ROUTE,
+               'bootstrap_expected_child_thread_id':next((item.get('thread_id') for item in rows
+                   if item.get('tool')=='mcp__cortex__create_task' and item.get('direct_public_mcp') is True),None)}
+    outcome,_=current_host_outcome_receipt(rows,state)
+    if outcome is None:return False
+    tool=canonical_tool_name(row)
+    if not tool and row.get('operation')=='read_report':tool='mcp__cortex__read_report'
+    if tool!='mcp__cortex__read_report' or row.get('outcome')!='error':return False
+    code=row.get('error_code') or row.get('host_error_code')
+    if code!='invalid_arguments':return False
+    if (row.get('mutation_observed') is not False or row.get('truncated') is True
+            or row.get('replayed') is True or row.get('replay_marker') is True
+            or row.get('wrapper_outcome') in INCOMPLETE_OUTCOMES
+            or row.get('private_target_access') is True
+            or row.get('project_target_access') is True):return False
+    matching=[item for item in rows
+              if canonical_tool_name(item)=='mcp__cortex__read_report'
+              and item.get('outcome')=='error'
+              and (item.get('error_code') or item.get('host_error_code'))=='invalid_arguments'
+              and item.get('mutation_observed') is False
+              and item.get('truncated') is not True and item.get('replayed') is not True
+              and item.get('replay_marker') is not True
+              and item.get('wrapper_outcome') not in INCOMPLETE_OUTCOMES
+              and item.get('private_target_access') is not True
+              and item.get('project_target_access') is not True]
+    return len(matching)==1
+
+
+def observational_worker_skill_read_failure_diagnostic(rows, row, state):
+    """Recognize equivalent denied worker-skill reads after complete outcome proof.
+
+    Current Codex can record a single denied, bounded registered-worker SKILL.md
+    read through more than one host-call record.  That does not create evidence
+    or authorize a route: every record must be side-effect-free and have the
+    same attributable worker, profile, literal operation/path identity, and
+    bounded result.  A differing or unsafe related record remains a hard host
+    failure instead of being hidden by this post-observation diagnostic.
+    """
+    outcome,_=current_host_outcome_receipt(rows,state)
+    if outcome is None or not isinstance(row,dict):return False
+
+    def related(item):
+        return (
+            isinstance(item,dict)
+            and item.get('thread_id')==outcome.get('worker_thread_id')
+            and item.get('parent_thread_id')==outcome.get('thread_id')
+            and item.get('worker_skill_receipt_required') is True
+            and item.get('skill_instruction_read') is True)
+
+    def matches(item):
+        return (
+            related(item)
+            and item.get('tool')=='exec_command' and item.get('outcome')=='error'
+            # The native child role is the closed registered-profile identity
+            # when the current host omits a separate assignment hint.  An
+            # optional observed profile may only repeat that identity; it may
+            # never select a different worker profile.
+            and item.get('worker_skill_profile') in {None,item.get('role')}
+            and item.get('path_policy_provenance')=='observer_literal_marker'
+            and item.get('path_target_class')=='approved_instruction_or_static_mention'
+            and item.get('path_access_kind')=='approved_instruction_read'
+            and item.get('path_policy_decision')=='allowed'
+            and isinstance(item.get('result_digest'),str)
+            and re.fullmatch(r'[0-9a-f]{12}',item['result_digest']) is not None
+            and item.get('replayed') is not True and item.get('truncated') is not True
+            and item.get('private_target_access') is not True
+            and item.get('project_target_access') is not True
+            and item.get('mutation_observed') is not True
+            and item.get('execution_status') in {None,'denied_before_dispatch'}
+            and item.get('exit_code') is None)
+
+    def identity(item):
+        return tuple(item.get(key) for key in (
+            'thread_id','parent_thread_id','role','worker_skill_profile',
+            'tool','operation','path_policy_provenance','path_target_class',
+            'path_access_kind','path_policy_decision','path_argument_digest',
+            'path_workdir_digest','path_command_intent_digest','argument_digest',
+            'wrapper_argument_digest','intent_digest','result_digest',
+        ))
+
+    if not matches(row):return False
+    related_rows=[item for item in rows if related(item)]
+    return bool(related_rows) and all(matches(item) and identity(item)==identity(row)
+                                      for item in related_rows)
+
+
+def observational_worker_receipt_gap_diagnostic(rows, violation, state):
+    """Retain only safe current-host worker-receipt gaps as diagnostics.
+
+    A missing separate skill receipt is not a licence for a worker action.  It
+    is diagnostic only after the independently complete result/report/artifact
+    chain exists *and* a separate exact denied instruction-read group proves
+    the capability gap.  Explicit unsafe access is never normalized here.
+    """
+    if not isinstance(violation,dict):return False
+    if violation.get('violation') not in {
+            'worker_skill_load_failed','worker_project_action_before_skill_receipt'}:
+        return False
+    outcome,_=current_host_outcome_receipt(rows,state)
+    if outcome is None:return False
+    if (violation.get('thread_id')!=outcome.get('worker_thread_id')
+            or violation.get('parent_thread_id') not in {None,outcome.get('thread_id')}
+            or violation.get('role') not in {None,'worker',outcome.get('worker_profile')}):
+        return False
+    if any(violation.get(key) is True for key in (
+            'mutation_observed','private_target_access','project_target_access',
+            'directory_enumeration','catalogue_mixed','actor_attribution_ambiguous',
+            'replayed','replay_marker','truncated')):
+        return False
+    if violation.get('path_policy_decision')=='unauthorized_access':return False
+    if violation.get('execution_status') in {'executed','dispatched'}:return False
+    # The group helper rejects different worker/profile/path/operation/result
+    # identities, incomplete observations, and any unsafe attempted read.
+    return any(observational_worker_skill_read_failure_diagnostic(rows,row,state)
+               for row in rows)
+
+
+def observational_policy_partition(rows, state, violations):
+    """Partition current-host receipt gaps from still-blocking audit findings.
+
+    This is deliberately an observer-only relaxation.  It never authorizes an
+    action, changes the emitted policy findings, or turns an asserted native
+    result into host enforcement.  In the bounded MCP-first route only, a
+    complete correlated ``cortex-native-worker-result-v1`` can explain why the
+    current host did not expose a separate assignment/skill receipt.  A public
+    Cortex result can likewise explain a missing server event only when a later
+    same-thread, complete publication result binds the observation.  Everything
+    malformed, replayed, failed, truncated, private, or otherwise unbound stays
+    in the blocking partition.
+    """
+    if not isinstance(state, dict) or state.get('bootstrap_route') != MCP_FIRST_BOOTSTRAP_ROUTE:
+        return list(violations), []
+    outcome,_=current_host_outcome_receipt(rows,state)
+    def result_only_publication(violation):
+        thread=violation.get('thread_id');tool=violation.get('tool')
+        if not isinstance(thread, str) or not isinstance(tool, str):
+            return False
+        calls=[(index,row) for index,row in enumerate(rows)
+               if row.get('thread_id') == thread and row.get('tool') == tool]
+        if len(calls) != 1:
+            return False
+        index,call=calls[0]
+        if not (tool.startswith('mcp__cortex__')
+                and call.get('outcome') == 'success'
+                and call.get('host_receipt_outcome') == 'success'
+                and call.get('host_receipt_observed') is True
+                and call.get('result_receipt_observed') is True
+                and call.get('server_observed') is not True
+                and call.get('replayed') is not True
+                and call.get('truncated') is not True
+                and call.get('wrapper_outcome') not in INCOMPLETE_OUTCOMES):
+            return False
+        publications=[row for row in rows[index + 1:]
+                      if row.get('thread_id') == thread
+                      and row.get('tool') == 'mcp__cortex__write_report'
+                      and row.get('outcome') == 'success'
+                      and row.get('host_receipt_outcome') == 'success'
+                      and row.get('host_receipt_observed') is True
+                      and row.get('result_receipt_observed') is True
+                      and isinstance(row.get('report_id'), str)
+                      and row.get('replayed') is not True
+                      and row.get('truncated') is not True
+                      and row.get('wrapper_outcome') not in INCOMPLETE_OUTCOMES]
+        return len(publications) == 1
+
+    blocking=[];diagnostics=[]
+    unsupported_current_host_labels={
+        'worker_assignment_policy_unverified',
+        'mcp_first_bootstrap_unverified',
+    }
+    for violation in violations:
+        name=violation.get('violation')
+        # These two names record capabilities that the installed current host
+        # cannot expose.  They are always visible diagnostics in this route,
+        # never evidence, a score contribution, host enforcement, an integrity
+        # invalidator, or an acceptance shortcut.  Supported outcome and safety
+        # defects remain in the ordinary blocking partition below.
+        unsupported_by_current_host=name in unsupported_current_host_labels
+        event_gap=(name == 'cortex_call_missing_server_event'
+                   and result_only_publication(violation))
+        outcome_gap=(outcome is not None and (
+            name in {'worker_final_without_report_id'}))
+        harmless_lookup=(name=='mcp_tool_error_observed'
+                         and observational_read_report_failure_diagnostic(rows,violation,state))
+        worker_receipt_gap=observational_worker_receipt_gap_diagnostic(rows,violation,state)
+        if unsupported_by_current_host or event_gap or outcome_gap or harmless_lookup or worker_receipt_gap:
+            diagnostics.append({**violation, 'observational_diagnostic': True,
+                                'host_enforcement_state': 'unverified',
+                                **({'not_applicable':True,
+                                    'unsupported_by_current_host':True}
+                                   if unsupported_by_current_host else {}),
+                                **({'diagnostic_reason':'missing_current_host_worker_skill_receipt'}
+                                   if worker_receipt_gap else {}),
+                                **({'outcome_receipt':outcome} if outcome is not None else {})})
+        else:
+            blocking.append(violation)
+    return blocking,diagnostics
+
+
 def call_policy_violations(rows):
+    rows=list(rows)
     violations=[];clarification_parents=set();published=set();active_sessions={};active_cells={};coordinator_waited=set()
     completed={};worker_parents={};worker_roles={};latest_report={};owned_reports={};issued_drafts={}
-    capacity_blocked=set();capacity_snapshot=set();pending_replies=set()
+    capacity_blocked=set();capacity_snapshot=set();pending_replies=set();worker_skill_receipts=set()
     for source_row in rows:
         # Host receipts can represent a tool as separate namespace/name fields.
         # Work on a copy so every downstream policy branch sees the canonical
@@ -2411,6 +4111,32 @@ def call_policy_violations(rows):
         role=row.get('role')
         tool=row.get('tool')
         model=row.get('model');effort=row.get('reasoning_effort')
+        worker=(role not in {'coordinator','runtime',None})
+        receipt=(worker and row.get('worker_skill_complete') is True
+                 and row.get('outcome') in {'success','covered_by_command_execution'}
+                 and row.get('wrapper_outcome','success')=='success')
+        assigned=(role if isinstance(role,str) and assigned_worker_profile(
+            '$cortex:worker-'+role.replace('_','-'))==role else None)
+        if receipt:
+            if assigned is None or row.get('worker_skill_profile') != assigned:
+                flags.append('worker_skill_route_mismatch')
+            else:
+                worker_skill_receipts.add(thread)
+        worker_project_tool=(tool in {'exec_command','write_stdin','command_execution',
+                                      'read_file','write_file','apply_patch','terminal','js'}
+                             or isinstance(tool,str) and tool.startswith('mcp__'))
+        skill_read_attempt=(worker and row.get('skill_instruction_read') is True)
+        if (skill_read_attempt and row.get('outcome') == 'error'
+                and row.get('wrapper_outcome') not in INCOMPLETE_OUTCOMES):
+            # An approved skill route that returns a complete error is failed
+            # receipt acquisition, not a project operation.  It cannot credit
+            # the worker; the later project action remains fail-closed below.
+            flags.append('worker_skill_load_failed')
+        if (worker and row.get('worker_skill_receipt_required') is True
+                and worker_project_tool and tool!='functions.exec'
+                and not skill_read_attempt
+                and thread not in worker_skill_receipts):
+            flags.append('worker_project_action_before_skill_receipt')
         if tool=='mcp__cortex__create_draft' and row.get('outcome')=='success' and row.get('draft_id'):
             issued_drafts.setdefault(thread,set()).add(row['draft_id'])
         if role=='senior_consultant' and tool=='apply_patch':
@@ -2633,12 +4359,26 @@ def call_policy_violations(rows):
                 and row.get('argument_digest') is not None
                 and not row.get('host_receipt_observed')):
             flags.append('mcp_call_missing_host_receipt')
+        if (row.get('host_dispatch_decision') == 'PERMISSION_DENIED'
+                and row.get('host_dispatch_execution') == 'executed'):
+            flags.append('host_dispatch_bypass')
         if tool=='native_agent_result' and row.get('outcome')=='success':
-            report_ids=([row['report_id']] if row.get('report_id') else row.get('report_ids',[]))
-            if not report_ids:
+            # `report_ids`, when present, is the complete parsed final-result
+            # reference set.  Never let a singleton convenience field conceal
+            # additional, missing, or foreign references in that set.
+            report_ids=(row.get('report_ids',[]) if 'report_ids' in row
+                        else ([row['report_id']] if row.get('report_id') else []))
+            fallback=(isinstance(row.get('native_worker_result'),dict)
+                      and row['native_worker_result'].get('worker_mcp')=='unavailable')
+            if fallback:
+                # The coordinator-authored delegation-evidence publication is
+                # checked by the closed fallback validator below.  Do not make
+                # unavailable worker MCP masquerade as a missing worker report.
+                pass
+            elif not report_ids:
                 flags.append('worker_final_without_report_id')
-            elif (latest_report.get(thread) not in report_ids
-                  or not set(report_ids)<=owned_reports.get(thread,set())):
+            elif (len(report_ids)!=1 or report_ids[0]!=latest_report.get(thread)
+                  or report_ids[0] not in owned_reports.get(thread,set())):
                 flags.append('worker_final_with_unobserved_report')
             else:
                 completed[thread]=row.get('timestamp') or ''
@@ -2654,9 +4394,17 @@ def call_policy_violations(rows):
                         'path_policy_decision','path_argument_digest','path_workdir_digest',
                         'path_command_intent_digest','argument_digest','result_digest','intent_digest',
                         'outcome','wrapper_outcome','host_status','host_receipt_outcome',
-                        'exit_code','truncated'):
+                        'exit_code','truncated','host_dispatch_decision','host_dispatch_execution'):
                 if key in row:violation[key]=row[key]
             violations.append(violation)
+    for finding in task_source_revision_violations(rows):
+        violation=dict(thread_id=finding['thread_id'],role='runtime',
+                       tool='mcp__cortex__source_revision',
+                       violation=finding['violation'])
+        if finding.get('task_id') is not None:
+            violation['task_id']=finding['task_id']
+        violations.append(violation)
+    violations.extend(native_worker_result_fallback_violations(rows))
     return violations
 
 
@@ -2678,11 +4426,17 @@ def desktop_window(pid):
     return xdotool,matches[0]
 
 
-def wait_desktop_window(pid):
-    for _ in range(240):
+def wait_desktop_window(pid,deadline=None):
+    """Find one owned Desktop window without exceeding the caller's monotonic budget."""
+    if deadline is None:
+        deadline=time.monotonic()+DESKTOP_READY_TIMEOUT_SECONDS
+    while time.monotonic()<deadline:
         try:return desktop_window(pid)
-        except RuntimeError:time.sleep(.25)
-    raise RuntimeError('isolated Desktop window did not become uniquely available within 60 seconds')
+        except RuntimeError:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:break
+            time.sleep(min(DESKTOP_READY_POLL_SECONDS,remaining))
+    raise RuntimeError('isolated Desktop window did not become uniquely available before the readiness deadline')
 
 
 def desktop_thread_ids(workdir,started_at):
@@ -2758,6 +4512,10 @@ def window_geometry(xdotool,window):
 
 
 DESKTOP_PROPERTY_WARNING='XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)'
+DESKTOP_COMPOSER_HYDRATION_SECONDS=3.0
+DESKTOP_READY_OBSERVATIONS=2
+DESKTOP_READY_POLL_SECONDS=.25
+DESKTOP_READY_TIMEOUT_SECONDS=60.0
 
 
 def _owned_desktop_window(xdotool,window,pid):
@@ -2825,6 +4583,96 @@ def activate_desktop_window(xdotool,window,pid,state=None,state_file=None):
     return activation
 
 
+def wait_prepared_desktop_readiness(state,state_file):
+    """Wait for a stable owned prepared window before the one send shortcut.
+
+    Desktop has no supported composer-element locator.  The narrow substitute is
+    an owned window that remains the active window across consecutive observations
+    after a conservative URI hydration interval.  This function never sends a
+    key and does not turn elapsed time into a delivery receipt; it only prevents
+    an immediate shortcut from racing the prepared composer.
+    """
+    started_at=state.get('started_at')
+    if not isinstance(started_at,(int,float)):
+        raise RuntimeError('Desktop start receipt lacks a valid timestamp')
+    started_monotonic=state.get('started_monotonic')
+    if isinstance(started_monotonic,(int,float)):
+        deadline=started_monotonic+DESKTOP_READY_TIMEOUT_SECONDS
+    else:
+        # Legacy state has only the wall-clock start receipt.  Translate its
+        # remaining budget once; all subsequent nested waits use this monotonic
+        # deadline and cannot restart a fresh sixty-second lookup.
+        deadline=time.monotonic()+max(0.0,started_at+DESKTOP_READY_TIMEOUT_SECONDS-time.time())
+    stable_window=None
+    observations=0
+    last_error=None
+    while True:
+        if identity(state['pid'])!=state.get('start'):
+            raise RuntimeError('isolated Desktop process is not active during prepared-composer readiness')
+        now=time.monotonic()
+        try:
+            xdotool,window=wait_desktop_window(state['pid'],deadline)
+            activate_desktop_window(xdotool,window,state['pid'],state,state_file)
+            active=subprocess.run([xdotool,'getactivewindow'],capture_output=True,text=True)
+            if active.returncode!=0 or active.stdout.strip()!=str(window):
+                raise RuntimeError('owned Desktop window is not active during prepared-composer readiness')
+            _owned_desktop_window(xdotool,window,state['pid'])
+            observations=observations+1 if window==stable_window else 1
+            stable_window=window
+            hydrated=(time.time()-started_at)>=DESKTOP_COMPOSER_HYDRATION_SECONDS
+            state['desktop_readiness']={
+                'window':window,
+                'observations':observations,
+                'hydrated':hydrated,
+                'observed_at':now,
+            }
+            write_state(state_file,state)
+            if hydrated and observations>=DESKTOP_READY_OBSERVATIONS:
+                state['desktop_readiness']['ready_at']=now
+                write_state(state_file,state)
+                return xdotool,window
+            last_error='Desktop prepared composer is still hydrating'
+        except (RuntimeError,subprocess.SubprocessError) as exc:
+            stable_window=None;observations=0;last_error=str(exc)
+        if time.monotonic()>=deadline:
+            state['desktop_readiness']={'status':'timeout','reason':last_error or 'readiness unavailable'}
+            write_state(state_file,state)
+            raise RuntimeError('Desktop prepared composer did not become stably ready before submission')
+        time.sleep(DESKTOP_READY_POLL_SECONDS)
+
+
+def submit_prepared_desktop_prompt(state,state_file):
+    """Submit the URI-prepared prompt without guessing a compositor coordinate.
+
+    Current Codex Desktop exposes an owned X11 window and durable task records;
+    it does not expose a supported composer-element locator.  ``start`` supplies
+    the literal prompt in the ``codex://threads/new`` URI, leaving that prepared
+    composer as the focused child of the owned window.  Clicking a fixed pixel
+    position was neither a composer proof nor portable across current window
+    layouts, and could instead steal the prepared child's focus.  Keep the
+    actual supported transport deliberately small: activate the exact owned
+    window, send plain Return once, then require exactly one durable new thread.
+    """
+    xdotool,window=wait_prepared_desktop_readiness(state,state_file)
+    before=desktop_thread_ids(state['workdir'],state['started_at'])
+    submitted_at=time.time()
+    subprocess.run([xdotool,'key','--window',window,'Return'],check=True)
+    created=set()
+    for _ in range(60):
+        created=desktop_thread_ids(state['workdir'],state['started_at'])-before
+        if created:break
+        time.sleep(.25)
+    if len(created)!=1:
+        raise RuntimeError(f'Desktop submission produced {len(created)} new task receipts; prompt remains retryable')
+    state['prompt_sent']=True
+    state['desktop_window']=window
+    state['thread_id']=created.pop()
+    state['desktop_transport_receipt']='success'
+    state.setdefault('first_submission_at',submitted_at)
+    write_state(state_file,state)
+    return state['desktop_window']
+
+
 def desktop_prompt_receipts(state,prompt):
     """Read only typed user-message identities for the exact retained task."""
     database=Path.home()/'.cortex-dev/.codex/state_5.sqlite'
@@ -2888,6 +4736,8 @@ def steer_desktop(state,state_file,prompt_file,composer_x,composer_y):
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action',required=True)
     s=sub.add_parser('start');s.add_argument('--workdir',type=Path,required=True);s.add_argument('--prompt-file',type=Path)
+    s.add_argument('--expected-result-sha256')
+    s.add_argument('--expected-result-path',default='RESULT.md')
     s=sub.add_parser('steer');s.add_argument('--prompt-file',type=Path,required=True);s.add_argument('--composer-x',type=int,required=True);s.add_argument('--composer-y',type=int,required=True)
     sub.add_parser('status');sub.add_parser('send');e=sub.add_parser('events');e.add_argument('--limit',type=int);h=sub.add_parser('hooks');h.add_argument('--limit',type=int);c=sub.add_parser('calls');c.add_argument('--limit',type=int);sub.add_parser('usage');sub.add_parser('audit');sub.add_parser('stop')
     args=p.parse_args();private();state_file=STATE/'session.json'
@@ -2909,6 +4759,10 @@ def main():
                 raise RuntimeError('prompt file must be a regular non-symlink file')
             prompt=prompt_path.read_text(encoding='utf-8').strip()
             if not prompt:raise RuntimeError('prompt file must not be empty')
+        if args.expected_result_sha256 is not None and not re.fullmatch(r'[0-9a-f]{64}',args.expected_result_sha256):
+            raise RuntimeError('expected RESULT.md SHA-256 must be 64 lowercase hexadecimal characters')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',args.expected_result_path):
+            raise RuntimeError('expected result must be one regular filename in the project root')
         log=STATE/'desktop.log'
         fd=os.open(log,os.O_CREAT|os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW,0o600)
         isolated_config=configure_workspace_network()
@@ -2922,7 +4776,10 @@ def main():
                 restore_workspace_network(isolated_config)
                 raise
         finally:os.close(fd)
-        state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),trial_started_at=time.time(),profile=str(profile),events=str(events),store=str(store),workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
+        state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),started_monotonic=time.monotonic(),trial_started_at=time.time(),profile=str(profile),events=str(events),store=str(store),workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
+        if args.expected_result_sha256 is not None:
+            state.update(qualification_route=DESKTOP_CURRENT_HOST_ROUTE,
+                         desktop_expected_artifact={'path':args.expected_result_path,'sha256':args.expected_result_sha256})
         if prompt is not None:
             state['original_request_sha256']=original_request_digest(prompt)
             state['desktop_editor_source_sha256']=original_request_digest(desktop_editor_source(prompt))
@@ -2939,21 +4796,7 @@ def main():
             if not alive:raise RuntimeError('isolated Desktop process is not active')
             if not state.get('prompt_supplied'):raise RuntimeError('start with --prompt-file before send')
             if state.get('prompt_sent'):raise RuntimeError('prepared Desktop prompt was already sent')
-            xdotool,window=wait_desktop_window(state['pid'])
-            before=desktop_thread_ids(state['workdir'],state['started_at'])
-            activate_desktop_window(xdotool,window,state['pid'],state,state_file)
-            x,y,width,height=window_geometry(xdotool,window)
-            subprocess.run([xdotool,'mousemove',str(x+width//2),str(y+height-120),'click','1'],check=True)
-            submitted_at=time.time();subprocess.run([xdotool,'key','--window',window,'ctrl+Return'],check=True)
-            created=set()
-            for _ in range(60):
-                created=desktop_thread_ids(state['workdir'],state['started_at'])-before
-                if created:break
-                time.sleep(.25)
-            if len(created)!=1:
-                raise RuntimeError(f'Desktop submission produced {len(created)} new task receipts; prompt remains retryable')
-            state['prompt_sent']=True;state['desktop_window']=window;state['thread_id']=created.pop()
-            state.setdefault('first_submission_at',submitted_at);write_state(state_file,state)
+            submit_prepared_desktop_prompt(state,state_file)
             print('Submitted the prepared prompt to the exact isolated Desktop window and observed one new task receipt; pid='+str(state['pid']))
         elif args.action=='events':
             if args.limit is not None and (args.limit<1 or args.limit>5000):raise RuntimeError('events limit must be from 1 through 5000')
@@ -2984,17 +4827,30 @@ def main():
             open_sessions=open_command_sessions(host_rows)
             open_cells=open_exec_cells(host_rows)
             policy_violations=call_policy_violations(host_rows)
-            orchestration_policies=orchestration_policy_violations(policy_violations)
-            worker_policies=worker_policy_violations(policy_violations)
+            host_failures,audit_policy,observational_diagnostics,desktop_outcome,desktop_outcome_reason=desktop_current_host_partition(
+                host_rows,state,host_failures,policy_violations,
+                open_sessions=open_sessions,open_cells=open_cells)
+            orchestration_policies=orchestration_policy_violations(audit_policy)
+            worker_policies=worker_policy_violations(audit_policy)
             orchestration_host_failures=[row for row in host_failures if is_orchestration_call(row)]
             threads={(row.get('thread_id'),row.get('parent_thread_id')) for row in rows if row.get('thread_id')}
             classification=classify_audit_findings(failures=failures,hook_failures=hook_failures,
-                host_failures=host_failures,policy_violations=policy_violations,
+                host_failures=host_failures,policy_violations=audit_policy,
                 open_sessions=open_sessions,open_cells=open_cells,
                 foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology)
-            print(json.dumps(dict(mcp_events=len(rows),hook_actions=len(hook_rows),host_calls=len(host_rows),threads=len(threads),foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology,operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,hook_failures=hook_failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=policy_violations,worker_policy_violations=worker_policies,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells,**classification)))
+            participants=participant_token_usage(state).get('participants',[])
+            accepted=desktop_final_acceptance(desktop_outcome,classification,participants)
+            observational=({'status':'observational_accept','host_enforcement_state':'unverified',
+                            'outcome_receipt':desktop_outcome}
+                           if accepted else
+                           {'status':'BLOCK','host_enforcement_state':'unverified',
+                            'reason':desktop_outcome_reason or 'desktop_audit_incomplete'})
+            audit_exit_code=0 if accepted else 1
+            print(json.dumps(dict(mcp_events=len(rows),hook_actions=len(hook_rows),host_calls=len(host_rows),threads=len(threads),foreign_task_roots=foreign_task_roots,invalid_task_topology=invalid_task_topology,operations=dict(Counter(row.get('operation','unknown') for row in rows)),failures=failures,hook_failures=hook_failures,tool_error_history=error_history,orchestration_error_history=orchestration_errors,host_failures=host_failures,orchestration_host_failures=orchestration_host_failures,resolved_host_failures=resolved_host_failures,policy_violations=audit_policy,observational_diagnostics=observational_diagnostics,worker_policy_violations=worker_policies,orchestration_policy_violations=orchestration_policies,open_sessions=open_sessions,open_cells=open_cells,observational_qualification=observational,audit_exit_code=audit_exit_code,**classification)))
             if classification['evidence_integrity_invalidators']:
                 raise RuntimeError('Desktop audit found incomplete, unbound, contaminated, or non-terminal evidence')
+            if audit_exit_code:
+                raise RuntimeError('Desktop audit did not establish a complete current-host observational outcome')
         else:
             if alive:
                 os.killpg(state['pid'],signal.SIGTERM)
