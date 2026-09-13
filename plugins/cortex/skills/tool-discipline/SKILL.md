@@ -18,6 +18,10 @@ Check supplied keys and values before dispatch. Do not copy argument contracts i
 skills, infer synonymous fields, discover requirements by causing errors, or inspect
 plugin internals instead of advertised operations.
 
+Code-mode is not Node.js or a browser. Use only its advertised globals; do not
+assume crypto, process, require or filesystem APIs exist. Prepare literal values
+without speculative runtime helpers before invoking a tool.
+
 Batch independent reads when useful and inspect every result. Keep dependent reads,
 mutations, approvals and retries sequential. A wrapper must expose the full nested
 result, including exit status or a running handle. Returning stdout alone is
@@ -27,6 +31,8 @@ matching wait or input operation until a terminal receipt before dependent work.
 For file changes, inspect the current target fragment and patch the exact observed
 text. Re-read after user steering, another contributor's edit or a context mismatch.
 Preserve unrelated work. A Cortex draft is edited only at its server-issued path.
+Use the returned path literally; a draft ID is not a path and must never be
+expanded into a guessed directory. Recover a lost path through public evidence.
 Its exact patch may pass directly to the native patch tool or through a safe wrapper
 that forwards it intact. Never construct draft content with executable interpolation,
 shell substitution or evaluation, and never put its body in Cortex writer arguments.

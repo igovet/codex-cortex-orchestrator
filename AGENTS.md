@@ -126,6 +126,16 @@ attempt, retain the complete current calls/events tails and audit, stop its exac
 session, and do not start Desktop as a diagnostic substitute. Report that host as
 unverified and correct/requalify the candidate before a new CLI-first attempt.
 
+This release-verification obligation belongs to the owner of the Cortex change.
+Run live workloads in a separate isolated project, never in this Cortex checkout.
+Keep Cortex implementation and source checks in this checkout; the disposable
+project has its own source, Git history and task instructions.
+An ordinary research task or generated proof note inside a live scenario is the
+workload being observed, not another Cortex change: complete that deliverable
+without recursively launching CLI/Desktop qualification or preparing a candidate.
+The outer owner still must finish both real-host checks; this scope distinction
+does not waive any check for implementation, launcher, policy or skill changes.
+
 After a completed change run a focused ordinary interactive Codex live scenario.
 Use `./scripts/cortex-live-smoke start --workdir PATH` for the exact
 `cortex-markdown-smoke` session on the default tmux server. The helper creates bash,

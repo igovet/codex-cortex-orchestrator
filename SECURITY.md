@@ -3,6 +3,14 @@
 Incident coordination preserves production safety, rollback and exact deployed
 identity. Quality diagnostics remain advisory and grant no host permissions.
 Coordinators may inspect project evidence; project mutation stays with its owner.
+Discovery ownership and Codebase Memory priority are model guidance, not access
+controls. Graph limitations permit bounded native fallback. Live helpers preserve
+the isolated graph configuration without modifying stable settings.
+Decision-model and English-only guidance never terminate workers or deny calls.
+The observer retains a literal unary file predicate's exit 1 as `predicate_false`,
+not a command crash; raw receipts and independent required-artifact, completion,
+mutation and path-policy checks remain intact. Syntax/permission errors, stderr,
+compound commands and unknown predicates do not receive this interpretation.
 See [incident outcomes](docs/project/incident-outcomes.md).
 The observational collector recognizes only a bounded literal word filter over
 public tool names/descriptions, not arbitrary JavaScript. Publication identity
@@ -127,22 +135,23 @@ response language.
 
 The coordinator must state a worker's model, effort and policy class explicitly.
 Luna (`gpt-5.6-luna`) is the default and priority route for ordinary work and all
-research, exploration and analysis assignments, at medium/high/xhigh/max effort.
-Terra (`gpt-5.6-terra`) is limited to explicitly complex work at medium/high/xhigh.
-Sol (`gpt-5.6-sol`) is limited to narrow security-analysis microtasks at
-medium/high/xhigh and is never an implementation route merely because a change is
+fact gathering and exploration assignments, at medium/high effort.
+Terra (`gpt-5.6-terra`) handles explicitly complex implementation/review at medium/high.
+Sol (`gpt-5.6-sol`) handles consequential decisions at medium and difficult,
+conflicting or high-risk decisions at high; narrow security analysis may use
+medium/high. It is never an implementation route merely because a change is
 security-related. Security implementation uses Luna or Terra. Reviews and
 verifications follow the permitted model and effort routes without automatic
 escalation from the inspected implementation. Explicit user-requested
 model/effort overrides are preserved and recorded; coordinator-selected other models
-or efforts are policy violations.
+or efforts are diagnostic policy deviations, never runtime prohibitions.
 The `review` label records work kind and does not select a model; absent an
 explicit complexity or security classification, it follows the ordinary route.
 
-The opt-in `senior_consultant` has a separate bounded route: Sol medium for a
-standard question, Sol low for a narrow question, and Sol high for a harder
-question. Astra (`gpt-6-astra`) at low/medium/high is permitted only for an
-explicitly justified deeper escalation after unresolved Sol evidence. The
+The opt-in `senior_consultant` uses Sol medium for a standard or narrow question
+and Sol high for a harder question. Astra (`gpt-6-astra`) only at medium is
+reserved for an explicitly justified exceptional system decision after unresolved
+Sol evidence. The
 coordinator keeps its own model unchanged and must state the consultation policy
 class in the native assignment.
 

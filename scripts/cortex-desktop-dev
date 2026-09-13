@@ -34,6 +34,9 @@ WORKER_MODELS={
     'ordinary': 'gpt-5.6-luna',
     'complex': 'gpt-5.6-terra',
     'security-analysis-microtask': 'gpt-5.6-sol',
+    'decision': 'gpt-5.6-sol',
+    'decision-hard': 'gpt-5.6-sol',
+    'decision-exceptional': 'gpt-6-astra',
 }
 CONSULTANT_MODELS={'consultation':'gpt-5.6-sol',
                    'consultation-narrow':'gpt-5.6-sol',
@@ -48,15 +51,18 @@ WORKER_MODEL_CHOICES={
     **{key:{value} for key,value in CONSULTANT_MODELS.items()},
 }
 WORKER_EFFORTS={
-    'gpt-5.6-luna': {'medium','high','xhigh','max'},
-    'gpt-5.6-terra': {'medium','high','xhigh'},
-    'gpt-5.6-sol': {'low','medium','high','xhigh'},
-    'gpt-6-astra': {'low','medium','high'},
+    'gpt-5.6-luna': {'medium','high'},
+    'gpt-5.6-terra': {'medium','high'},
+    'gpt-5.6-sol': {'medium','high'},
+    'gpt-6-astra': {'medium'},
 }
 CONSULTANT_EFFORTS={'consultation': {'medium'},
-                     'consultation-narrow': {'low'},
+                     'consultation-narrow': {'medium'},
                      'consultation-hard': {'high'},
-                     'consultation-deeper': {'low','medium','high'}}
+                     'consultation-deeper': {'medium'},
+                     'decision': {'medium'},
+                     'decision-hard': {'high'},
+                     'decision-exceptional': {'medium'}}
 ADVISORY_POLICY_FLAGS={
     'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
     'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
@@ -219,16 +225,7 @@ def live_test_config(source):
     replace(None,'model_reasoning_effort',json.dumps(LIVE_COORDINATOR_EFFORT))
     replace(None,'developer_instructions',json.dumps(instructions))
     replace('agents','default_subagent_model',json.dumps(LIVE_MODEL))
-    # A complete optional graph server can be inherited by the disposable
-    # profile even for an ordinary (graph-disabled) live run. Disable only an
-    # existing complete entry: creating an override for an absent or incomplete
-    # table would make Codex reject the transport as malformed.
-    server=parsed.get('mcp_servers',{}).get('codebase_memory')
-    complete=(isinstance(server,dict)
-              and isinstance(server.get('command'),str)
-              and bool(server['command'].strip()))
-    if complete:
-        replace('mcp_servers.codebase_memory','enabled','false')
+    # Preserve the isolated graph server's enabled state, including explicit opt-out.
     return source
 
 
@@ -403,7 +400,7 @@ def participant_token_usage(state):
     boundary=float(state.get('trial_started_at',state.get('thread_created_since',state.get('started_at',0))))-2
     for thread in threads:
         totals={field:0 for field in TOKEN_FIELDS};responses=0;parent=None;completed_turns=set();started_turns=set();durations=[]
-        path=Path(thread['rollout_path'])
+        path=Path(thread['rollout_path']);inherited_context=False
         if path.is_file():
             with path.open(encoding='utf-8') as source:
                 for line in source:
@@ -411,10 +408,19 @@ def participant_token_usage(state):
                     except ValueError:continue
                     payload=entry.get('payload',{})
                     if entry.get('type')=='session_meta' and isinstance(payload,dict):
+                        metadata_id=payload.get('id')
+                        if isinstance(metadata_id,str):
+                            inherited_context=metadata_id!=thread['id']
+                        if inherited_context:continue
                         provenance=payload.get('source')
                         if isinstance(provenance,dict):
                             parent=(((provenance.get('subagent') or {}).get('thread_spawn') or {})
                                     .get('parent_thread_id'))
+                    if (entry.get('type')=='event_msg' and isinstance(payload,dict)
+                            and payload.get('type')=='thread_settings_applied'
+                            and payload.get('thread_id')==thread['id']):
+                        inherited_context=False
+                    if inherited_context:continue
                     if (entry.get('type')=='event_msg' and isinstance(payload,dict)
                             and payload.get('type')=='task_started'
                             and isinstance(payload.get('turn_id'),str)):
@@ -670,6 +676,16 @@ def semantic_no_match_family(source,exit_code,stdout,stderr,cwd):
     return search[0].rsplit('/',1)[-1]
 
 
+def semantic_absent_path(source,exit_code,stdout,stderr):
+    """A literal unary file predicate returning false is an observation, not a crash.
+
+    Preserve the raw exit and path policy. This grants no artifact/completion proof;
+    missing required output still fails independent outcome reconciliation.
+    """
+    if exit_code!=1 or str(stdout or '').strip() or str(stderr or '').strip():return False
+    return bool(re.fullmatch(r'test[ \t]+-(?:e|f|d)[ \t]+[A-Za-z0-9_./-]+',source))
+
+
 def nested_tool_invocations(source):
     """Extract statically visible tool calls and their argument digests.
 
@@ -806,6 +822,7 @@ def delivered_request_digests(state,text):
 
 POLICY_CLASS_VALUES={
     'research','exploration','analysis','ordinary','complex',
+    'decision','decision-hard','decision-exceptional',
     'security-analysis-microtask','security-implementation','review',
     'consultation','consultation-narrow','consultation-hard','consultation-deeper',
 }
@@ -1001,7 +1018,7 @@ def bounded_static_read_transport(source, nested):
     match = re.fullmatch(
         r'\s*const\s+(?P<binding>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*'
         r'await\s+tools\.exec_command\((?P<arguments>.*)\)\s*;\s*'
-        r'(?:text\((?P=binding)\)\s*;|'
+        r'(?:text\((?P=binding)\)\s*;|text\(JSON\.stringify\((?P=binding)\)\)\s*;|'
         r'text\((?P=binding)\.output\)\s*;\s*'
         r'text\(`exit_code=\$\{(?P=binding)\.exit_code\}`\)\s*;'
         r'(?:\s*if\s*\((?P=binding)\.session_id\)\s*'
@@ -1063,8 +1080,9 @@ def python_skill_read_paths(command):
             imported=True
             continue
         if isinstance(statement,ast.Assign):
-            if (inline_literal or not imported or binding is not None or len(statement.targets)!=1
-                    or not isinstance(statement.targets[0],ast.Name)):
+            if (not imported or binding is not None or len(statement.targets)!=1
+                    or not isinstance(statement.targets[0],ast.Name)
+                    or statement.targets[0].id in {'Path','print'}):
                 return []
             value=statement.value
             if (not isinstance(value,ast.Call) or not isinstance(value.func,ast.Name)
@@ -1087,7 +1105,7 @@ def python_skill_read_paths(command):
                     or read.args or read.keywords):
                 return []
             receiver=read.func.value
-            if inline_literal:
+            if inline_literal and binding is None:
                 if (not isinstance(receiver,ast.Call) or not isinstance(receiver.func,ast.Name)
                         or receiver.func.id!='Path' or len(receiver.args)!=1 or receiver.keywords
                         or not isinstance(receiver.args[0],ast.Constant)
@@ -1101,7 +1119,6 @@ def python_skill_read_paths(command):
         # No docstrings, arbitrary expressions, imports, calls or mutations.
         return []
     if (not imported or literal_path is None or not printed
-            or inline_literal and binding is not None
             or not inline_literal and binding is None):
         return []
     return [literal_path]
@@ -2204,6 +2221,121 @@ def draft_call_metadata(tool,arguments):
     return {}
 
 
+def python_artifact_read_paths(command):
+    """Recognize a closed, side-effect-free root-file byte/text reconciliation.
+
+    This is syntax/type inspection, never execution of the submitted program.
+    Unknown Python, shell syntax, writes and computed paths stay unrecognized.
+    """
+    try:
+        heredoc=re.fullmatch(r"python3(?: -B)? - <<'PY'\n(.*?)\nPY\s*",command,re.S)
+        if heredoc:
+            program=heredoc[1]
+        else:
+            tokens=shlex.split(command)
+            if tokens[:2]==['python3','-B']:tokens=tokens[:1]+tokens[2:]
+            if len(tokens)!=3 or tokens[:2]!=['python3','-c']:return []
+            program=tokens[2]
+        tree=ast.parse(program)
+    except (ValueError,SyntaxError):return []
+    bindings={};imports=set();paths=set();printed=False
+    def kind(node):
+        if isinstance(node,ast.Constant):
+            return {str:'text',bytes:'bytes',int:'int',bool:'bool'}.get(type(node.value))
+        if isinstance(node,ast.Name):return bindings.get(node.id)
+        if isinstance(node,ast.Attribute):
+            if node.attr=='returncode' and kind(node.value)=='git-result':return 'int'
+            return None
+        if isinstance(node,ast.Compare):
+            if (len(node.ops)==1 and isinstance(node.ops[0],ast.Eq)
+                    and kind(node.left) in {'bytes','text','int','bool'}
+                    and kind(node.left)==kind(node.comparators[0])):return 'bool'
+            return None
+        if not isinstance(node,ast.Call):return None
+        if isinstance(node.func,ast.Name):
+            if node.keywords:return None
+            name=node.func.id
+            if name=='Path' and 'Path' in imports and len(node.args)==1:
+                value=node.args[0]
+                if (isinstance(value,ast.Constant) and isinstance(value.value,str)
+                        and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',value.value)):
+                    paths.add(value.value);return 'path'
+            if name in {'len','repr'} and len(node.args)==1:
+                value=kind(node.args[0])
+                if value in {'bytes','text','lines'}:return 'int' if name=='len' else 'text'
+            if name=='all' and len(node.args)==1 and isinstance(node.args[0],ast.GeneratorExp):
+                generator=node.args[0]
+                if len(generator.generators)!=1:return None
+                clause=generator.generators[0]
+                if (clause.ifs or clause.is_async or not isinstance(clause.target,ast.Name)
+                        or clause.target.id in {*bindings,'Path','hashlib','subprocess','print','len','repr','all'}
+                        or kind(clause.iter)!='lines' or not isinstance(clause.iter,ast.Call)
+                        or not isinstance(clause.iter.func,ast.Attribute)):return None
+                bindings[clause.target.id]=kind(clause.iter.func.value)
+                result=kind(generator.elt)
+                del bindings[clause.target.id]
+                return 'bool' if result=='bool' else None
+            return None
+        if not isinstance(node.func,ast.Attribute):return None
+        receiver=node.func.value;method=node.func.attr
+        receiver_kind=kind(receiver)
+        if receiver_kind in {'bytes','text'} and method=='splitlines' and not node.args:
+            if (not node.keywords or len(node.keywords)==1
+                    and node.keywords[0].arg=='keepends'
+                    and isinstance(node.keywords[0].value,ast.Constant)
+                    and type(node.keywords[0].value.value) is bool):return 'lines'
+            return None
+        if node.keywords:return None
+        if (isinstance(receiver,ast.Name) and receiver.id=='subprocess'
+                and 'subprocess' in imports and method=='run' and len(node.args)==1
+                and isinstance(node.args[0],ast.List)):
+            values=node.args[0].elts
+            if not all(isinstance(value,ast.Constant) and isinstance(value.value,str) for value in values):return None
+            args=[value.value for value in values]
+            if (args[:4]==['git','diff','--quiet','--'] and len(args)>4
+                    and all(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_./-]*',path)
+                            and '..' not in path.split('/') for path in args[4:])):return 'git-result'
+            return None
+        if (isinstance(receiver,ast.Name) and receiver.id=='hashlib'
+                and 'hashlib' in imports and method=='sha256'
+                and len(node.args)==1 and kind(node.args[0])=='bytes'):return 'digest'
+        if receiver_kind=='path' and not node.args:
+            return {'read_bytes':'bytes','read_text':'text'}.get(method)
+        if receiver_kind=='digest' and method=='hexdigest' and not node.args:return 'text'
+        if receiver_kind in {'bytes','text'}:
+            if method=='splitlines' and not node.args:return 'lines'
+            if method in {'count','endswith'} and len(node.args)==1:
+                if isinstance(node.args[0],ast.Constant) and kind(node.args[0])==receiver_kind:
+                    return 'int' if method=='count' else 'bool'
+            if (receiver_kind=='bytes' and method=='decode' and len(node.args)==1
+                    and isinstance(node.args[0],ast.Constant)
+                    and node.args[0].value=='utf-8'):return 'text'
+        return None
+    for statement in tree.body:
+        if (isinstance(statement,ast.ImportFrom) and statement.module=='pathlib'
+                and statement.level==0 and len(statement.names)==1
+                and statement.names[0].name=='Path' and statement.names[0].asname is None):
+            imports.add('Path');continue
+        if (isinstance(statement,ast.Import) and statement.names
+                and all(name.name in {'hashlib','subprocess'} and name.asname is None for name in statement.names)):
+            imports.update(name.name for name in statement.names);continue
+        if (isinstance(statement,ast.Assign) and len(statement.targets)==1
+                and isinstance(statement.targets[0],ast.Name)):
+            name=statement.targets[0].id
+            if name in {'Path','hashlib','subprocess','print','len','repr','all'} or name in bindings:return []
+            value=kind(statement.value)
+            if value is None:return []
+            bindings[name]=value;continue
+        if isinstance(statement,ast.Expr) and isinstance(statement.value,ast.Call):
+            call=statement.value
+            if (isinstance(call.func,ast.Name) and call.func.id=='print'
+                    and call.args and not call.keywords
+                    and all(kind(arg) in {'text','bytes','int','bool','lines'} for arg in call.args)):
+                printed=True;continue
+        return []
+    return sorted(paths) if printed and len(paths)==1 else []
+
+
 def coordinator_source_read(tool,arguments):
     """Recognize a single bounded read command used for a user-provided source."""
     if tool == 'read_file':
@@ -2211,25 +2343,29 @@ def coordinator_source_read(tool,arguments):
     if tool!='exec_command':return False
     try:command=json.loads(arguments).get('cmd')
     except (AttributeError,ValueError):
-        match=re.search(r'(?:["\']cmd["\']|\bcmd)\s*:\s*(["\'])(.*?)\1',arguments,re.S)
-        command=match.group(2) if match else None
+        command=shell_command_text(arguments)
     if not isinstance(command,str):return False
+    if python_skill_read_paths(command):
+        return True  # Closed one-literal-path read grammar; path policy still applies.
+    if python_artifact_read_paths(command):
+        return True
     status_envelope=re.fullmatch(
         r'(.+?);\s*([A-Za-z_][A-Za-z0-9_]*)=\$\?;\s*(.+);\s*exit \$\2',command)
     if status_envelope and status_envelope[2] not in {'HOME','PATH','CODEX_HOME','SHELL','IFS','ENV','BASH_ENV'}:
         command=status_envelope[1]+'; '+status_envelope[3]
-    if re.search(r'[`$\n\r]',command):return False
+    if re.search(r'[`$\r]',command):return False
     try:
-        lexer=shlex.shlex(command,posix=True,punctuation_chars=';&|<>')
+        lexer=shlex.shlex(command,posix=True,punctuation_chars=';&|<>\n')
+        lexer.whitespace=' \t'
         lexer.whitespace_split=True;lexer.commenters=''
         shell_tokens=list(lexer)
     except ValueError:return False
     groups=[];tokens=[]
     for token in shell_tokens:
-        if token in {'&&','||',';','|'}:
+        if token in {'&&','||',';','|'} or token and not token.strip('\n'):
             if not tokens:return False
             groups.append(tokens);tokens=[]
-        elif token and all(char in ';&|<>' for char in token):
+        elif token!='<' and token and all(char in ';&|<>\n' for char in token):
             return False  # Redirection, background dispatch or unsupported syntax.
         else:tokens.append(token)
     if not tokens:return False
@@ -2242,6 +2378,13 @@ def _coordinator_read_tokens(tokens):
     """Closed read/compare command set; shell syntax was parsed separately."""
     if not tokens:return False
     if any(token in {'&&','||','&'} for token in tokens):return False
+    if '<' in tokens:
+        if (tokens.count('<')!=1 or tokens.index('<')!=len(tokens)-2
+                or tokens[0] not in {'cat','wc','head','tail','sha256sum'}
+                or not tokens[-1] or tokens[-1].startswith('-')):
+            return False
+        tokens=tokens[:-2]+tokens[-1:]
+    if tokens in (['set','-o','pipefail'],['exit','0']):return True
     if tokens[0]=='PYTHONDONTWRITEBYTECODE=1':tokens=tokens[1:]
     if not tokens:return False
     if tokens[:2] in (['git','status'],['git','diff'],['git','log'],['git','show']):
@@ -2405,6 +2548,18 @@ def event_call_candidate(candidates,event_time_ns,report_id=None,event=None):
                    if candidate.get('canonical_call_key')==event_key]
             if len(keyed)==1:
                 return keyed[0]
+            if operation=='read_report' and len(keyed)>1:
+                # Pages share a report identity. Match only an unpaired exact-key
+                # call whose observed interval contains this event; concurrent
+                # or duplicate intervals remain ambiguous, never timing guesses.
+                within=[]
+                for candidate in keyed:
+                    if candidate.get('server_observed'):continue
+                    start=ns(candidate.get('timestamp'))
+                    end=ns(candidate.get('completed_timestamp'))
+                    if start is not None and end is not None and start<=event_time_ns<=end:
+                        within.append(candidate)
+                return within[0] if len(within)==1 else None
             # A server event that carries a semantic key cannot be attached to
             # a different receipt by timing alone.
             return None
@@ -2760,6 +2915,10 @@ def observed_tool_calls(state):
                     if no_match:
                         row['semantic_result']='no_match'
                         row['semantic_nonfailure']=True
+                    elif semantic_absent_path(intent_source,exit_code,
+                                              item.get('aggregated_output'),item.get('stderr')):
+                        row['semantic_result']='predicate_false'
+                        row['semantic_nonfailure']=True
                     origin=local_http_origin(intent_source)
                     if origin:row['local_http_origin']=origin
                     if isinstance(exit_code,int):row['exit_code']=exit_code
@@ -3083,7 +3242,7 @@ def observed_tool_calls(state):
                     and candidate.get('intent_digest')==row.get('intent_digest')
                     and start<=order(candidate)<=end]
         if len(executions)==1 and executions[0].get('semantic_nonfailure'):
-            row['semantic_result']='no_match'
+            row['semantic_result']=executions[0]['semantic_result']
             row['semantic_nonfailure']=True
         if (len(executions)==1 and row.get('bounded_metadata_observed') is True
                 and row.get('active_coordinator_skill_read') is True
@@ -3097,7 +3256,7 @@ def observed_tool_calls(state):
                         'path_access_kind','path_policy_decision'):
                 if key in row:executions[0][key]=row[key]
     semantic_no_match_wrappers={
-        (row.get('thread_id'),row.get('wrapper_argument_digest'),row.get('timestamp'))
+        (row.get('thread_id'),row.get('wrapper_argument_digest'),row.get('timestamp')):row['semantic_result']
         for row in ordered if row.get('tool')=='exec_command'
         and row.get('semantic_nonfailure') and row.get('wrapper_argument_digest')
     }
@@ -3105,7 +3264,8 @@ def observed_tool_calls(state):
         if (row.get('tool')=='functions.exec'
                 and (row.get('thread_id'),row.get('argument_digest'),row.get('timestamp'))
                 in semantic_no_match_wrappers):
-            row['semantic_result']='no_match'
+            row['semantic_result']=semantic_no_match_wrappers[
+                (row.get('thread_id'),row.get('argument_digest'),row.get('timestamp'))]
             row['semantic_nonfailure']=True
     return completed_assignment_snapshots(prior_assignments)+ordered
 
@@ -3185,7 +3345,7 @@ def classify_host_failures(rows):
               and terminal_sessions.intersection(row.get('session_ids',[]))):
             later_success.add(key)
         elif effective_outcome in {'error','truncated','unverified','pending'}:
-            if row.get('semantic_nonfailure') and row.get('semantic_result')=='no_match':
+            if row.get('semantic_nonfailure') and row.get('semantic_result') in {'no_match','predicate_false'}:
                 continue
             failure_row=dict(row)
             if effective_outcome!=row.get('outcome'):
@@ -3214,7 +3374,7 @@ def tool_error_history(rows):
     for row in rows:
         outcome=row.get('wrapper_outcome') if row.get('wrapper_outcome')=='error' else row.get('outcome')
         if outcome!='error':continue
-        if row.get('semantic_nonfailure') and row.get('semantic_result')=='no_match':continue
+        if row.get('semantic_nonfailure') and row.get('semantic_result') in {'no_match','predicate_false'}:continue
         identity=(row.get('timestamp'),row.get('thread_id'),row.get('tool'),row.get('argument_digest'))
         if identity in intentional_stops:continue
         history.append({key:row.get(key) for key in (
@@ -3324,13 +3484,16 @@ def desktop_supported_outcome_receipt(rows, state, *, open_sessions, open_cells)
     expected=state.get('desktop_expected_artifact')
     if not (isinstance(expected,dict) and set(expected)=={'path','sha256'}
             and isinstance(expected.get('path'),str)
-            and expected['path']=='RESULT.md'
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',expected['path'])
             and isinstance(expected.get('sha256'),str)
             and re.fullmatch(r'[0-9a-f]{64}',expected['sha256'])):
         return None,'desktop_expected_artifact_missing'
     workdir=Path(state.get('workdir',''))
     try:
-        root=workdir.resolve(strict=True);artifact=(root/expected['path']).resolve(strict=True)
+        root=workdir.resolve(strict=True)
+        leaf=root/expected['path']
+        if leaf.is_symlink():return None,'desktop_expected_artifact_missing'
+        artifact=leaf.resolve(strict=True)
     except (OSError,ValueError):
         return None,'desktop_expected_artifact_missing'
     if artifact.parent!=root or not artifact.is_file() or artifact.is_symlink():
@@ -4574,6 +4737,7 @@ def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action',required=True)
     s=sub.add_parser('start');s.add_argument('--workdir',type=Path,required=True);s.add_argument('--prompt-file',type=Path)
     s.add_argument('--expected-result-sha256')
+    s.add_argument('--expected-result-path',default='RESULT.md')
     s=sub.add_parser('steer');s.add_argument('--prompt-file',type=Path,required=True);s.add_argument('--composer-x',type=int,required=True);s.add_argument('--composer-y',type=int,required=True)
     sub.add_parser('status');sub.add_parser('send');e=sub.add_parser('events');e.add_argument('--limit',type=int);h=sub.add_parser('hooks');h.add_argument('--limit',type=int);c=sub.add_parser('calls');c.add_argument('--limit',type=int);sub.add_parser('usage');sub.add_parser('audit');sub.add_parser('stop')
     args=p.parse_args();private();state_file=STATE/'session.json'
@@ -4597,6 +4761,8 @@ def main():
             if not prompt:raise RuntimeError('prompt file must not be empty')
         if args.expected_result_sha256 is not None and not re.fullmatch(r'[0-9a-f]{64}',args.expected_result_sha256):
             raise RuntimeError('expected RESULT.md SHA-256 must be 64 lowercase hexadecimal characters')
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',args.expected_result_path):
+            raise RuntimeError('expected result must be one regular filename in the project root')
         log=STATE/'desktop.log'
         fd=os.open(log,os.O_CREAT|os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW,0o600)
         isolated_config=configure_workspace_network()
@@ -4613,7 +4779,7 @@ def main():
         state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),started_monotonic=time.monotonic(),trial_started_at=time.time(),profile=str(profile),events=str(events),store=str(store),workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
         if args.expected_result_sha256 is not None:
             state.update(qualification_route=DESKTOP_CURRENT_HOST_ROUTE,
-                         desktop_expected_artifact={'path':'RESULT.md','sha256':args.expected_result_sha256})
+                         desktop_expected_artifact={'path':args.expected_result_path,'sha256':args.expected_result_sha256})
         if prompt is not None:
             state['original_request_sha256']=original_request_digest(prompt)
             state['desktop_editor_source_sha256']=original_request_digest(desktop_editor_source(prompt))

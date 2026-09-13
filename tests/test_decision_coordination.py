@@ -15,6 +15,53 @@ def row(tool, thread='worker', role='backend_dev', **fields):
     return dict(tool=tool, thread_id=thread, role=role, outcome='success') | fields
 
 
+def test_coordinator_python_reconciliation_is_closed_read_only_grammar():
+    import shlex
+    parse=OBSERVER['python_artifact_read_paths']
+    program=('from pathlib import Path; b=Path("RESULT.md").read_bytes(); '
+             'print(repr(b)); print("lines", len(b.splitlines()), '
+             '"ends_newline", b.endswith(b"\\n"), "exact", b == b"ok\\n")')
+    command='python3 -c '+shlex.quote(program)
+    assert parse(command)==['RESULT.md']
+    assert 'coordinator_forbidden_tool' not in OBSERVER['call_policy_flags'](
+        'exec_command',json.dumps({'cmd':command}),'coordinator','/tmp/project')
+    hashing=('from pathlib import Path; import hashlib; p=Path("RESULT.md"); '
+             'b=p.read_bytes(); print(hashlib.sha256(b).hexdigest())')
+    assert parse('python3 -B -c '+shlex.quote(hashing))==['RESULT.md']
+    for unsafe in (
+        program+'; Path("RESULT.md").write_bytes(b"oops")',
+        program.replace('"RESULT.md"','"../RESULT.md"'),
+        program.replace('"RESULT.md"','"/tmp/RESULT.md"'),
+        program.replace('"RESULT.md"','".codex/cortex/private"'),
+        'import os; '+program,
+        'from pathlib import Path; print(__import__("os").system("id"))',
+        'from pathlib import Path; Path=print; print(Path("RESULT.md"))',
+        'from pathlib import Path; print=Path("RESULT.md").write_text; print("x")',
+        program+'; print(Path("another.md").read_text())',
+        program.replace('read_bytes()', 'unlink()'),
+        'from pathlib import Path; print(Path(input()).read_text())',
+    ):
+        assert parse('python3 -c '+shlex.quote(unsafe))==[]
+    assert parse(command+'; touch another.md')==[]
+    desktop=('from pathlib import Path\nimport hashlib, subprocess\np=Path("RESULT.md")\n'
+             'b=p.read_bytes()\nprint(hashlib.sha256(b).hexdigest())\n'
+             'print(b.splitlines(keepends=True))\n'
+             'print(all(line.endswith(b"\\n") for line in b.splitlines(keepends=True)))\n'
+             'print(subprocess.run(["git","diff","--quiet","--","dispatch/options.py"]).returncode)')
+    envelope="python3 - <<'PY'\n"+desktop+'\nPY'
+    assert parse(envelope)==['RESULT.md']
+    for unsafe in (
+        envelope.replace('"diff","--quiet","--"','"reset","--hard","--"'),
+        envelope.replace('"dispatch/options.py"','"../private"'),
+        envelope.replace('keepends=True','keepends=__import__("os").system("id")'),
+        envelope.replace('line.endswith(b"\\n")','__import__("os").system("id")'),
+        envelope.replace('for line in','for Path in'),
+        envelope+'\ntouch another.md',
+        envelope.replace("<<'PY'",'<<PY'),
+    ):
+        assert parse(unsafe)==[]
+
+
 def published():
     return [row('mcp__cortex__write_report', parent_thread_id='parent', report_id='r_000000000001'),
             row('native_agent_result', parent_thread_id='parent', report_id='r_000000000001', timestamp='2')]
@@ -153,6 +200,14 @@ def test_coordinator_can_read_needed_evidence_pages_and_user_sources():
 
 def test_compound_source_reads_are_not_mistaken_for_mutations():
     check=OBSERVER['coordinator_source_read']
+    quoted = '{cmd:' + json.dumps('rg -n "first|second" scripts/example.py') + ',max_output_tokens:4000}'
+    assert check('exec_command', quoted)
+    unsafe = '{cmd:' + json.dumps('rg -n "first|second" scripts/example.py > changed') + '}'
+    assert not check('exec_command', unsafe)
+    checks = "set -o pipefail\nnl -ba note.md\nwc -l < note.md\nsha256sum note.md\ngit diff --stat -- source.py\nexit 0"
+    assert check('exec_command',json.dumps({'cmd':checks}))
+    assert not check('exec_command',json.dumps({'cmd':checks.replace('< note.md','> note.md')}))
+    assert not check('exec_command',json.dumps({'cmd':checks.replace('exit 0','touch changed')}))
     for command in (
         "sed -n '1,240p' README.md && printf '\\n--- input ---\\n' && sed -n '1,240p' EXPECTED.txt && printf 'files' && rg --files",
         "sed -n '1,240p' pipeline.md && rg -n '\\{\\{|<!--' pipeline.md || true",
@@ -269,7 +324,7 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
     for value in negatives:
         args=json.dumps({'cmd':value})
         assert not OBSERVER['skill_instruction_read']('exec_command',args)
-    assert 'coordinator_forbidden_tool' in check(
+    assert 'coordinator_forbidden_tool' not in check(
         'exec_command',json.dumps({'cmd':command(tmp_path/'project.txt')}),'coordinator','/fixture')
     assert 'forbidden_plugin_or_cache_access' in check(
         'exec_command',json.dumps({'cmd':negatives[1]}),'general','/fixture')
@@ -295,6 +350,8 @@ def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monke
         assert 'coordinator_forbidden_tool' not in flags
 
     valid=command(skill)
+    assigned=valid.replace('print(Path(', 'p=Path(').replace(').read_text())', '); print(p.read_text())')
+    assert OBSERVER['python_skill_read_paths'](assigned)==[skill]
     raw_wrapper=('const result = await tools.exec_command({cmd:'+json.dumps(valid)
                  +',workdir:"/fixture",yield_time_ms:10000}); text(result);')
     assert OBSERVER['shell_command_text'](raw_wrapper)==valid
@@ -307,7 +364,8 @@ def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monke
         valid.replace('.read_text()', '.write_text("changed")'),
         valid+'; touch /tmp/changed',
         valid.replace('print(Path(', 'print(open("/tmp/other").read() + Path('),
-        valid.replace('print(Path(', 'p=Path(').replace(').read_text())', '); print(p.read_text())'),
+        assigned.replace('p=Path(', 'print=Path('),
+        assigned.replace('print(p.read_text())', 'print(p.write_text("changed"))'),
     )
     for value in negatives:
         arguments=json.dumps({'cmd':value})

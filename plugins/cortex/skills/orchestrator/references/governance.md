@@ -8,7 +8,8 @@ on assignments/checks in the pipeline, not a decorative mode label.
 
 - `minimal`: narrow low-risk work, the smallest sufficient specialist set and
   focused checks; one native executor is acceptable when independent acceptance is
-  not required. The coordinator does not replace that executor for project writes.
+  not required. The coordinator does not replace that executor for code discovery
+  or project writes; a read-only question still needs its specialist owner.
 - `light`: examine affected components and regression risks; use an independent
   reviewer/verifier for a nontrivial change, and research only a concrete uncertainty.
 - `full`: cover the consequential end-to-end path, separate uncertain diagnosis

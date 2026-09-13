@@ -514,6 +514,10 @@ per-tool filter or shadow the provider.
 
 ## Preferred worker route: Codebase Memory MCP
 
+Coordinators read bounded evidence for decisions; specialists own unknown-code
+discovery. Do not duplicate their investigation. Unavailable or unsuitable graph
+coverage permits a documented native fallback, never a runtime veto.
+
 A known filename or symbol does not establish its implementation: workers resolve
 unknown code through Codebase Memory first, including in small repositories. Retained
 current source and purely non-code text edits do not need redundant graph discovery.
@@ -911,18 +915,21 @@ is registration metadata and must not be treated as an unfilled guidance marker.
 ### Adaptive model policy
 
 Preserve the user's coordinator model and effort. Worker routing follows an explicit
-policy: Luna (`gpt-5.6-luna`) is the default and priority model for ordinary work,
-including all research, exploration and analysis assignments, at `medium`, `high`,
-`xhigh` or `max`. Terra (`gpt-5.6-terra`) is reserved for work explicitly
-classified as complex, at `medium`, `high` or `xhigh`. Sol (`gpt-5.6-sol`) is
-reserved for narrow security-analysis microtasks at `medium`, `high` or `xhigh`;
-it is never selected for implementation merely because the task concerns security.
-Security-related implementation uses Luna or Terra.
+policy: Luna (`gpt-5.6-luna`) at `medium/high` owns fact gathering, exploration,
+known checks, ordinary implementation and plans of known steps. Terra
+(`gpt-5.6-terra`) at `medium/high` handles coupled implementation and complex
+ordinary review. Sol (`gpt-5.6-sol`) `medium` handles consequential architectural,
+contract, migration and planning decisions; `high` handles conflicting requirements,
+difficult rollback, data-loss or security-boundary risk. Astra (`gpt-6-astra`)
+is only `medium`, for exceptional consequential system decisions with a concrete
+reason Sol is insufficient. Role names, timeouts and production labels alone never
+raise the model. Sol/Astra consume bounded evidence gathered by Luna; implementation
+returns to Luna/Terra. These are advisory model-selection rules, not runtime gates.
 
 The opt-in `senior_consultant` route answers one bounded coordinator question from
 selected published reports. Standard consultation is Sol (`gpt-5.6-sol`) at
-`medium`; narrow and harder questions use Sol `low` and `high` respectively.
-`gpt-6-astra` at `low`, `medium` or `high` is reserved for a justified deeper
+`medium`; narrow questions stay `medium`, harder questions use `high`.
+`gpt-6-astra` only at `medium` is reserved for a justified deeper
 escalation after Sol evidence remains unresolved. The consultant cannot read
 project sources or indexes, run commands/tests/network/environment checks, edit
 project files, launch agents, accept tasks, or alter the coordinator plan. Its only
@@ -1051,9 +1058,8 @@ launching Electron.
 ```
 
 The interactive CLI driver exposes the same complete observation gates. Its
-ordinary graph-disabled mode suppresses an inherited complete optional
-`codebase_memory` entry in the disposable profile; it leaves absent or incomplete
-entries untouched and never changes the stable profile:
+default preserves the isolated `codebase_memory` configuration, including explicit
+opt-out. Neither helper silently disables the graph nor changes the stable profile:
 `./scripts/cortex-live-smoke calls` and `./scripts/cortex-live-smoke audit`.
 Run both before accepting or stopping a live session.
 

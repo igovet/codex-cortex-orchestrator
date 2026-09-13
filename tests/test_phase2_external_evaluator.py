@@ -35,8 +35,8 @@ def _native_turn(thread_id: str = "thread-current", control: str = "1" * 64,
 def test_phase2_identity_lock_matches_current_plugin_manifest():
     manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
     expected_version = manifest["version"]
-    expected_payload_sha256 = "5fc202ee9d2fc515226c0c01fcabd5c0619e51fefa3f710d9c4464b58354519b"
-    assert expected_version == "1.15.9+codex.sha256.5fc202ee9d2fc515"
+    expected_payload_sha256 = "302595ca1be50369d49bdec575dfb5eb85f31a62de11812baedbbdf6b696c7f6"
+    assert expected_version == "1.15.9+codex.sha256.302595ca1be50369"
     assert expected_version == phase2_cli_runner.CANDIDATE_VERSION
     assert expected_version == phase2_cli_auditor.CANDIDATE_VERSION
     assert expected_payload_sha256 == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
@@ -59,7 +59,7 @@ def test_phase2_live_harness_trusted_anchors_match_current_source():
     assert {phase2_cli_runner.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
-                "5bcbe9fe84cad990403447cf6ff53bf73728a8c04acc690fb3134788bf58f056"
+                "6f672d5ca2acb54efc033e2151ec6981217ffbc15ad337fd9d0165482f360e80"
             }
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_auditor.EVIDENCE_COLLECTION
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_adapter.EVIDENCE_CONTRACT

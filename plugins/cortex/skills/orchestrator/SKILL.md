@@ -24,10 +24,12 @@ Use the user's language for conversation and English for internal handoffs.
    Separate investigation, implementation and independent acceptance by need and
    risk. Developer self-tests are not independent review.
 3. Before a patch, select a discriminating check and map the affected path through
-   the user boundary. Even at minimal depth, delegate product changes to a native
-   worker. The coordinator reads evidence and edits only its issued pipeline draft.
-4. Verify the relevant boundary and execute authorized transitions. Reuse unchanged
-   evidence; record the new evidence or reason before repeating a check or rollout.
+   the user boundary. Delegate discovery AND requested files (notes included) in
+   one complete assignment; apply [routing](references/worker-routing.md). Return
+   missing output to that worker; never create it yourself. Edit only pipeline drafts.
+4. Await the specialist report before checking its cited source. Do not search the
+   same code in parallel. Reconcile files with bounded cat/sed/sha256sum reads;
+   justify repeated checks with new evidence.
 5. Accept an observed user outcome. Distinguish implemented, committed, pushed,
    deployed and accepted. CI, reports and commands prove only their own boundary.
 
@@ -58,15 +60,15 @@ The Cortex server exposes tools, not MCP resources: do not use `resources/list`
 or `read_mcp_resource` to fetch skills or reports. Load linked instruction files
 with a bounded literal read; fetch reports with the public report tools.
 
-Obtain tool contracts only from advertised
-schemas. Never guess IDs or inspect private storage. Forward complete command
+Use only advertised tool schemas and code-mode globals (no Node.js crypto).
+Never guess IDs or inspect private storage. Forward complete command
 results, including exit status or running session handles. Read bounded evidence
 pages as far as a decision requires.
 
 Keep one newest-first `pipeline.md`. Update it when outcome, scope, causal model,
 artifact revision, safety posture or rollback strategy changes. Worker completion,
 review delivery, unchanged waits and small clarifications alone need no edition.
-Preserve older editions below; incidents aim for five decision-bearing editions.
+Preserve older editions below.
 
 Keep the incident brief inside the current pipeline. Preserve implementation_state,
 delivery_state and acceptance_state and the existing delivery_state,
@@ -107,5 +109,4 @@ failure class invalidates the ETA; replan before estimating again.
 - Consequential independent decision: [senior consultation](references/senior-consultation.md).
 - Interrupted publication: [pipeline publication](references/pipeline-publication.md).
 
-Keep active owners and required checks visible. Reconcile actual outcomes before
-final acceptance; unavailable capabilities or evidence remain explicit limitations.
+Reconcile actual outcomes; disclose gaps.

@@ -153,7 +153,8 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     assert 'Never probe required\nfields with an empty argument object' in publication
     assert 'Omit `request_key` for' not in publication
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Even at minimal depth, delegate product changes to a native\n   worker.' in orchestrator
+    assert 'Delegate discovery AND requested files (notes included)' in orchestrator
+    assert 'missing output to that worker; never create it yourself' in orchestrator
     pipeline_publication=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
     assert 'When a pipeline mutation schema requires `request_key`' in pipeline_publication
     assert 'ordered `replaceable_markers` list as authoritative' in pipeline_publication
@@ -240,8 +241,8 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert companion < 27_500
     assert len(orchestrator) < 6500
     routing = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
-    assert 'Ordinary work defaults to `gpt-5.6-luna`' in routing
-    assert 'Sol is never an implementation route' in routing
+    assert '`gpt-5.6-luna` at `medium` or `high`' in routing
+    assert 'implementation returns to Luna/Terra' in routing
     assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
 
 
@@ -601,6 +602,28 @@ def test_observer_attributes_compound_command_failure_to_shell_named_executable(
             "error_code": "command_exit_2", "argument_digest": "real"}]
 
 
+def test_unary_path_predicate_false_is_observed_without_granting_acceptance():
+    observer = runpy.run_path(str(ROOT / "scripts/cortex-desktop-dev"))
+    check = observer["semantic_absent_path"]
+    assert check("test -e RESULT.md", 1, "", "")
+    assert check("test -f docs/result.md", 1, "", "")
+    for cmd in ("test", "test -e", "test -x RESULT.md", "test -e $TARGET",
+                "test -e RESULT.md; false", "test -e RESULT.md || true",
+                "test -e RESULT.md\nfalse", "test -e $(touch x)"):
+        assert not check(cmd, 1, "", "")
+    assert not check("test -e RESULT.md", 2, "", "")
+    assert not check("test -e RESULT.md", 1, "", "Permission denied")
+    raw = {"thread_id": "worker", "tool": "command_execution", "outcome": "error",
+           "exit_code": 1, "error_code": "command_exit_1", "argument_digest": "predicate",
+           "semantic_result": "predicate_false", "semantic_nonfailure": True}
+    assert observer["classify_host_failures"]([raw]) == ([], [])
+    assert observer["tool_error_history"]([raw]) == []
+    assert raw["exit_code"] == 1 and raw["outcome"] == "error"
+    receipt, reason = observer["desktop_supported_outcome_receipt"](
+        [raw], {}, open_sessions=[], open_cells=[])
+    assert receipt is None  # A negative observation is never task/artifact evidence.
+
+
 def test_baseline_identity_and_graph_disabled_launcher_omit_invalid_transport():
     import runpy
     import cortex_eval
@@ -632,7 +655,7 @@ def test_graph_enabled_launcher_retains_explicit_complete_server_override():
     assert 'mcp_servers.node_repl.enabled=false' not in overrides
 
 
-def test_graph_disabled_launcher_disables_existing_complete_server(monkeypatch, tmp_path):
+def test_default_launcher_preserves_existing_graph_configuration(monkeypatch, tmp_path):
     import runpy
 
     owner = tmp_path/'owner'
@@ -653,7 +676,7 @@ def test_graph_disabled_launcher_disables_existing_complete_server(monkeypatch, 
                                     configured)
     overrides = [value for index, value in enumerate(command)
                  if index and command[index - 1] == '-c']
-    assert 'mcp_servers.codebase_memory.enabled=false' in overrides
+    assert not any(value.startswith('mcp_servers.codebase_memory.') for value in overrides)
     config.unlink()
     assert cli['isolated_codebase_memory_configured']() is False
     command = cli['launch_command'](Path('/tmp/private-events'), False,
@@ -663,14 +686,16 @@ def test_graph_disabled_launcher_disables_existing_complete_server(monkeypatch, 
     assert 'mcp_servers.codebase_memory.enabled=false' not in overrides
 
 
-def test_desktop_graph_disabled_config_disables_only_complete_server():
+def test_desktop_config_preserves_graph_availability():
     import runpy
     import tomllib
 
     desktop = runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'), run_name='observer')
     config = '[mcp_servers.codebase_memory]\nenabled = true\ncommand = "/bin/codebase-memory-mcp"\n'
     parsed = tomllib.loads(desktop['live_test_config'](config))
-    assert parsed['mcp_servers']['codebase_memory']['enabled'] is False
+    assert parsed['mcp_servers']['codebase_memory']['enabled'] is True
+    disabled = config.replace('enabled = true', 'enabled = false')
+    assert tomllib.loads(desktop['live_test_config'](disabled))['mcp_servers']['codebase_memory']['enabled'] is False
 
     absent = tomllib.loads(desktop['live_test_config']('model = "x"\n'))
     assert 'mcp_servers' not in absent
@@ -678,6 +703,23 @@ def test_desktop_graph_disabled_config_disables_only_complete_server():
     incomplete = '[mcp_servers.codebase_memory]\nenabled = true\n'
     parsed = tomllib.loads(desktop['live_test_config'](incomplete))
     assert parsed['mcp_servers']['codebase_memory']['enabled'] is True
+
+
+def test_explicit_dev_graph_opt_in_preserves_other_settings():
+    import runpy
+    import tomllib
+    enable = runpy.run_path(str(ROOT/'scripts/cortex_dev_config.py'))['enable_configured_graph']
+    source = ('model = "kept"\n[mcp_servers.codebase_memory]\n'
+              'command = "/bin/memory"\nenabled = false\n'
+              '[mcp_servers.other]\nenabled = false\nurl = "http://localhost"\n')
+    changed = enable(source)
+    assert changed == source.replace('command = "/bin/memory"\nenabled = false',
+                                     'command = "/bin/memory"\nenabled = true')
+    assert enable(changed) == changed
+    assert enable('model = "kept"\n') == 'model = "kept"\n'
+    assert enable('[mcp_servers.codebase_memory]\nenabled = false\n') == '[mcp_servers.codebase_memory]\nenabled = false\n'
+    implicit = '[mcp_servers.codebase_memory]\nurl = "http://localhost"\n'
+    assert tomllib.loads(enable(implicit))['mcp_servers']['codebase_memory']['enabled'] is True
 
 
 def test_isolated_launchers_force_bytecode_suppression_over_ambient_value(monkeypatch, tmp_path):
@@ -1229,7 +1271,8 @@ def test_cli_start_postcommit_failure_marks_store_unusable_consumes_control_and_
         cli['start'](args.__class__(**{**args.__dict__, 'workdir': clean}))
 
 
-def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize('fresh_store', [True, False])
+def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, monkeypatch, fresh_store):
     import hashlib
     import runpy
     from types import SimpleNamespace
@@ -1259,33 +1302,35 @@ def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, mon
         return SimpleNamespace(returncode=0, stdout='')
     monkeypatch.setitem(globals_, 'tmux', fake_tmux)
     monkeypatch.setitem(globals_, '_proc_start_ticks', lambda pid: 70070)
-    args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=True,
+    args = SimpleNamespace(workdir=project, resume_last=False, evaluation_fresh_store=fresh_store,
                            model=None, effort=None, codebase_memory=False, apps_enabled=False,
+                           bootstrap_route='mcp-first',
                            host_dispatch_capability=cli['HOST_DISPATCH_ENVELOPE_CAPABILITY'])
     cli['start'](args)
     started_state = json.loads((tmp_path/'cli-state'/'session.json').read_text())
+    assert started_state['bootstrap_route'] == 'current_host_mcp_first'
+    assert started_state['host_enforcement_state'] == 'unverified'
     binding = json.loads(Path(started_state['session_binding_path']).read_text())
     assert started_state['session_receipt'] == binding['session_receipt']
     assert binding['schema_version'] == 'cortex-live-session-binding-v1'
     assert binding['control_record_sha256'] is None
     assert any(call[0] == 'send-keys' for call in calls)
     creation_calls = [call for call in calls if call[0] == 'new-session']
-    assert len(creation_calls) == 2
-    assert creation_calls[0][:-2] == creation_calls[1][:-1]
-    assert creation_calls[0][-2:] == ('/bin/sleep', '30')
-    assert creation_calls[1][-1] == '/bin/bash'
+    assert len(creation_calls) == (2 if fresh_store else 1)
+    if fresh_store:
+        assert creation_calls[0][:-2] == creation_calls[1][:-1]
+        assert creation_calls[0][-2:] == ('/bin/sleep', '30')
+    assert creation_calls[-1][-1] == '/bin/bash'
     configuration_calls = [call for call in calls if call[0] == 'set-option']
-    assert configuration_calls == [
-        ('set-option', '-t', '$7', 'remain-on-exit', 'on'),
-        ('set-option', '-t', '$7', 'remain-on-exit', 'on'),
-    ]
+    assert configuration_calls == [('set-option', '-t', '$7', 'remain-on-exit', 'on')] * (2 if fresh_store else 1)
     assert all(call[2] == '=$7' for call in calls if call[0] == 'list-panes')
     assert all(call[call.index('-t') + 1] == '%7'
                for call in calls if call[0] in {'pipe-pane', 'send-keys'})
     assert not any('cortex-markdown-smoke:0.0' in call for call in calls)
     assert not (project/'.codex/cortex/phase2-launch-failure.json').exists()
-    marker = json.loads((project/'.codex/cortex/phase2-launch-transaction.json').read_text())
-    assert marker['status'] == 'launched'
+    if fresh_store:
+        marker = json.loads((project/'.codex/cortex/phase2-launch-transaction.json').read_text())
+        assert marker['status'] == 'launched'
     next_workdir = (tmp_path/'next-workdir').resolve(); next_workdir.mkdir()
     globals_['_refuse_failed_phase2_launch'](next_workdir)
 

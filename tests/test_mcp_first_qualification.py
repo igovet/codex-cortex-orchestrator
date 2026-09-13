@@ -243,6 +243,17 @@ def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_pat
     outcome, reason = OBSERVER["desktop_supported_outcome_receipt"](
         rows, data, open_sessions=[], open_cells=[])
     assert reason is None and outcome["status"] == "complete"
+    named = workdir/'cortex-discovery-proof.md'
+    named.write_bytes(artifact.read_bytes())
+    check_named = OBSERVER['desktop_supported_outcome_receipt']
+    for name, allowed in [('cortex-discovery-proof.md', True), ('../RESULT.md', False),
+                          (str(artifact), False), ('.hidden', False)]:
+        state = {**data, 'desktop_expected_artifact': {'path': name, 'sha256': digest}}
+        result, _ = check_named(rows, state, open_sessions=[], open_cells=[])
+        assert (result is not None) == allowed
+    link = workdir/'linked.md'; link.symlink_to(artifact)
+    state = {**data, 'desktop_expected_artifact': {'path': link.name, 'sha256': digest}}
+    assert check_named(rows, state, open_sessions=[], open_cells=[])[0] is None
     editions=[dict(row) for row in rows]
     editions[1]['draft_id']='d_initial'
     editions.append({**editions[1],'draft_id':'d_final'})
@@ -1161,6 +1172,10 @@ def test_current_host_functions_exec_static_read_transport_is_exact_for_coordina
             source = wrapper(f"cat {path}", binding)
             nested = OBSERVER["nested_tool_invocations"](source)
             assert OBSERVER["bounded_static_read_transport"](source, nested)
+            serialized=source.replace(f'text({binding});', f'text(JSON.stringify({binding}));')
+            assert OBSERVER['bounded_static_read_transport'](serialized, nested)
+            changed=source.replace(f'text({binding});', f'text(JSON.stringify({binding}.output));')
+            assert not OBSERVER['bounded_static_read_transport'](changed, nested)
             split=source.replace(f'text({binding});',
                 f'text({binding}.output); text(`exit_code=${{{binding}.exit_code}}`);')
             assert OBSERVER['bounded_static_read_transport'](split, nested)

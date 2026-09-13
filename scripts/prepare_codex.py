@@ -13,6 +13,16 @@ dev=owner/'.cortex-dev'
 if Path.home()!=dev or Path(os.environ['CODEX_HOME'])!=dev/'.codex' or owner.resolve()!=owner:
     raise SystemExit('Refusing a non-isolated Codex profile.')
 private_dir(dev);private_dir(dev/'.codex')
+if os.environ.get('CORTEX_DEV_CODEBASE_MEMORY') == '1':
+    from cortex_dev_config import enable_configured_graph
+    config_path = dev/'.codex/config.toml'
+    if config_path.is_symlink():
+        raise SystemExit('Unsafe isolated config.')
+    if config_path.is_file():
+        original = config_path.read_text()
+        updated = enable_configured_graph(original)
+        if updated != original:
+            config_path.write_text(updated)
 receipt_path=dev/'.codex/cortex-candidate.json'
 _assert_no_symlink_tree(dev/'.codex/plugins', label='isolated plugin cache')
 if receipt_path.is_symlink(): raise SystemExit('Unsafe candidate receipt.')

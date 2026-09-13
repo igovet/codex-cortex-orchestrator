@@ -1322,6 +1322,8 @@ def launch_command(events, resume_last, model, effort, apps_enabled, graph_enabl
     command=['env',*[part for key in scrub for part in ['-u',key]],
              'PYTHONDONTWRITEBYTECODE=1','CORTEX_OBSERVATION_DIR='+str(events),
              '/bin/bash',str(ROOT/'scripts/cortex-dev')]
+    if graph_enabled:
+        command.insert(command.index('/bin/bash'),'CORTEX_DEV_CODEBASE_MEMORY=1')
     if evaluation_workdir is not None:
         command.insert(command.index('/bin/bash'),
                        'CORTEX_DATA_DIR='+str(evaluation_storage_directory(evaluation_workdir)))
@@ -1332,13 +1334,10 @@ def launch_command(events, resume_last, model, effort, apps_enabled, graph_enabl
               '-c','developer_instructions='+json.dumps(LIVE_DEVELOPER_INSTRUCTIONS),
               '-c','features.multi_agent_v2=true','-c',
               'features.apps='+('true' if apps_enabled else 'false')]
-    # A disabled override creates an incomplete [mcp_servers.codebase_memory]
-    # table when the isolated baseline config has no server declaration. Keep
-    # the graph-disabled boundary by adding it only for an existing complete
-    # server entry; explicit graph qualification retains the existing override.
-    if graph_enabled or codebase_memory_configured:
-        command+=['-c','mcp_servers.codebase_memory.enabled='+
-                  ('true' if graph_enabled else 'false')]
+    # Preserve isolated availability by default; only explicit graph qualification
+    # overrides it. Never synthesize a disabled, incomplete transport table.
+    if graph_enabled:
+        command+=['-c','mcp_servers.codebase_memory.enabled=true']
     command+=['-c','sandbox_workspace_write.network_access=true']
     return command
 
@@ -1570,12 +1569,11 @@ def start(args):
     launch_stage = 'pre-commit'
     fresh_start = getattr(args,'evaluation_fresh_store',False) and not args.resume_last
     bootstrap_metadata=None
-    if fresh_start:
-        if getattr(args,'bootstrap_route',None)=='mcp-first':
-            bootstrap_metadata=qualification_mcp_first_bootstrap(
-                args.bootstrap_route,getattr(args,'host_bootstrap_context',None))
-        else:
-            qualification_pre_task_containment(getattr(args,'host_dispatch_capability',None))
+    if getattr(args,'bootstrap_route',None)=='mcp-first':
+        bootstrap_metadata=qualification_mcp_first_bootstrap(
+            args.bootstrap_route,getattr(args,'host_bootstrap_context',None))
+    elif fresh_start:
+        qualification_pre_task_containment(getattr(args,'host_dispatch_capability',None))
     graph_enabled=False
     codebase_memory_configured=False
     command=None

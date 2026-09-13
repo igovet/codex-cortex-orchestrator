@@ -52,11 +52,11 @@ def test_consultant_observer_allows_only_report_protocol_tools():
 def test_consultation_model_classes_keep_sol_defaults_and_bound_astra_escalation():
     policy = OBSERVER["worker_model_policy"]
     assert policy("gpt-5.6-sol", "medium", "consultation") == []
-    assert policy("gpt-5.6-sol", "low", "consultation-narrow") == []
+    assert policy("gpt-5.6-sol", "medium", "consultation-narrow") == []
     assert policy("gpt-5.6-sol", "high", "consultation-hard") == []
-    assert policy("gpt-6-astra", "high", "consultation-deeper") == []
+    assert policy("gpt-6-astra", "medium", "consultation-deeper") == []
     assert policy("gpt-6-astra", "medium", "consultation") == ["worker_model_policy_violation"]
-    assert policy("gpt-5.6-sol", "medium", "consultation-narrow") == ["worker_model_policy_violation"]
+    assert "worker_model_policy_violation" in policy("gpt-5.6-sol", "low", "consultation-narrow")
 
 
 def test_consultant_assignment_metadata_is_native_and_does_not_change_main_model():

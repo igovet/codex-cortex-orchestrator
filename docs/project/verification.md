@@ -1,5 +1,73 @@
 # Verification
 
+## Decision routing and isolated project qualification — 2026-09-13
+
+The approved product matrix uses Luna medium/high for discovery and ordinary work,
+Terra medium/high for complex implementation/review, Sol medium/high for consequential
+decisions, and Astra medium only for exceptional system decisions. Assignments,
+steering, worker summaries and handoffs are English; user-facing coordinator prose
+and explicitly localized deliverables retain the requested language. The host does
+not expose a verifiable language guarantee for hidden reasoning. No runtime language
+or model gate is introduced.
+
+Real-host workloads now run in a separate disposable Git project, not the Cortex
+checkout. The initial isolated CLI completed graph-backed discovery, one worker
+report and exact output reconciliation. Its audit rejected a standalone `test -e`
+false predicate as a crash; the raw exit remains retained in sealed attempt
+`cdb0677306de3217ba3ce700a30194d5e0615fb44893199f12e8b946cb3d4ba4`.
+The observer now distinguishes a closed literal unary file predicate's false result
+from syntax/permission/execution failure, without granting task or artifact proof.
+Final payload `1.15.9+codex.sha256.302595ca1be50369` passed the focused real CLI
+first (133 host calls, 13 MCP events; sealed pre-stop bundle
+`d8d63933fb996007a3b8d364e193c25f1da3bd2e27ed8232850d7fad09eb6341`),
+then real Desktop in the separate disposable project on that unchanged payload
+(124 host calls, 16 MCP events). Both final audits printed
+`observational_accept` and exited 0, with no execution errors, policy violations,
+integrity invalidators or open work. Desktop root
+`01a09c70-bef8-7f10-b558-0b5d0efa1563` completed with one native explorer and a
+task-bound report; its exact artifact digest matched CLI. Both owned test sessions
+were stopped; stable user configuration and plugin installation were untouched.
+
+An earlier Desktop attempt's malformed patch remains a failed attempt. The final
+run was not restarted to repair observation: its successful read-only artifact
+check and completed worker lifecycle were reconciled from original evidence.
+The observer now excludes an explicitly foreign inherited session segment until
+the worker's exact `thread_settings_applied` identity resumes native events. A
+real later worker turn without completion still fails acceptance. Closed Python
+artifact reads and literal false file predicates grant no missing outcome proof.
+
+The full source suite passed 997 tests (eight existing aiohttp API-style warnings).
+Package validation and source-only sync passed. CLI worker messages and its 29
+visible reasoning summaries contained no Cyrillic; Desktop's three assistant
+messages contained no Cyrillic, while its reasoning summaries were not exposed.
+These are observed English communication checks, not proof of hidden reasoning.
+Codebase Memory discovery was observed in both environments. Heavy-model routing
+is covered by source tests, not live heavy-model runs: isolated qualification
+intentionally remains Luna-only. Unavailable host enforcement stays `unverified`.
+This result qualifies source; it does not claim commit, push or stable deployment.
+The following dated results are historical and do not supersede this result.
+
+## Discovery ownership follow-up — 2026-09-13
+
+Live workloads that produce only research/proof notes do not recursively launch
+release qualification. The outer change owner retains mandatory CLI-before-Desktop
+acceptance. A Desktop attempt exposed this recursion and a guessed draft path;
+neither error was reclassified as success. Draft paths must come from the public
+draft response, and full final-candidate qualification remains required.
+
+Candidate `1.15.9+codex.sha256.ab8de99d1d503c36` clarifies bounded coordinator
+evidence reads versus specialist discovery. CLI/Desktop helpers now preserve the
+isolated Codebase Memory configuration instead of silently disabling it. Package
+validation, source-only sync, 88 package tests and two live-config tests passed.
+Earlier graph-disabled live results below do not qualify this changed candidate
+or prove preferred graph routing. The real CLI attempt on this candidate failed
+audit (exit 1): an initial public create_task call errored before a later success,
+and coordinator documentation discovery received coordinator_forbidden_tool.
+The incomplete attempt was stopped with sealed pre-stop evidence
+`07515180c8311b2aa31f19d30634ceadc5b7e953db72d4bb9eb68419bd46d8fe`.
+Desktop was not started under CLI-first policy. Preferred graph routing and
+CLI/Desktop acceptance remain unverified; no runtime gate was added or relaxed.
+
 ## Current source qualification — 2026-09-13
 
 Payload `1.15.9+codex.sha256.5fc202ee9d2fc515` passed package validation,

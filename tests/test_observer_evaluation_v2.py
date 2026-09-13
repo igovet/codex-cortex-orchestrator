@@ -185,6 +185,21 @@ def test_desktop_observation_is_scoped_to_submitted_task_tree(tmp_path,monkeypat
     lifecycle('child-a','task_complete','child-turn')
     participants=OBSERVER['participant_token_usage'](state)['participants']
     assert accept({'status':'complete'},quality,participants)
+    # Desktop prefixes a child rollout with copied parent context. Its pending
+    # parent turn is not work owned by the child; explicit native settings resume
+    # the child's own lifecycle. A genuine later child turn must still block.
+    with paths['child-a'].open('a') as target:
+        for row in [
+            {'type':'session_meta','payload':{'id':'root-a'}},
+            {'type':'event_msg','payload':{'type':'task_started','turn_id':'inherited-parent'}},
+            {'type':'event_msg','payload':{'type':'thread_settings_applied','thread_id':'child-a'}},
+        ]: target.write(json.dumps(row)+'\n')
+    assert accept({'status':'complete'},quality,
+                  OBSERVER['participant_token_usage'](state)['participants'])
+    lifecycle('child-a','task_started','own-followup')
+    assert not accept({'status':'complete'},quality,
+                      OBSERVER['participant_token_usage'](state)['participants'])
+    lifecycle('child-a','task_complete','own-followup')
     assert not accept({'status':'complete'},dict(quality,quality_findings=[
         {'classification':'product_quality_outcome'}]),participants)
     lifecycle('root-a','task_started','followup')
@@ -614,6 +629,22 @@ def test_pipeline_editions_have_distinct_call_keys_and_sha256_prefix_is_normaliz
         'result':{'structuredContent':{'report_id':base['report_id'],
           'artifacts':[{'reference':'retry.py','version':'sha256:'+'a'*64}]}}})
     assert receipt['reported_artifact_bindings'][0][1]=='a'*64
+
+
+def test_report_pages_match_exact_identity_and_disjoint_intervals():
+    base=dict(thread_id='parent',tool='mcp__cortex__read_report',report_id='r_0123456789ab')
+    key=OBSERVER['canonical_mcp_call_key'](base)
+    first=dict(base,canonical_call_key=key,timestamp='2026-01-01T00:00:00Z',
+               completed_timestamp='2026-01-01T00:00:01Z')
+    second=dict(base,canonical_call_key=key,timestamp='2026-01-01T00:00:02Z',
+                completed_timestamp='2026-01-01T00:00:03Z')
+    event=dict(base,operation='read_report')
+    when=1767225600*1_000_000_000+500_000_000
+    choose=OBSERVER['event_call_candidate']
+    assert choose([first,second],when,event=event) is first
+    assert choose([first,dict(first)],when,event=event) is None
+    assert choose([first,second],when+1_000_000_000,event=event) is None
+    assert choose([first,second],when,event={**event,'report_id':'r_deadbeefdead'}) is None
 
 
 def test_publication_identity_ignores_nested_governance_but_not_conflicting_roots():

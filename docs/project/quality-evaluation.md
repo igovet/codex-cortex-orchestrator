@@ -299,10 +299,10 @@ python3 -B scripts/cortex_eval.py grade /tmp/cortex-trial-01
 ```
 
 For the graph-enabled route add `--codebase-memory` to CLI `start`. It enables only
-the already configured isolated MCP and persists across helper resume. Ordinary
-graph-disabled scenarios remain valid fallback checks: both isolated helpers
-disable an existing complete `codebase_memory` entry, while absent or incomplete
-entries receive no synthetic override. Desktop uses its isolated configuration;
+the already configured isolated MCP and persists across helper resume. By default,
+both isolated helpers preserve the graph configuration, including explicit opt-out;
+absent entries receive no synthetic override. A graph-disabled scenario tests only
+fallback, not preferred discovery. Desktop uses its isolated configuration;
 record the actual tool availability instead of assuming parity.
 For Desktop steering use the observed-composer procedure in
 [verification](verification.md); never treat a prepared prompt as submitted.
