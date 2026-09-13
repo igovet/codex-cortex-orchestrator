@@ -10,6 +10,10 @@
 
 <!-- Record exact commands, cwd, exit codes, decisive output, and manual observations. -->
 
+## Evidence identity and delivery state
+
+<!-- Record (artifact_revision, acceptance_boundary, check_identity), its observed receipt, and any new-evidence/rerun reason. Separate verification/implementation evidence, delivery receipts, and coordinator-owned acceptance. -->
+
 ## Failures and gaps
 
 <!-- Preserve nonzero results, unsupported environments, checks not run, and contradictions. -->

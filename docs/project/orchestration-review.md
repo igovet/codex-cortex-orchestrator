@@ -71,6 +71,17 @@ requirements, decisions, assignments and ownership state must exist before depen
 shared-resource or acceptance decisions; this is an outcome requirement rather than a
 mandatory initial publication stage.
 
+The P0/P1 evidence protocol keeps implementation, delivery, and coordinator acceptance
+as distinct model-owned states. Receipt-backed Git/CI/deployment/production claims name
+their exact artifact revision; immutable-report delivery does not establish acceptance.
+For consequential repeated live attempts, a context-selected cross-layer contract,
+failed-canary table, predecessor comparison, and discriminating check make changed
+causal assumptions reviewable. Material scope expansion and distinct failures receive
+outcome/scope or replan deltas. Review/verification reuse is keyed by
+`(artifact_revision, acceptance_boundary, check_identity)` and needs new evidence or a
+rerun reason when unchanged. This is evidence-shaping guidance, not a workflow engine,
+hook/server state machine, route selector, threshold, or approval mechanism.
+
 Real CLI/Desktop qualification must use one unchanged marketplace candidate and inspect
 both outcomes and full call evidence. See [host compatibility](host-compatibility.md),
 [comparison results](quality-evaluation.md) and [release readiness](../release-readiness.md).

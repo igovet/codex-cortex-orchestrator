@@ -46,8 +46,9 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     draft=call_store(store,'create_draft',dict(task_id=task,template='pipeline',request_key=key()))
     path=Path(draft['draft_path'])
     assert '{{CURRENT_WORK_GRAPH}}' in draft['markdown']==path.read_text()
-    assert draft['required_replacement_count']==6==len(draft['replaceable_markers'])
+    assert draft['required_replacement_count']==7==len(draft['replaceable_markers'])
     assert draft['replaceable_markers'][0]=='{{CURRENT_OBJECTIVE_AND_STATUS}}'
+    assert draft['replaceable_markers'][5].startswith('<!-- Record implementation_state')
     assert "Preserve its identity and first-line marker" in draft['edit_instruction']
     arguments=dict(task_id=task,title='Pipeline',summary='Current work is recorded.',
                    author='coordinator',draft_id=draft['draft_id'],request_key=key())
@@ -59,6 +60,7 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     assert error.received.startswith('{{CURRENT_')
     assert path.is_file()
     body=path.read_text()
+    body=body.replace(draft['replaceable_markers'][5], 'Complete current model-owned state and evidence reuse.')
     for placeholder in [part.split('}}',1)[0]+'}}' for part in body.split('{{')[1:]]:
         body=body.replace('{{'+placeholder,'Complete current information.')
     path.write_text(body)

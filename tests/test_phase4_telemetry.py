@@ -93,6 +93,20 @@ def test_reducer_deduplicates_response_ids_and_keeps_token_dimensions():
     assert all("thread_id" not in row for row in result["participants"])
     assert result["availability"]["codebase_memory"]["status"] == "unavailable"
     assert result["quality"] is None
+    assert result["orchestration_cost_signals"] == {
+        "rollout": None, "review": None, "recheck": None,
+        "delivery_error": None, "wait": None,
+    }
+
+
+def test_advisory_orchestration_cost_signals_are_bounded_and_null_safe():
+    signals = {"rollout": 1, "review": 2, "recheck": 3, "delivery_error": 0, "wait": 4}
+    result = TELEMETRY.aggregate_run(source_record(orchestration_cost_signals=signals))
+    assert result["orchestration_cost_signals"] == signals
+    with pytest.raises(TELEMETRY.TelemetryError, match="include every bounded signal"):
+        TELEMETRY.aggregate_run(source_record(orchestration_cost_signals={"wait": 1}))
+    with pytest.raises(TELEMETRY.TelemetryError):
+        TELEMETRY.aggregate_run(source_record(orchestration_cost_signals={**signals, "review": -1}))
 
 
 def test_missing_participants_are_null_not_zero():

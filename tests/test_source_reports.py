@@ -184,8 +184,15 @@ def test_removed_draft_id_marker_is_rejected(publication):
 def test_deleted_and_recreated_draft_is_rejected_even_with_exact_marker(publication):
     store,task,base,_=publication
     draft,source,complete=make_draft(store,task,'general','evidence','recreated')
+    original=source.stat()
     source.unlink()
+    # Force a distinct allocated identity before recreating the server path.
+    # The store's contract is physical in-place editing, not just matching
+    # Markdown bytes, so this avoids filesystem-dependent immediate inode reuse.
+    tombstone=source.with_name('.draft-recreation-tombstone')
+    tombstone.write_bytes(b'occupied replacement identity')
     source.write_bytes(complete)
+    assert source.stat().st_dev!=original.st_dev or source.stat().st_ino!=original.st_ino
     with pytest.raises(StoreError,match='draft_replaced'):
         publish(store,base,draft,key='recreated')
     assert source.read_bytes()==complete

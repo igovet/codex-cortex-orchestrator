@@ -7,7 +7,11 @@ import sqlite3
 import pytest
 
 from cortex_runtime.contracts import StoreError
-from cortex_runtime.execution_boundary import private_access_denied
+from cortex_runtime.execution_boundary import (
+    CAPABILITY_EXECUTE, CAPABILITY_INTERNAL, CAPABILITY_NOT_GRANTED,
+    PERMISSION_DENIED, authorize_pre_dispatch, capabilities_for_role,
+    private_access_denied,
+)
 from cortex_runtime.host_source import NativeSource
 from cortex_runtime.hook_storage import HookStorage
 from cortex_runtime.hooks import HookHandler, _response_shape, main, parse_patch, result_metadata
@@ -201,6 +205,45 @@ def test_private_execution_boundary_fixture_is_deny_only_and_sanitized(active):
                 assert str(root) not in json.dumps(blocked)
 
 
+def test_semantic_pre_dispatch_authorization_denies_before_dispatch_and_keeps_worker_actions(active):
+    _, _, handler, root = active
+    handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="build-verification"))
+    context = dict(actor_kind="native_worker", role="worker", task_id="task", assignment_id="receipt",
+                   route="native_hook", capabilities=capabilities_for_role("worker"), cwd=str(root),
+                   project_root=str(root))
+    assert authorize_pre_dispatch("exec_command", {"cmd":"python3 -B -m pytest"}, **context)["allowed"]
+    assert authorize_pre_dispatch("read_file", {"path":str(root / "artifact.txt")}, **context)["allowed"]
+    assert authorize_pre_dispatch("mcp__cortex__read_report", {}, **context)["allowed"]
+    missing = {key:value for key,value in context.items() if key != "capabilities"}
+    denied = authorize_pre_dispatch("exec_command", {"cmd":"true"}, **missing, capabilities=None)
+    assert denied == {"allowed":False,"code":PERMISSION_DENIED,
+                      "capability":CAPABILITY_EXECUTE,"reason":"missing_or_ambiguous_context"}
+    internal = authorize_pre_dispatch("exec_command", {"cmd":f"cat {root}/.codex/cortex/state"}, **context)
+    assert internal["allowed"] is False and internal["code"] == PERMISSION_DENIED
+    assert internal["capability"] == CAPABILITY_INTERNAL
+
+    allowed = handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="worker-run",
+                                   agent_id="child", tool_input={"cmd":"python3 -B -m pytest"}))
+    assert allowed == {}
+    for name, tool, tool_input, expected_code in (
+        ("coordinator-cache", "exec_command", {"cmd":"ls .cortex-dev/.codex/plugins/cache"}, PERMISSION_DENIED),
+        ("coordinator-internal", "read_file", {"path":str(root / ".codex/cortex/state")}, PERMISSION_DENIED),
+        ("coordinator-mutation", "apply_patch", {"command":"*** Begin Patch\n*** Add File: release.md\n+x\n*** End Patch"}, CAPABILITY_NOT_GRANTED),
+    ):
+        denied = handler.handle(event(root, "PreToolUse", tool_name=tool, tool_use_id=name,
+                                     agent_id="parent", tool_input=tool_input))
+        detail = denied["hookSpecificOutput"]
+        assert detail["permissionDecision"] == "deny"
+        assert detail["permissionDecisionReason"] == (
+            "Cortex coordinator project access is delegated to a native worker before dispatch.")
+        assert handler.observation["outcome"] == "denied"
+        assert handler.observation["diagnostic_codes"] == ["pre_dispatch_authorization_denied", expected_code]
+
+    unknown = handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="unknown-run",
+                                   tool_input={"cmd":"true"}))
+    assert unknown == {}
+
+
 def test_private_execution_boundary_resolves_symlink_routes(active):
     _, _, handler, root = active
     handler.handle(event(root, "SubagentStart", agent_id="child"))
@@ -225,13 +268,12 @@ def test_private_boundary_uses_validated_parent_provenance_without_agent_id(acti
                          tool_input={"cmd": f"cat {private}"})
     blocked = handler.handle(worker_event)
     assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
-    # A session-scoped event with no validated child provenance remains
-    # coordinator/system-compatible and is not globally overblocked.
-    assert handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="provenance-parent",
-                                tool_input={"cmd": f"cat {private}"})) == {}
-    assert handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id="provenance-wrong",
-                                thread_id="child", parent_thread_id="other",
-                                tool_input={"cmd": f"cat {private}"})) == {}
+    # A parent/session-only receipt does not establish an attributable actor;
+    # retain the long-standing no-classification result rather than guessing a
+    # coordinator or worker identity from a shared parent session.
+    for key, extra in (("provenance-parent", {}), ("provenance-wrong", {"thread_id":"child", "parent_thread_id":"other"})):
+        assert handler.handle(event(root, "PreToolUse", tool_name="exec_command", tool_use_id=key,
+                                    tool_input={"cmd": f"cat {private}"}, **extra)) == {}
 
 
 def test_private_boundary_reuses_worker_command_cwd_for_unidentified_write_stdin(active):
@@ -405,6 +447,26 @@ def test_post_tool_receipts_keep_failures_truncation_and_changes_separate(active
         text = " ".join(row[0] for row in db.execute("SELECT metadata FROM hook_events"))
         assert "raw private output" not in text and "private command" not in text
         assert db.execute("SELECT COUNT(*) FROM task_changes WHERE kind='artifact'").fetchone()[0] == 1
+
+
+def test_post_tool_failure_receipt_keeps_safe_stage_class_and_worker_task(active, monkeypatch):
+    store, storage, handler, root = active
+    handler.handle(event(root, "SubagentStart", agent_id="child", assigned_skill="cortex:worker-backend-dev"))
+    def fail_record(*args, **kwargs):
+        raise OSError("private PostToolUse failure detail")
+    monkeypatch.setattr(HookStorage, "record", fail_record)
+    payload=event(root, "PostToolUse", agent_id="child", tool_name="exec_command",
+                  tool_use_id="post-failure", tool_input={"cmd":"private command"},
+                  tool_response={"exit_code": 1, "output":"private output"})
+    with pytest.raises(OSError, match="private PostToolUse failure detail"):
+        handler.handle(payload)
+    # `main` copies this already-bound observation into its bounded failure row.
+    row=dict(handler.observation, outcome="failed", error_class="OSError",
+             error_stage="post_tool_receipt")
+    assert row["hook_event"]=="PostToolUse" and row["error_class"]=="OSError"
+    assert row["error_stage"]=="post_tool_receipt" and row["task_id"].startswith("t_")
+    assert "private command" not in json.dumps(row)
+    assert "private PostToolUse failure detail" not in json.dumps(row)
 
 
 def test_apply_patch_wrapper_receipts_require_exact_header_and_successful_exit(active):

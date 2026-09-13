@@ -69,8 +69,8 @@ python3 scripts/phase2_cli_runner.py \
   --baseline-commit 17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9 \
   --baseline-version 1.15.6+codex.sha256.cc786ae2fbd04cf1 \
   --baseline-payload-sha256 cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698 \
-  --candidate-version 1.15.9+codex.sha256.e4f332d43bf38024 \
-  --candidate-payload-sha256 e4f332d43bf380248c5de142b835a62a888f8885ad6577677aa4f394804733d7 \
+  --candidate-version 1.15.9+codex.sha256.90fddea21bf510df \
+  --candidate-payload-sha256 90fddea21bf510df773b1a5a4075550ca13f2fbcd5e1ff2137b4d700f26a4e8d \
   --coordinator-model gpt-5.6-luna --coordinator-effort high \
   --worker-model gpt-5.6-luna --worker-effort medium \
   --cell-timeout-seconds 1800 --wait-timeout-ms 600000
@@ -382,6 +382,12 @@ available only after the same bundle gate. Missing, partial, failed, tampered, o
 cross-arm evidence refuses cleanup so the transient streams remain available.
 Successful cleanup consumes the nonce, so neither the same bundle nor the same
 authorization can approve another stop.
+
+The sealed pre-stop bundle is immutable. Do not redirect a later no-session
+`calls` or `events` probe over any of its artifact paths: retain such a probe only
+under a distinct post-stop diagnostic path. A child task's source revision is
+task-local, so audit monotonicity compares only repeated observations of that
+same task and never a child's initial revision with its parent pipeline revision.
 
 The adapter never delegates Phase 2 cleanup to the harness's mutable name-targeted
 stop route. Normal stop, pre-submit abort, and orphan recovery pass the sealed

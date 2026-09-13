@@ -13,11 +13,10 @@ def _policy_text():
 
 def test_consultation_requires_both_triggers_and_remains_optional():
     policy = _policy_text()
-    assert "both a\nconsequence trigger and an uncertainty trigger" in policy
-    assert "may run concurrently when safe" in policy
-    assert "never blocks by rule" in policy
-    assert "Otherwise proceed without consulting" in policy
-    assert "never transfers planning, steering, evidence interpretation, acceptance" in policy
+    assert "both consequence and uncertainty\napply; otherwise proceed" in policy
+    assert "concurrent when safe" in policy
+    assert "never a block" in policy
+    assert "transfer of planning/acceptance" in policy
     assert "must consult" not in policy
     assert "consultation gate" not in policy
 
@@ -25,13 +24,11 @@ def test_consultation_requires_both_triggers_and_remains_optional():
 def test_consultation_policy_covers_exclusions_packet_record_and_evaluation():
     policy = _policy_text()
     for phrase in (
-        "routine, reversible or deterministic work",
+        "routine work, ordinary tests",
         "unchanged packets",
-        "active incident recovery",
-        "one compact packet",
-        "never copied report bodies or private data",
-        "whether advice changed",
-        "Evaluate quality and overhead against the unchanged baseline",
+        "active incidents",
+        "Record a compact\npacket",
+        "decision change, quality and overhead",
     ):
         assert phrase in policy
 

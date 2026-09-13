@@ -32,6 +32,11 @@ LAUNCH_TRANSACTION_SCHEMA='phase2-cli-launch-transaction-v1'
 SESSION_BINDING_SCHEMA='phase2-cli-session-binding-v1'
 SEND_RECEIPT_SCHEMA='phase2-cli-native-user-turn-receipt-v1'
 TRUST_RECEIPT_SCHEMA='phase2-cli-trust-transition-v1'
+HOST_DISPATCH_ENVELOPE_CAPABILITY='functions-exec-pre-dispatch-v1'
+MCP_FIRST_BOOTSTRAP_ROUTE='current_host_mcp_first'
+MCP_FIRST_PROVENANCE_SCHEMA='cortex-mcp-first-root-v1'
+MCP_FIRST_HOST_CONTEXT_SCHEMA='cortex-host-bootstrap-context-v1'
+MCP_FIRST_HOST_CONTEXT_CAPABILITY='current-host-mcp-first-v1'
 PROC_ROOT=Path('/proc')
 LIVE_DEVELOPER_INSTRUCTIONS=(
     'This is an isolated Cortex live-development test. The coordinator must use '
@@ -39,7 +44,17 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'gpt-5.6-luna with medium or high reasoning effort, except the explicitly '
     'assigned senior-consultant may use gpt-5.6-sol or gpt-6-astra with low, '
     'medium, or high effort; pass that model explicitly '
-    'when inherited context could preserve another model. For this live test, this '
+    'when inherited context could preserve another model. Every opaque worker '
+    'route must retain one attributable complete native skill attachment or exact '
+    'advertised assigned worker-SKILL read receipt before any worker project action; '
+    'a coordinator read never satisfies it. The coordinator must not use '
+    'functions.exec, exec_command, terminal, or another shell route to inspect '
+    'installed plugin/cache/candidate paths or agent registries before or after '
+    'task creation. From the first '
+    'worker action, workers must not inspect those paths. Use one bounded '
+    'command per wrapper with complete exit/result receipt; nested success never '
+    'excuses truncation. '
+    'For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
 )
@@ -104,6 +119,72 @@ def _atomic_private_json(path, value):
         except OSError:pass
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def _immutable_private_json(path, value):
+    """Create one owner-private provenance receipt and never replace it."""
+    path=Path(path)
+    encoded=(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode()
+    try:
+        descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    except FileExistsError:
+        if _read_private_receipt(path)!=value:
+            raise RuntimeError('MCP-first root provenance already exists with different content')
+        return
+    try:
+        with os.fdopen(descriptor,'wb') as stream:
+            stream.write(encoded);stream.flush();os.fsync(stream.fileno())
+        directory_fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory_fd)
+        finally:os.close(directory_fd)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _bind_mcp_first_root(data, native):
+    """Bind the sole child root for this launch before it can qualify work."""
+    if data.get('bootstrap_route')!=MCP_FIRST_BOOTSTRAP_ROUTE:
+        return
+    thread_id=native.get('thread_id') if isinstance(native,dict) else None
+    native_digest=native.get('user_turn_sha256') if isinstance(native,dict) else None
+    session_id=data.get('tmux_session_id');pane_id=data.get('tmux_pane_id')
+    session_created=data.get('tmux_session_created')
+    pane_pid=data.get('tmux_pane_pid');pane_start=data.get('tmux_pane_start_ticks')
+    if (not isinstance(thread_id,str) or not thread_id or not isinstance(session_id,str)
+            or not isinstance(pane_id,str) or not isinstance(data.get('workdir'),str)
+            or not isinstance(data.get('original_request_sha256'),str)
+            or not isinstance(native_digest,str) or not re.fullmatch(r'[0-9a-f]{64}',native_digest)
+            or any(isinstance(value,bool) or not isinstance(value,int) or value<1
+                   for value in (session_created,pane_pid,pane_start))):
+        raise RuntimeError('MCP-first bootstrap lacks an exact native child root receipt')
+    workdir=str(Path(data['workdir']).resolve())
+    if workdir!=data['workdir']:
+        raise RuntimeError('MCP-first bootstrap requires a canonical launch workdir')
+    identity=hashlib.sha256((session_id+'\0'+pane_id+'\0'+str(session_created)+'\0'
+                             +str(pane_pid)+'\0'+str(pane_start)+'\0'+workdir).encode()).hexdigest()
+    path=STATE/f'mcp-first-root-{identity}.json'
+    receipt={'schema_version':MCP_FIRST_PROVENANCE_SCHEMA,
+             'bootstrap_route':MCP_FIRST_BOOTSTRAP_ROUTE,
+             'host_enforcement_state':'unverified','thread_id':thread_id,
+             'workdir':workdir,'original_request_sha256':data['original_request_sha256'],
+             'tmux_session_id':session_id,'tmux_session_created':session_created,
+             'tmux_pane_id':pane_id,'tmux_pane_pid':pane_pid,
+             'tmux_pane_start_ticks':pane_start,
+             'native_user_turn_sha256':native_digest}
+    _immutable_private_json(path,receipt)
+    info=path.lstat()
+    if (path.is_symlink() or not path.is_file() or info.st_uid!=os.getuid()
+            or info.st_mode&0o077 or (info.st_mode&0o777)!=0o600):
+        raise RuntimeError('MCP-first root provenance did not remain owner-private')
+    data.update(bootstrap_expected_child_thread_id=thread_id,
+                bootstrap_provenance_schema=MCP_FIRST_PROVENANCE_SCHEMA,
+                bootstrap_provenance_sha256=hashlib.sha256(
+                    (json.dumps(receipt,sort_keys=True,separators=(',',':'))+'\n').encode()).hexdigest(),
+                bootstrap_provenance_path=str(path),
+                bootstrap_native_user_turn_sha256=native_digest,
+                bootstrap_provenance_device=info.st_dev,
+                bootstrap_provenance_inode=info.st_ino)
 
 
 def _phase2_control_failure_path():
@@ -421,6 +502,102 @@ def terminal_snapshot(data):
         'dead_status':int(status_text) if status_text else None,
         'descendants':sorted(descendants,key=lambda row:row['pid']),
     }
+
+
+def live_exit_marker_evidence(data, attempts=120, interval=.25):
+    """Classify the observed terminal before ordinary cleanup.
+
+    The owned bash marker remains the ordinary terminal proof. A live Codex
+    composer has no marker by design; it is reported as a bounded interactive
+    terminal candidate. The audit may use it only with a completed native
+    outcome, no pending/open work, and an exact owned stop receipt. It is never
+    a substitute for an active or ambiguous terminal state.
+    """
+    capture=STATE/'capture.txt'
+    for _ in range(attempts):
+        terminal=terminal_snapshot(data)
+        body=capture.read_text(errors='replace') if capture.is_file() else ''
+        markers=re.findall(r'^Cortex live-dev exit=([0-9]+)$',body,re.MULTILINE)
+        if terminal['current_command']=='codex' and not terminal['dead']:
+            return {'status':'idle_composer_observed',
+                    'exit_status':None,'terminal':terminal}
+        if (terminal['current_command']=='bash' and not terminal['dead']
+                and terminal['descendants']==[] and markers==['0']):
+            return {'status':'complete','exit_status':0,'terminal':terminal}
+        if markers and markers != ['0']:
+            return {'status':'evidence_incomplete_exit_nonzero','exit_status':None,
+                    'terminal':terminal}
+        time.sleep(interval)
+    return {'status':'evidence_incomplete_missing_exit_marker','exit_status':None,
+            'terminal':terminal_snapshot(data)}
+
+
+def _bundle_write(path, body):
+    """Write one immutable owner-private pre-stop artifact and return its digest."""
+    if path.exists() or path.is_symlink():
+        raise RuntimeError('Pre-stop evidence artifact already exists')
+    descriptor, temporary=tempfile.mkstemp(prefix=f'.{path.name}.',dir=path.parent)
+    temporary_path=Path(temporary)
+    try:
+        os.fchmod(descriptor,0o600)
+        with os.fdopen(descriptor,'wb') as stream:
+            stream.write(body);stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary_path,path)
+        return hashlib.sha256(body).hexdigest()
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def seal_pre_stop_evidence(data, terminal_evidence):
+    """Seal the current observation before any normal-stop cleanup.
+
+    The normal live helper has no external adapter-owned evidence directory.  It
+    therefore retains an immutable, session-receipt-bound local bundle before
+    stopping the pane.  A later no-session diagnostic cannot reuse or replace
+    these files: it has no write route into this bundle and must use a separate
+    post-stop location.  Failure to make the bundle refuses a normal stop so the
+    live observation remains available for collection/recovery.
+    """
+    receipt=data.get('session_receipt')
+    if not isinstance(receipt,str) or not re.fullmatch(r'[0-9a-f]{64}',receipt):
+        raise RuntimeError('Normal stop lacks an exact session receipt for pre-stop evidence')
+    bundle=STATE/f'pre-stop-evidence-{receipt}'
+    if bundle.exists() or bundle.is_symlink():
+        raise RuntimeError('Pre-stop evidence bundle already exists; use its distinct post-stop directory')
+    bundle.mkdir(mode=0o700)
+    try:
+        observer=_observer_namespace('cortex_live_pre_stop_observer')
+        mcp_rows,hook_rows=normalized_observer_events(observer,data['events'])
+        host_rows=observer['observed_tool_calls'](data)
+        if any(not isinstance(row,dict) for row in host_rows):
+            raise RuntimeError('Pre-stop calls evidence is malformed')
+        capture=(STATE/'capture.txt').read_bytes()
+        artifacts={
+            'capture.txt':capture,
+            'events.jsonl':''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n'
+                                 for row in mcp_rows).encode(),
+            'hooks.jsonl':''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n'
+                                for row in hook_rows).encode(),
+            'calls.jsonl':''.join(json.dumps(row,sort_keys=True,separators=(',',':'))+'\n'
+                                for row in host_rows).encode(),
+            'terminal.json':(json.dumps(terminal_evidence,sort_keys=True,separators=(',',':'))+'\n').encode(),
+        }
+        entries={name:{'sha256':_bundle_write(bundle/name,body),'bytes':len(body)}
+                 for name,body in artifacts.items()}
+        manifest={
+            'schema_version':'cortex-live-pre-stop-evidence-v1','status':'complete',
+            'session_receipt':receipt,'artifacts':entries,
+            'post_stop_directory':str(STATE/f'post-stop-evidence-{receipt}'),
+        }
+        manifest_body=(json.dumps(manifest,sort_keys=True,separators=(',',':'))+'\n').encode()
+        manifest_digest=_bundle_write(bundle/'evidence-bundle.json',manifest_body)
+        return {'path':str(bundle),'sha256':manifest_digest,
+                'post_stop_directory':manifest['post_stop_directory']}
+    except BaseException:
+        # Do not remove a partial bundle: it is a failure receipt and makes the
+        # ordinary stop fail closed while the session still exists.
+        raise RuntimeError('Pre-stop evidence bundle is incomplete; refusing normal stop') from None
 
 
 def private():
@@ -824,16 +1001,30 @@ def native_user_turn_receipts(data,prompt):
                             or session_meta.get('parent_thread_id') not in (None,'')):
                         continue
                     line_sha256=hashlib.sha256(line.encode('utf-8')).hexdigest()
-                    matches.append({
+                    receipt={
                         'thread_id':thread_id,'thread_created_at':created_at,
                         'user_turn_id':parsed[2], 'user_turn_source_format':parsed[1],
                         'user_turn_line':line_number,'user_turn_sha256':line_sha256,
                         'source_path_sha256':hashlib.sha256(str(resolved).encode()).hexdigest(),
                         'prompt_sha256':hashlib.sha256(expected.encode()).hexdigest(),
-                        'control_record_sha256':data['phase2_control_sha256'],
-                        'session_receipt':data['session_receipt'],
                         **source_link,
-                    })
+                    }
+                    # Observational current-host sends have no Phase 2 control
+                    # record.  Keep that receipt useful for MCP-first root
+                    # provenance without fabricating a control binding.  When
+                    # the sealed Phase 2 path is active, both bindings remain
+                    # mandatory and malformed state fails closed.
+                    control=data.get('phase2_control_sha256')
+                    session_receipt=data.get('session_receipt')
+                    phase2_binding_active=(_phase2_mode() or control is not None
+                                           or session_receipt is not None)
+                    if phase2_binding_active:
+                        if (not isinstance(control,str) or not re.fullmatch(r'[0-9a-f]{64}',control)
+                                or not isinstance(session_receipt,str)
+                                or not re.fullmatch(r'[0-9a-f]{64}',session_receipt)):
+                            raise RuntimeError('Phase 2 native receipt lacks exact control binding')
+                        receipt.update(control_record_sha256=control,session_receipt=session_receipt)
+                    matches.append(receipt)
         finally:
             if descriptor is not None:os.close(descriptor)
     if _owned_native_rollout_sources(data)!=owned_sources:
@@ -1005,6 +1196,11 @@ def _ordinary_send(data,prompt):
         time.sleep(.25)
     else:
         raise RuntimeError('prompt submission produced no exact user-turn receipt; inspect the composer before any explicit further input')
+    if data.get('bootstrap_route')==MCP_FIRST_BOOTSTRAP_ROUTE:
+        native=_native_send_receipt(data,prompt,wait=False)
+        if native is None:
+            raise RuntimeError('MCP-first bootstrap lacks an exact native child root receipt')
+        _bind_mcp_first_root(data,native)
     data['first_submission_at']=submitted_at;save(data)
     print('Submitted the exact literal prompt and observed its user-turn receipt.')
 
@@ -1053,6 +1249,32 @@ def launch_command(events, resume_last, model, effort, apps_enabled, graph_enabl
                   ('true' if graph_enabled else 'false')]
     command+=['-c','sandbox_workspace_write.network_access=true']
     return command
+
+
+def qualification_pre_task_containment(host_dispatch_capability):
+    """Refuse fresh CLI qualification without a host-typed dispatch boundary.
+
+    This is launcher containment, not a claim that this repository intercepts
+    Codex custom tools.  A host integration must attest the typed capability
+    before any pre-task shell-wrapper qualification is permitted.
+    """
+    if host_dispatch_capability != HOST_DISPATCH_ENVELOPE_CAPABILITY:
+        raise RuntimeError('CLI qualification refuses pre-task shell wrappers without a typed host functions.exec pre-dispatch capability')
+
+
+def qualification_mcp_first_bootstrap(bootstrap_route, host_context=None):
+    """Select observational qualification without inventing host enforcement.
+
+    No caller-provided receipt, shell route, or local inference is accepted as
+    host authorization.  The optional integration object is deliberately not
+    used to decide acceptance: current-host qualification is based only on the
+    complete post-observation contract and always remains host-unverified.
+    """
+    if bootstrap_route != 'mcp-first':
+        raise RuntimeError('CLI qualification requires an explicit mcp-first bootstrap route')
+    return {'bootstrap_route':MCP_FIRST_BOOTSTRAP_ROUTE,
+            'host_enforcement_state':'unverified',
+            'qualification_contract':'observational_accept'}
 
 
 def _observer_rows(observer, name, *args):
@@ -1124,6 +1346,123 @@ def _audit_no_go(error):
     return 1
 
 
+def current_host_audit_exit_code(classification, observational, *, failures,
+                                 host_failures, audit_policy,
+                                 observational_diagnostics):
+    """Return the process status from the final classified current-host result.
+
+    Exit status is derived only from the final classification that is printed by
+    the audit command.  Earlier raw failure/policy collections are deliberately
+    not consulted here: they were already partitioned, classified, and (for the
+    current-host invariant) normalized before this function runs.  Rechecking
+    those stale pre-final collections made a clean printed acceptance exit 1.
+    This does not erase a hard finding: a supported failure, mutation, pending
+    state, mismatch, replay, truncation, ambiguity, or unsafe access must be
+    represented by the final classifier as an invalidator and remains exit 1.
+    """
+    if not (isinstance(observational,dict)
+            and observational.get('status')=='observational_accept'
+            and isinstance(classification,dict)
+            and classification.get('evidence_valid') is True
+            and classification.get('score_eligible') is True):
+        return 1
+    # Keep this explicit rather than inferring it solely from ``evidence_valid``:
+    # the integrity invalidator list is the audit's authoritative fail-closed
+    # boundary and must itself be present and empty before diagnostics can yield
+    # a successful current-host process status.
+    if 'evidence_integrity_invalidators' not in classification:
+        return 1
+    invalidators=classification['evidence_integrity_invalidators']
+    if not isinstance(invalidators,list) or invalidators:
+        return 1
+    return 0
+
+
+_CURRENT_HOST_UNSUPPORTED_ATTESTATIONS=frozenset({
+    'worker_assignment_policy_unverified',
+    'mcp_first_bootstrap_unverified',
+})
+
+
+def current_host_final_audit_boundary(state, classification, audit_policy,
+                                      observational_diagnostics):
+    """Normalize unavailable host attestations at the final audit boundary.
+
+    The observer has multiple collection and classification paths.  A current
+    host's absent bootstrap or assignment attestation can therefore be named
+    directly in policy, or be reintroduced as a classification reason after the
+    earlier observational partition.  This final route-scoped normalization is
+    deliberately the last point before evidence validity, qualification, and
+    process status are consumed.  It retains both exact labels as printed
+    not-applicable diagnostics; it does not supply outcome evidence, score, or
+    host enforcement.  Every other invalidator and policy row is preserved.
+    """
+    if not isinstance(state,dict) or state.get('bootstrap_route') != 'current_host_mcp_first':
+        return classification,audit_policy,observational_diagnostics
+    if (not isinstance(classification,dict) or not isinstance(audit_policy,list)
+            or not isinstance(observational_diagnostics,list)):
+        return classification,audit_policy,observational_diagnostics
+    invalidators=classification.get('evidence_integrity_invalidators')
+    quality=classification.get('quality_findings')
+    if not isinstance(invalidators,list) or not isinstance(quality,list):
+        return classification,audit_policy,observational_diagnostics
+
+    def label(row):
+        return (isinstance(row,dict)
+                and (row.get('violation') in _CURRENT_HOST_UNSUPPORTED_ATTESTATIONS
+                     or row.get('reason') in _CURRENT_HOST_UNSUPPORTED_ATTESTATIONS))
+
+    # Classification indices reference the exact post-partition audit-policy
+    # list.  Suppress that matching source row too: otherwise an older parser
+    # spelling such as ``pre_binding_host_action`` would survive after its
+    # classifier reason was normalized to the unavailable bootstrap label.
+    late_policy_indices={row.get('index') for row in invalidators
+                         if label(row) and row.get('source')=='policy_violation'
+                         and isinstance(row.get('index'),int)}
+    retained_policy=[]
+    suppressed=[]
+    for index,row in enumerate(audit_policy):
+        if label(row) or index in late_policy_indices:
+            suppressed.append((row, None if label(row) else
+                               next((item for item in invalidators
+                                     if item.get('source')=='policy_violation'
+                                     and item.get('index')==index and label(item)),None)))
+        else:
+            retained_policy.append(row)
+    retained_invalidators=[]
+    for row in invalidators:
+        if label(row):
+            suppressed.append((row,row))
+        else:
+            retained_invalidators.append(row)
+
+    diagnostics=list(observational_diagnostics)
+    seen={(item.get('violation'),item.get('thread_id'),item.get('tool'),
+           item.get('argument_digest'),item.get('result_digest'))
+          for item in diagnostics if isinstance(item,dict)}
+    for source,classified in suppressed:
+        if not isinstance(source,dict):
+            continue
+        name=source.get('violation')
+        if name not in _CURRENT_HOST_UNSUPPORTED_ATTESTATIONS:
+            name=classified.get('reason') if isinstance(classified,dict) else None
+        if name not in _CURRENT_HOST_UNSUPPORTED_ATTESTATIONS:
+            continue
+        diagnostic={**source,'violation':name,'observational_diagnostic':True,
+                    'unsupported_by_current_host':True,'not_applicable':True,
+                    'host_enforcement_state':'unverified',
+                    'diagnostic_reason':'unsupported_by_current_host'}
+        key=(diagnostic.get('violation'),diagnostic.get('thread_id'),diagnostic.get('tool'),
+             diagnostic.get('argument_digest'),diagnostic.get('result_digest'))
+        if key not in seen:
+            diagnostics.append(diagnostic);seen.add(key)
+    normalized={**classification,
+                'evidence_integrity_invalidators':retained_invalidators,
+                'evidence_valid':not retained_invalidators,
+                'score_eligible':not retained_invalidators}
+    return normalized,retained_policy,diagnostics
+
+
 def start(args):
     workdir=args.workdir.resolve(strict=True)
     if not workdir.is_dir():raise RuntimeError('Workdir must be a directory')
@@ -1135,6 +1474,13 @@ def start(args):
     owned_session_identity = None
     launch_stage = 'pre-commit'
     fresh_start = getattr(args,'evaluation_fresh_store',False) and not args.resume_last
+    bootstrap_metadata=None
+    if fresh_start:
+        if getattr(args,'bootstrap_route',None)=='mcp-first':
+            bootstrap_metadata=qualification_mcp_first_bootstrap(
+                args.bootstrap_route,getattr(args,'host_bootstrap_context',None))
+        else:
+            qualification_pre_task_containment(getattr(args,'host_dispatch_capability',None))
     graph_enabled=False
     codebase_memory_configured=False
     command=None
@@ -1214,6 +1560,8 @@ def start(args):
                   first_submission_at=previous.get('first_submission_at') if args.resume_last else None,
                   store=str(store),codebase_memory=graph_enabled,
                   model=model,effort=effort,lifecycle_status='starting')
+        if bootstrap_metadata is not None:
+            session_data.update(bootstrap_metadata)
         save(session_data)
         launch_stage='tmux-new-session'
         created=tmux(*_tmux_new_session_args(workdir,'/bin/bash'))
@@ -1223,13 +1571,24 @@ def start(args):
         identity=_tmux_session_identity(owned_session_id)
         owned_session_identity=identity
         pane_pid=identity['pane_pid']
-        session_data.update(tmux_session_id=owned_session_id,
+        # Native rollout discovery and exact cleanup both require the same
+        # owner-scoped server/session/pane identity.  Persist it for every
+        # isolated launch, not only the Phase 2 archive route, so a normal
+        # current-host MCP-first submission can seal its native root before
+        # the rollout is read.
+        session_data.update(tmux_server_pid=identity['server_pid'],tmux_session_name=SESSION,
+                            tmux_session_id=owned_session_id,
+                            tmux_session_created=identity['session_created'],
                             tmux_pane_id=identity['pane_id'],tmux_pane_pid=pane_pid)
-        if (fresh_start and isinstance(PHASE2_CONTROL_SHA256,str)
-                and re.fullmatch(r'[0-9a-f]{64}',PHASE2_CONTROL_SHA256)):
-            session_data.update(tmux_server_pid=identity['server_pid'],tmux_session_name=SESSION,
-                                tmux_session_created=identity['session_created'],
-                                tmux_pane_start_ticks=_proc_start_ticks(pane_pid))
+        # A pane start tick is required by either strict owner-bound control:
+        # current-host MCP-first root provenance or an active Phase 2 binding.
+        # Keep ordinary, route-free, no-control launches free of a /proc probe;
+        # they retain enough owner identity for exact cleanup without turning a
+        # synthetic/unobservable transport PID into a post-commit failure.
+        if (session_data.get('bootstrap_route')==MCP_FIRST_BOOTSTRAP_ROUTE
+                or _phase2_mode()):
+            session_data['tmux_pane_start_ticks']=_proc_start_ticks(pane_pid)
+        if fresh_start and _phase2_mode():
             _capture_phase2_session_binding(session_data)
         else:
             session_data['lifecycle_status']='started'
@@ -1267,7 +1626,7 @@ def start(args):
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
-    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--evaluation-fresh-store',action='store_true',help='Require a new private project-local store for this CLI evaluation start');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'));s.add_argument('--apps-enabled',action='store_true',help='Enable app tooling for an isolated capability probe')
+    s=sub.add_parser('start');s.add_argument('--workdir',type=Path,default=ROOT);s.add_argument('--resume-last',action='store_true');s.add_argument('--evaluation-fresh-store',action='store_true',help='Require a new private project-local store for this CLI evaluation start');s.add_argument('--host-dispatch-capability',choices=(HOST_DISPATCH_ENVELOPE_CAPABILITY,),help='Host-attested typed functions.exec pre-dispatch capability required for fresh qualification');s.add_argument('--bootstrap-route',choices=('mcp-first',),help='Use direct public MCP task bootstrap on the current host; this observes ordering only and never asserts host enforcement');s.add_argument('--codebase-memory',action='store_true',help='Enable the already configured isolated Codebase Memory server for graph-routing qualification');s.add_argument('--model');s.add_argument('--effort',choices=('low','medium','high','xhigh','max','ultra'));s.add_argument('--apps-enabled',action='store_true',help='Enable app tooling for an isolated capability probe')
     for name in ('send','send-preflight','resolve-send'):
         s=sub.add_parser(name);s.add_argument('--prompt-file',type=Path,required=True)
     sub.add_parser('startup-ready');sub.add_parser('accept-trust');sub.add_parser('enter');sub.add_parser('status');sub.add_parser('terminal');sub.add_parser('screen');sub.add_parser('audit')
@@ -1337,6 +1696,7 @@ def main():
             data['first_submission_at']=receipt['enter_requested_at']
             data['original_prompt_sha256']=prompt_sha256
             data['native_user_turn_receipt']=native
+            _bind_mcp_first_root(data,native)
             save(data)
             print(json.dumps(receipt,sort_keys=True,separators=(',',':')))
             return
@@ -1375,7 +1735,9 @@ def main():
         receipt={**receipt,'status':'accepted','native_user_turn':native,'accepted_at':time.time()}
         _atomic_private_json(receipt_path,receipt)
         data['first_submission_at']=submitted_at;data['original_prompt_sha256']=prompt_sha256
-        data['native_user_turn_receipt']=native;save(data)
+        data['native_user_turn_receipt']=native
+        _bind_mcp_first_root(data,native)
+        save(data)
         print('Submitted the exact literal prompt and observed its user-turn receipt.')
     elif args.command=='enter':tmux('send-keys','-t',data['tmux_pane_id'],'Enter');print('Sent one Enter.')
     elif args.command=='status':
@@ -1430,15 +1792,73 @@ def main():
             error_history=observer['tool_error_history'](host_rows)
             orchestration_errors=observer['orchestration_error_history'](host_rows)
             policy=observer['call_policy_violations'](host_rows)
-            orchestration_policies=observer['orchestration_policy_violations'](policy)
-            try:worker_policies=normalized_worker_policy_violations(observer,policy)
-            except ObserverEvidenceError as exc:return _audit_no_go(exc)
-            orchestration_host_failures=[row for row in host_failures if observer['is_orchestration_call'](row)]
+            bootstrap_receipt=observer['mcp_first_bootstrap_receipt'](host_rows,data)
+            policy.extend(observer['mcp_first_bootstrap_violations'](host_rows,data))
+            # The current-host route preserves receipt gaps as diagnostics when
+            # later closed native-result or public-publication evidence explains
+            # the missing host surface.  It does not hide the original rows and
+            # never relaxes malformed, replayed, private, failed, or incomplete
+            # activity; those remain in ``audit_policy`` and invalidate evidence.
+            audit_policy,observational_diagnostics=observer['observational_policy_partition'](
+                host_rows,data,policy)
+            # Current host can reject a mistyped report-ID lookup before the
+            # coordinator follows the actual publication receipt.  Keep that
+            # exact non-mutating invalid-arguments row visible as a diagnostic
+            # only after the observer has proved the independent full outcome.
+            # No generic MCP/tool error is filtered.
+            harmless_lookup=lambda row: observer['observational_read_report_failure_diagnostic'](host_rows,row,data)
+            failed_worker_skill=lambda row: observer['observational_worker_skill_read_failure_diagnostic'](
+                host_rows,row,data)
+            diagnostic_failures=[row for row in failures if harmless_lookup(row)]
+            diagnostic_host_failures=[row for row in host_failures
+                                      if harmless_lookup(row) or failed_worker_skill(row)]
+            failures=[row for row in failures if not harmless_lookup(row)]
+            host_failures=[row for row in host_failures
+                           if not harmless_lookup(row) and not failed_worker_skill(row)]
+            if diagnostic_failures or diagnostic_host_failures:
+                observational_diagnostics.extend([
+                    {**row,'observational_diagnostic':True,
+                     'host_enforcement_state':'unverified',
+                     'diagnostic_reason':('nonmutating_invalid_report_lookup'
+                                          if harmless_lookup(row)
+                                          else 'failed_bounded_worker_skill_read')}
+                    for row in [*diagnostic_failures,*diagnostic_host_failures]
+                ])
             open_sessions=observer['open_command_sessions'](host_rows)
             open_cells=observer['open_exec_cells'](host_rows)
             classification=observer['classify_audit_findings'](
                 failures=failures,hook_failures=hook_failures,host_failures=host_failures,
-                policy_violations=policy,open_sessions=open_sessions,open_cells=open_cells)
+                policy_violations=audit_policy,open_sessions=open_sessions,open_cells=open_cells)
+            # This is intentionally after every observer parser/classifier has
+            # contributed a finding and immediately before the derived audit
+            # state is consumed.  No parser ordering can reintroduce either
+            # unavailable current-host attestation as a hard failure.
+            classification,audit_policy,observational_diagnostics=current_host_final_audit_boundary(
+                data,classification,audit_policy,observational_diagnostics)
+            orchestration_policies=observer['orchestration_policy_violations'](audit_policy)
+            try:worker_policies=normalized_worker_policy_violations(observer,audit_policy)
+            except ObserverEvidenceError as exc:return _audit_no_go(exc)
+            orchestration_host_failures=[row for row in host_failures if observer['is_orchestration_call'](row)]
+            try:terminal_evidence=live_exit_marker_evidence(data)
+            except RuntimeError:terminal_evidence={'status':'evidence_incomplete_terminal_unavailable','exit_status':None}
+            idle_composer=(terminal_evidence.get('status')=='idle_composer_observed')
+            observational=observer['current_host_observational_qualification'](
+                host_rows,data,classification,bootstrap_receipt,
+                capture_complete=(STATE/'capture.txt').is_file(),events_complete=True,
+                terminal_complete=(terminal_evidence.get('status')=='complete' or idle_composer),
+                exit_complete=(terminal_evidence.get('exit_status')==0 or idle_composer))
+            if idle_composer and observational and observational.get('status')=='observational_accept':
+                data['interactive_completion_receipt']={
+                    'schema_version':'cortex-live-interactive-completion-v1',
+                    'session_receipt':data.get('session_receipt'),
+                    'terminal_state':'idle_composer_observed',
+                    'outcome_task_id':observational.get('outcome_receipt',{}).get('task_id'),
+                }
+                save(data)
+            audit_exit_code=current_host_audit_exit_code(
+                classification,observational,failures=failures,
+                host_failures=host_failures,audit_policy=audit_policy,
+                observational_diagnostics=observational_diagnostics)
             print(json.dumps(dict(mcp_events=len(mcp_rows),hook_actions=len(hook_rows),host_calls=len(host_rows),
                                   failures=failures,hook_failures=hook_failures,host_failures=host_failures,
                                   tool_error_history=error_history,
@@ -1447,11 +1867,38 @@ def main():
                                   resolved_host_failures=resolved_host_failures,
                                   policy_violations=policy,worker_policy_violations=worker_policies,
                                   orchestration_policy_violations=orchestration_policies,
+                                  observational_diagnostics=observational_diagnostics,
                                   open_sessions=open_sessions,
-                                  open_cells=open_cells,**classification)))
-            if classification['evidence_integrity_invalidators']:
-                raise RuntimeError('CLI audit found incomplete, unbound, contaminated, or non-terminal evidence')
+                                  open_cells=open_cells,
+                                  bootstrap_route=data.get('bootstrap_route'),
+                                  host_enforcement_state=data.get('host_enforcement_state'),
+                                  bootstrap_receipt=bootstrap_receipt,
+                                  observational_qualification=observational,
+                                  audit_exit_code=audit_exit_code,
+                                  **classification)))
+            return audit_exit_code
     else:
+        if args.command=='stop-exact':
+            # The sealed adapter has already captured and validated its exact
+            # terminal proof; do not consume an additional mutable snapshot.
+            terminal_evidence={'status':'complete_phase2_sealed','exit_status':0}
+        elif args.interrupt:
+            terminal_evidence={'status':'evidence_incomplete_interrupted','exit_status':None}
+        else:
+            try:terminal_evidence=live_exit_marker_evidence(data)
+            except RuntimeError:
+                terminal_evidence={'status':'evidence_incomplete_terminal_unavailable','exit_status':None}
+        data['terminal_evidence']=terminal_evidence
+        idle_complete=(terminal_evidence['status']=='idle_composer_observed'
+                       and isinstance(data.get('interactive_completion_receipt'),dict)
+                       and data['interactive_completion_receipt'].get('session_receipt')==data.get('session_receipt'))
+        if args.command=='stop' and not args.interrupt and terminal_evidence['status']!='complete' and not idle_complete:
+            # A normal successful cleanup is only available after the owned bash
+            # has emitted its exact launcher receipt.  Preserve the live state
+            # for an explicit failure/interrupt collection path instead.
+            raise RuntimeError('Normal stop requires owned bash Cortex live-dev exit=0 or verified idle-composer completion evidence')
+        if args.command=='stop':
+            data['pre_stop_evidence']=seal_pre_stop_evidence(data,terminal_evidence)
         if args.command=='stop-exact':
             _require_exact_cleanup_args(args,data)
             _exact_cleanup_identity(data)
@@ -1470,7 +1917,10 @@ def main():
         (STATE/'capture.txt').unlink(missing_ok=True)
         (STATE/'session.json').unlink(missing_ok=True)
         shutil.rmtree(STATE/'events')
-        print('Stopped exact smoke session; removed transient capture and event streams.')
+        evidence=data.get('pre_stop_evidence')
+        bundle=('; sealed pre-stop evidence='+evidence['sha256'] if isinstance(evidence,dict) else '')
+        print('Stopped exact smoke session; terminal evidence='+terminal_evidence['status']+bundle+
+              '; removed transient capture and event streams.')
 
 if __name__=='__main__':
     try:raise SystemExit(main())

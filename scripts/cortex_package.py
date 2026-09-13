@@ -161,6 +161,13 @@ def validate(plugin=PLUGIN):
     actual=sorted(p.relative_to(plugin).as_posix() for p in (plugin/'scripts').rglob('*.py'))
     if declared!=actual:
         raise ValueError('runtime payload differs from manifest')
+    capability_manifest=json.loads((plugin/'policy/capability-manifest-v1.json').read_text())
+    if (set(capability_manifest) != {'schema','version','profiles','routes','targets','phases','host_enforcement'}
+            or capability_manifest.get('schema') != 'capability-manifest-v1'
+            or capability_manifest.get('version') != 1
+            or capability_manifest.get('host_enforcement') != 'required_host_attestation'
+            or not isinstance(capability_manifest.get('profiles'), dict)):
+        raise ValueError('invalid semantic capability manifest')
     templates={path.stem for path in (plugin/'report-templates').glob('*.md')}
     if templates!={'general','planning','investigation','implementation','verification','documentation','synthesis','pipeline'}:
         raise ValueError('draft template set')

@@ -1,37 +1,51 @@
 # 1.15.9: Stable release readiness
 
-The current Cortex semantic version is `1.15.9`, with stamped payload
-`1.15.9+codex.sha256.e4f332d43bf38024` as declared by the plugin manifest and
+The current Cortex semantic version is `1.15.9`, with source payload
+`1.15.9+codex.sha256.90fddea21bf510df` as declared by the plugin manifest and
 resolved by the package validator. The final consecutive real CLI/Desktop
-qualification passed on this unchanged candidate (`r_648c4f40dcf9`), so the
-current orchestrator functionality is stable and release-ready on the basis of
-offline checks, independent reviews, and that clean parity result. The user
-cancelled the Phase 2 outcome comparison; it is non-blocking and non-scoring,
-and no efficacy comparison is claimed. See [project verification](project/verification.md)
+qualification (`r_648c4f40dcf9`) belongs to superseded payload
+`e4f332d43bf38024`; it is historical evidence and does not qualify this changed
+candidate. Independent sequential package, sync, full-suite, and real-host
+qualification remain open before any release-ready, delivery, or acceptance
+claim. The user cancelled the Phase 2 outcome comparison; it is non-blocking and
+non-scoring, and no efficacy comparison is claimed. See [project verification](project/verification.md)
 for the bounded evidence record.
 
 ## Current 1.15.9 stable release status
 
 | Gate or evidence | Status | Exact retained evidence |
 | --- | --- | --- |
-| Final consecutive real CLI qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on CLI |
-| Final consecutive real Desktop qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on Desktop |
+| Final consecutive real CLI qualification | HISTORICAL — superseded payload only | `r_648c4f40dcf9`; audit clean for `e4f332d43bf38024`, not the current candidate |
+| Final consecutive real Desktop qualification | HISTORICAL — superseded payload only | `r_648c4f40dcf9`; audit clean for `e4f332d43bf38024`, not the current candidate |
 | Phase 2 outcome evaluation | CANCELLED — non-blocking, non-scoring | User-directed cancellation; no efficacy comparison, score, promotion, or quality conclusion is claimed |
 | Phase 3 validator repairs | READY offline | `r_02db5d25f90e` — final adversarial review PASS |
 | Phase 4 telemetry repairs | READY offline | `r_6b761e716df9` — independent re-review READY |
 | Phase 5 adaptive overlay | READY offline | `r_e95d3d29d46f` — final adversarial re-review PASS |
 
-Both final host runs used the unchanged current candidate with isolated
-preparation, Luna coordination/workers, no Astra, and no stable installation or
-configuration change. Their audits reported zero failures, policy violations,
-open sessions/cells, integrity invalidators, or quality findings. Phase 2 is
-cancelled by the user and must not be restarted or interpreted as an efficacy
-comparison; Phases 3–5 remain offline-ready as recorded above.
+Both retained final host runs belong to superseded payload `e4f332d43bf38024`,
+used its unchanged isolated candidate with Luna coordination/workers and no stable
+installation or configuration change, and are historical-only. Their audits reported
+zero failures, policy violations, open sessions/cells, integrity invalidators, or
+quality findings for that superseded payload; they do not qualify current payload
+`90fddea21bf510df`. Phase 2 is cancelled by the user and must not be restarted or
+interpreted as an efficacy comparison; Phases 3–5 remain offline-ready as recorded
+above.
 
 Earlier excluded live attempts and constrained control/preflight checks remain
 historical evidence only: they are not relabeled, merged, retried, scored, or
 used as substitutes for the current qualification. Superseded candidate
 identities and earlier failures remain historical diagnostics only.
+
+## Current live-evidence correction boundary
+
+The rejected live attempt is diagnostic evidence only. Before any fresh Desktop
+attempt, the corrected candidate must first receive CLI **ACCEPT** with a clean audit
+on its exact unchanged payload. If CLI fails, is rejected, unavailable, or
+unverified, retain complete calls/events tails, run audit, stop that exact CLI
+session, and do not start Desktop as a substitute. Worker finals expose exactly the
+worker's own current report ID; opaque worker routes require attributable complete
+native attachment or exact worker-skill-read provenance; direct cache/candidate/
+registry probes and truncated wrappers remain invalidating evidence.
 
 The private-root preflight now uses validated child/parent provenance when a host
 tool event omits `agent_id`, while preserving coordinator/system compatibility for

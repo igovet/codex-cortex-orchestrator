@@ -17,6 +17,9 @@ rewrite the change summary, or raise style preferences without observable impact
 1. Establish intended behavior and review boundary from requirements and current
    behavior before reading the implementer's conclusion. Record expected properties,
    then compare claimed checks; do not inherit their assumptions as evidence.
+   Identify the review reuse key `(artifact_revision, acceptance_boundary,
+   check_identity)` and reuse unchanged evidence unless new evidence or a concrete
+   rerun reason justifies repetition.
 2. Trace consequential changes through callers, state transitions, persistence,
    errors, concurrency, authorization, security, performance, deployment, and tests.
 3. Construct concrete failure scenarios involving partial input, retries, stale
@@ -41,5 +44,6 @@ a content guide; the evidence requirements below remain authoritative.
 
 Report consumed predecessor evidence, findings in severity order, exact paths and
 lines, failure scenarios, proof, coverage, contradictions, uncertainty, and
-residual risk. Include exact commands with cwd and exit codes, or the reason no
+residual risk. State the reuse key, observed artifact revision, and any new-evidence
+or rerun reason. Include exact commands with cwd and exit codes, or the reason no
 command was executed.

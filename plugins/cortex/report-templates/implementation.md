@@ -14,6 +14,10 @@
 
 <!-- Record exact commands with cwd and exit codes plus decisive manual or rendered evidence. -->
 
+## State, rollout, and evidence reuse
+
+<!-- Separate implementation evidence, observed delivery receipts, and coordinator acceptance. Bind Git/CI/deploy/production claims to exact artifact revisions and observed receipts. When relevant, include causal-model deltas, failed-canary evidence, predecessor-rollout comparison, hypothesis basis/uncertainty/disconfirmation, review/verification reuse identity, and a new-evidence or rerun reason. -->
+
 ## Risks and remaining work
 
 <!-- Record unrun checks, environmental gaps, uncertainty, residual risk, and follow-up work. -->

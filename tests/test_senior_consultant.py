@@ -149,7 +149,8 @@ def test_opaque_executor_route_requires_linked_child_and_complete_skill():
     paths={'/root/author_spec':'child'};edges={'child':'parent'}
     details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna','reasoning_effort':'high'}}
     read={'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
-          'wrapper_outcome':'success','worker_skill_complete':True}
+          'wrapper_outcome':'success','worker_skill_complete':True,
+          'worker_skill_profile':'technical_writer'}
     evidence=OBSERVER['native_spawn_route_metadata']
     check=OBSERVER['call_policy_violations']
     assert check([row])  # Ciphertext alone remains insufficient.
@@ -161,6 +162,7 @@ def test_opaque_executor_route_requires_linked_child_and_complete_skill():
     assert evidence(row,{'/root/another_name':'child'},edges,details,[read])=={}
     assert evidence(row,paths,edges,details,[])=={}
     assert evidence(row,paths,edges,details,[{**read,'wrapper_outcome':'truncated'}])=={}
+    assert evidence(row,paths,edges,details,[{**read,'worker_skill_profile':'explorer'}])=={}
     for change in ({'observed_worker_model':'gpt-5.6-terra'},
                    {'observed_worker_effort':'medium'},
                    {'observed_worker_profile':'senior_consultant'},
@@ -177,7 +179,8 @@ def test_opaque_executor_route_fallback_accepts_only_complete_actual_route():
     paths={'/root/author_spec':'child'};edges={'child':'parent'}
     details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna','reasoning_effort':'medium'}}
     read={'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
-          'wrapper_outcome':'success','worker_skill_complete':True}
+          'wrapper_outcome':'success','worker_skill_complete':True,
+          'worker_skill_profile':'technical_writer'}
     evidence=OBSERVER['native_spawn_route_metadata']
     observed=evidence(row,paths,edges,details,[read])
     assert observed['route_policy_provenance']=='requested_route_unavailable_actual_route_verified'
@@ -216,7 +219,8 @@ def test_opaque_route_ignores_validated_reference_reads_when_joining_skill_recei
                       'reasoning_effort':'medium'}}
     reads=[
         {'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
-         'wrapper_outcome':'success','worker_skill_complete':True},
+         'wrapper_outcome':'success','worker_skill_complete':True,
+         'worker_skill_profile':'technical_writer'},
         {'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
          'wrapper_outcome':'success','skill_instruction_read':True},
     ]
@@ -234,7 +238,8 @@ def test_native_route_coalesces_started_completed_lifecycle_only():
     edges={'child':'parent'}
     details={'child':{'agent_role':'technical_writer','model':'gpt-5.6-luna','reasoning_effort':'medium'}}
     read={'thread_id':'child','tool':'exec_command','outcome':'covered_by_command_execution',
-          'wrapper_outcome':'success','worker_skill_complete':True}
+          'wrapper_outcome':'success','worker_skill_complete':True,
+          'worker_skill_profile':'technical_writer'}
 
     def route(kinds,child_ids=None):
         paths={};phases={};duplicates=set()

@@ -2,21 +2,156 @@
 
 ## Stable release payload — 1.15.9
 
-The current Cortex semantic version is `1.15.9`, with stamped payload
-`1.15.9+codex.sha256.e4f332d43bf38024` as declared by the plugin manifest and
+The current Cortex semantic version is `1.15.9`, with source payload
+`1.15.9+codex.sha256.90fddea21bf510df` as declared by the plugin manifest and
 resolved by the package validator. Final consecutive real CLI and Desktop
-qualification passed on this unchanged candidate (`r_648c4f40dcf9`). Combined
-with the offline tests and independent reviews, this supports stable,
-release-ready orchestrator functionality. The user cancelled the Phase 2
-outcome comparison; it is non-blocking and non-scoring, and no efficacy
-comparison is claimed.
+qualification (`r_648c4f40dcf9`) applies only to superseded payload
+`e4f332d43bf38024`; it is historical evidence, not a qualification of this
+changed candidate. Sequential package, sync, full-suite, and real-host checks
+remain open before release-ready, delivery, or acceptance claims. The user
+cancelled the Phase 2 outcome comparison; it is non-blocking and non-scoring,
+and no efficacy comparison is claimed.
+
+## Latest CLI evidence interpretation — source revision 9
+
+The latest CLI attempt remains BLOCKED and Desktop remains unverified. Its fresh
+root task source revision `1` is task-local; it is not required to numerically
+equal parent qualification context revision `9`. Audit retains same-task
+monotonicity and still fails closed for a same-task regression. One pre-task
+coordinator private plugin/cache probe was observed and remains blocking; its two
+labels describe one operation, not two probes. The terminal was an idle Codex
+composer, so no bash marker alone is not a failed exit. Ordinary cleanup cannot
+certify that composer; only the adapter's immutable evidence bundle and
+bundle-authorized exact stop can evaluate it. A later CLI-only attempt must avoid
+the probe and retain that bundle; Desktop stays locked until CLI ACCEPT on the
+same unchanged candidate and payload.
+
+## Pre-dispatch host authorization — P0
+
+For the observable host-tool families, a lifecycle hook now composes the existing
+private-path boundary with a narrow semantic authorization decision before dispatch.
+It permits verified native workers' bounded runtime execution, observation, and
+ordinary task mutation capabilities, while coordinator, unknown, missing-context,
+and private/internal requests receive a stable `PERMISSION_DENIED`-style denial.
+The receipt retains only the decision, capability class, and bounded reason; a
+denial is audit-invalidating evidence and cannot become an accepted result. This
+is not a public MCP schema change, a signed-token system, a filesystem sandbox, or
+an approval/acceptance workflow. Receipt-bound capabilities and filesystem
+confinement remain explicit follow-on work.
+
+## Prevented-attempt receipts and worker-skill ordering — 2026-09-12
+
+## Typed host dispatch contract and qualification containment — 2026-09-12
+
+The repository now provides an operand-free typed `functions.exec` pre-dispatch
+contract for a host adapter: authenticated actor/role, route, phase, task and
+assignment relation, and a closed nested operation-class list are required before
+any nested member may run. In `pre_task`, only typed
+`mcp__cortex__create_task` bootstrap is allowed; shell/file/plugin/cache/registry,
+opaque, malformed, mixed, or provenance-conflicting envelopes deny atomically with
+sanitized `PERMISSION_DENIED` metadata. The reference adapter tests a sentinel
+that remains absent on denial and retains only bounded decision receipts. A host
+bypass that executes after a deny receipt is an evidence-integrity invalidator.
+The authenticated actor/role is an exact closed pair in every phase:
+`native_coordinator`/`coordinator` or `native_worker`/`worker`. Cross-pairs deny
+before nested operation parsing and cannot reach the reference executor.
+
+Codex does not currently expose evidence that it invokes this repository contract
+before real custom `functions.exec` evaluation. Accordingly, fresh CLI
+qualification is launcher-contained: it refuses a pre-task shell-wrapper launch
+without a host-attested `functions-exec-pre-dispatch-v1` capability. This is not
+general host enforcement and does not claim an installed live gate. Signed tokens
+and host-enforced filesystem confinement remain P1 follow-ons.
+
+## Current-host MCP-first qualification route — 2026-09-12
+
+When no typed pre-dispatch host capability is available, a fresh CLI-only attempt
+with `./scripts/cortex-live-smoke start --bootstrap-route mcp-first ...` uses a
+strict observational contract rather than claiming host enforcement. It records
+`bootstrap_route=current_host_mcp_first` and
+`host_enforcement_state=unverified`; neither value is a caller-supplied receipt or
+a claim that the host prevented anything. The child workload's first qualifying
+operation must be a direct public `mcp__cortex__create_task` receipt bound to the
+one immutable native user-turn root recorded for that launch, plus the exact project
+digest, task digest, original-request digest, and native MCP result digest. Missing,
+unrelated, duplicate, competing, or later-replaced root identities are non-ACCEPT.
+Launcher tmux/process/capture work is retained only as `launcher_transport`, never
+as child qualification evidence.
+
+The one successful, non-replayed direct public `create_task` receipt is the binding
+transition itself, not `pre_binding_host_action`. A current-host `functions.exec`
+transport label may accompany it only when its one literal nested member is that exact
+MCP call; aliases, multiple nested calls, failed calls, replayed calls, and arbitrary
+wrappers remain blocking.
+
+Before that complete receipt, `functions.exec`, nested `exec_command`, Bash,
+terminal, file, patch, or private plugin/cache/candidate/registry access is a
+`pre_binding_host_action` integrity invalidator, except a complete bounded literal
+read of the exact advertised coordinator `SKILL.md` or public `.mcp.json`/
+`.codex-plugin/plugin.json` declaration from the isolated bundled release. That
+exception excludes directories, globs, arbitrary cache content, runtime/state/registry
+files, and any mutation.
+The exact value-free `text(ALL_TOOLS)` current-host catalogue envelope is separately
+classified as bounded metadata only after a complete receipt; no query, path, content
+extraction, mutation, nested call, or mixed wrapper qualifies.
+A failed, ambiguous, wrong-thread, wrong-project, or request-mismatched MCP receipt
+is also non-ACCEPT. The launcher
+does not fall back to a shell route and does not start Desktop after any such CLI
+result. This route tests observed orchestration ordering on the current host; it
+does not replace host enforcement, physical sandboxing, or later real-host proof.
+
+## Bounded P1 semantic policy and evidence binding — 2026-09-12
+
+The packaged `capability-manifest-v1` declares a closed least-privilege policy
+for verified profiles. The initial build-verification allowlist is exactly public
+report/task reads, runtime execute/observe, and artifact inspection; task or
+orchestrator mutation, release promotion, and internal/cache/registry/plugin/debug/
+raw-state classes deny. A request must use one canonical versioned semantic
+operation/resource tuple and bind route, target, phase, task, assignment receipt,
+artifact revision, candidate payload, acceptance boundary, and check identity.
+Aliases, encoded or opaque names, mixed resource scopes, unknown versions, missing
+provenance, and binding mismatch fail closed. A complete denied receipt remains
+inadmissible; a policy receipt is not acceptance.
+
+The receipt decision hash additionally binds policy version, authenticated actor,
+profile/version, canonical capability, operation tuple, and resource tuple. This
+prevents a report-read receipt from satisfying runtime execution, artifact inspection,
+or mutation evidence even under the same qualification context. Missing, unknown,
+truncated, or replaced receipts are unverified; two labels for one exact decision
+deduplicate to one call identity, while distinct capabilities have distinct IDs.
+
+The contract has three distinct evidence states: `policy_declared`,
+`policy_observed`, and `host_enforced`. Only a host-attested receipt may describe
+the last state. Local repository helpers emit only the first two and reject any
+self-supplied `host_enforced` label because no trusted host-boundary verifier is
+packaged. The repository does not claim token authenticity or filesystem,
+process, or egress containment. Advisory failed-canary, review, and cost metadata
+is bounded/null-safe replanning information only; it has no threshold, routing,
+retry, gate, or acceptance effect. An unchanged state/evidence cursor produces no
+wait message or event.
+
+A complete attributable `PreToolUse` receipt with `action_status=denied`,
+`authorization_outcome=PERMISSION_DENIED`,
+`execution_status=denied_before_dispatch`, bounded authorization fields, and a
+native binding receipt is a value-free prevented-attempt diagnostic. A missing,
+unknown, or unbound semantic field is an evidence-integrity invalidator and is
+never score-eligible. The complete receipt is not an `observation_hook_failed`
+invalidator and cannot prove host execution, delivery, or acceptance. An actually dispatched unauthorized
+plugin/cache/Cortex access remains blocking under the ordinary path-policy and
+delivery rules. Failed exact approved worker-skill reads are receipt-acquisition
+failures, not project actions; they do not credit a worker, and every later
+Cortex/project action before a complete, attributable exact-profile skill receipt
+remains blocking. Live procedures retain one bounded command per wrapper and a
+complete result receipt: a nested success never repairs truncation. An idle
+composer requires the adapter-owned immutable evidence bundle; ordinary cleanup
+and a mutable post-stop probe are not terminal proof.
 
 ## Current 1.15.9 stable release status
 
 | Gate or evidence | Status | Exact retained evidence |
 | --- | --- | --- |
-| Final consecutive real CLI qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on CLI |
-| Final consecutive real Desktop qualification | PASS | `r_648c4f40dcf9`; unchanged candidate; classified audit clean on Desktop |
+| Final consecutive real CLI qualification | HISTORICAL — superseded payload only | `r_648c4f40dcf9`; audit clean for `e4f332d43bf38024`, not the current candidate |
+| Final consecutive real Desktop qualification | HISTORICAL — superseded payload only | `r_648c4f40dcf9`; audit clean for `e4f332d43bf38024`, not the current candidate |
 | Phase 2 outcome evaluation | CANCELLED — non-blocking, non-scoring | User-directed cancellation; no efficacy comparison, score, promotion, or quality conclusion is claimed |
 | Phase 3 validator repairs | READY offline | `r_02db5d25f90e` — final adversarial review PASS |
 | Phase 4 telemetry repairs | READY offline | `r_6b761e716df9` — independent re-review READY |
@@ -53,7 +188,7 @@ The Desktop helper now preserves strict activation for successful
 returns the exact `XGetWindowProperty[_NET_WM_DESKTOP] failed (code=1)` warning.
 It records that bounded diagnostic, rechecks the launched PID, runs one
 `windowfocus --sync`, requires `getactivewindow` to identify the same window, and
-rechecks the PID before click or `Ctrl+Enter`. Different xdotool errors, failed
+rechecks the PID before input. Different xdotool errors, failed
 focus, active-window mismatch, or ownership change fail closed. The existing
 prepared-composer and exactly-one-new-task-receipt gates are unchanged.
 
@@ -635,6 +770,13 @@ that the current capture contains exactly one `Cortex live-dev exit=0`, and that
 the ownership-bound process snapshot has no descendants. Phase 2 collection
 repeats the status and process snapshot before sealing evidence, and `stop`
 rechecks them against the bundle before stopping the exact session. CLI smoke
+also seals a receipt-bound immutable pre-stop bundle (capture, normalized calls,
+events, hooks, and terminal snapshot) before ordinary cleanup. A normal successful
+stop refuses to remove the session without that owned-bash marker. Any post-stop
+no-session observation belongs in the bundle's distinct post-stop directory; it
+must never overwrite the sealed pre-stop calls or events files. Source revisions
+are monotonic only within the same task/thread: a fresh child begins its own local
+sequence and is never numerically compared with its coordinator parent. CLI smoke
 runs derive the store from the canonical workdir at
 `PATH/.codex/cortex/cortex.sqlite3`. Resume with the same workdir and
 `--resume-last`; it reuses that exact project-local store and rejects a missing or
@@ -688,8 +830,12 @@ whose X11 PID equals the isolated process recorded by `start`, rechecks ownershi
 submits once, and refuses duplicate submission. It never targets another
 Desktop instance by title alone.
 
-The Desktop `send` command focuses the prepared composer, uses `Ctrl+Enter`, and
-acknowledges delivery only after exactly one new task appears in isolated host state.
+The Desktop `send` command preserves the URI-prepared composer focus rather than
+clicking a guessed coordinate. Before its sole plain `Return`, it requires the exact
+owned window to remain focused across two observations after a three-second URI
+hydration interval, within one monotonic 60-second budget shared by window lookup and
+focus retries. This is bounded readiness only, not a delivery receipt; delivery is
+acknowledged only after exactly one new task appears in isolated host state.
 Use `scripts/cortex-desktop-dev events` while the task runs and
 `scripts/cortex-desktop-dev audit` before accepting it. The audit consumes the
 complete private metadata journal from every coordinator and worker MCP process
@@ -745,7 +891,10 @@ failures instead of accepting a later summary as proof.
 
 
 Both ordinary CLI and actual Desktop scenarios are required on the same unchanged
-payload. When the product work needs clarification, answer the genuine question
+payload, in strict order: CLI must be ACCEPT with a clean audit before Desktop may
+start. If CLI fails, is rejected, unavailable, or unverified, end that attempt,
+capture complete calls/events tails and audit, stop the exact CLI session, and do
+not run Desktop as a diagnostic substitute. When the product work needs clarification, answer the genuine question
 as ordinary chat text and verify that the answer is incorporated. The PR workflow runs only for pull requests targeting
 dev or main; automated source tests do not substitute for either real host.
 
@@ -786,9 +935,20 @@ An exact Python `-c` or quoted-heredoc audit helper may compare a literal privat
 marker as data. The exception requires every marker literal to be a direct Python
 comparison operand; assignment, file/process calls, comments, interpolation,
 malformed code and a private working directory remain unauthorized.
-Worker final handoffs name only the report published for that assignment. Input,
+Before project work, a worker must retain a complete worker-attributable attached or
+exact assigned worker-skill receipt; a coordinator skill read cannot satisfy it. From
+the first worker action, plugin/cache/candidate/agent-registry probes are forbidden.
+Use one bounded command per wrapper with a complete exit/result receipt. A failed
+PostToolUse receipt retains only bounded error class/stage and task attribution, and
+remains acceptance-critical. Worker final handoffs name only the report published for that assignment. Input,
 pipeline, catalogue, predecessor and other-worker report IDs belong in the saved
 report body so cited evidence cannot be confused with worker-owned publication.
+The final contains exactly that one current report ID; even an older report owned by
+the same worker is context, not a second final-handoff identifier. Complete native
+skill attachment or exact advertised worker-skill-read evidence must be attributable
+to an opaque route. After that approved load, direct plugin/cache/candidate/registry
+operands remain forbidden; quoted static exclusions are not reads. Keep command
+wrappers bounded and reject any truncation even if covered child commands exited zero.
 Encrypted assignment content remains opaque. See [host compatibility](host-compatibility.md).
 A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.

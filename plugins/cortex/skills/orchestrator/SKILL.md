@@ -5,10 +5,9 @@ description: Explicit Cortex coordinator for adaptive Markdown pipelines, specia
 
 # Cortex Orchestrator
 
-Use this workflow only after the user explicitly selects Cortex orchestration.
-Keep it active for task follow-ups until the user selects normal work or cancels.
-The coordinator owns intent, delegation, steering, acceptance and communication;
-the server stores tasks, advisory governance and Markdown reports.
+Use this only after explicit Cortex selection; keep it for follow-ups until normal
+work or cancellation. The coordinator owns intent, delegation, steering, acceptance,
+and communication; the server stores tasks, advisory governance, and Markdown reports.
 
 In code mode, forward the complete command result so its receipt reaches the model:
 
@@ -29,10 +28,9 @@ Next emit the complete declaration, using the exact observed name needed now:
 text(ALL_TOOLS.find(x => x.name === "mcp__cortex__create_task").description);
 ```
 
-Names alone contain no input contract. Supply every required field from that
-complete declaration; declared defaults apply only to optional fields. Never use
-an empty trial call to discover requirements. Reuse attached full declarations,
-and reload needed ones after compaction.
+Names are not contracts: supply required declared fields; defaults apply only to
+optional fields. Never use empty trial calls. Reuse declarations and reload after
+compaction.
 
 Use the language of the user's latest own prose for user-facing communication unless
 another is requested. Keep internal coordination/reports and all worker communication
@@ -43,15 +41,11 @@ require complete loading before discovery or project work and English-only
 communication from the first response. A role label or this coordinator skill
 does not load the worker's graph and native-message protocol.
 
-The report-only senior consultant is the filesystem-skill exception. Read its
+The report-only senior consultant is the filesystem-skill exception: read its
 [complete skill](../worker-senior-consultant/SKILL.md) and
 [publication reference](../worker-senior-consultant/references/report-publication.md)
-at those exact paths; do not list/search/install. After the token, say: "Complete
-instructions follow. Do not open files or run commands to load guidance. Discover
-tool names first, then one exact complete declaration; never dump multiple
-descriptions. Ask your native parent if anything is missing." Attach both full
-bodies (not paths/summaries) after the packet; instructions are outside its bound.
-Discover only needed complete schemas and name the assignment `senior_consultant`.
+at those exact paths, never by listing/searching. Attach both full bodies after its
+packet; discover only needed schemas and name it `senior_consultant`.
 
 ## Coordinator responsibility
 
@@ -99,6 +93,10 @@ edition records:
 - provenance pointers: source revision, attachment availability, report references
   and verified artifact revision.
 
+Record model-owned `implementation_state` (change/evidence), `delivery_state`
+(observed receipt/revision), and `acceptance_state` (coordinator judgment). Delivery
+never implies acceptance; missing external receipts/revisions are unverified.
+
 Keep original user messages separate from summaries. Two identical messages remain
 distinct source events. Record how each attachment can be reopened and mark an
 unavailable attachment as an explicit gap. A new message, attachment state change or
@@ -118,28 +116,26 @@ genuinely needed later contents. For interrupted or conflicted drafts, read
 
 ### Optional context-selected guidance
 
-Map claims to evidence/unrun checks; distinguish facts/hypotheses, state a pre-repair
-check; before parallel dispatch state independence, surface, resources, dependencies,
-and output. Advisory: no gate, stage, approval, mandatory section, or acceptance.
+Map claims to evidence/unrun checks, distinguish facts/hypotheses, state a pre-repair
+check and parallel independence/surface/resources/dependencies/output. Advisory only.
+
+Record causal deltas with basis, uncertainty, disconfirmation. Before a live retry,
+select outcome/boundary/revision/rollback/receipt/discriminator and retain
+failed-canary evidence. After expansion/distinct failure: reconcile/replan;
+advisory. Reuse
+`(artifact_revision, acceptance_boundary, check_identity)`; unchanged repetition needs
+new evidence/reason. Bounded/null-safe rollout/review/recheck/delivery-error/wait
+costs inform replanning only, never routing or acceptance.
 
 ### Optional consequential-transition consultation
 
-At a work transition, consider one bounded senior consultation only when both a
-consequence trigger and an uncertainty trigger apply. Otherwise proceed without consulting.
-It is advisory, coordinator-selected, may run concurrently when safe,
-never blocks by rule, and never transfers planning, steering, evidence interpretation, acceptance or user communication. Consequence: material
-architecture/public-tool/storage/security/release/migration/multi-owner or
-hard-to-reverse external/scope/compatibility choice; contradictory repair-to-
-acceptance evidence, unresolved finding, broad claim, or repeated-failure/surprise
-replanning. Uncertainty: material alternatives; fact/hypothesis conflict,
-untested critical assumption, no discriminating check/evidence boundary, or a
-fresh view likely to change the decision. Exclude routine, reversible or deterministic work,
-ordinary tests/already-decided detail, phase/time/report
-existence, executor-evidence requests, unchanged packets, consultation
-chains/sign-off/fixed counts and active incident recovery. Use one compact packet
-(question, constraints/revision, transition, alternatives, facts/hypotheses,
-selected report/artifact IDs, attempts, owners, decision, requested check), never copied report bodies or private data; record triggers, report, rationale, owner,
-next check and whether advice changed. Evaluate quality and overhead against the unchanged baseline.
+Consider one bounded senior consultation only when both consequence and uncertainty
+apply; otherwise proceed. It is advisory, concurrent when safe, never a block or
+transfer of planning/acceptance. Consequence includes material/hard-to-reverse or
+repeated-failure choices; uncertainty includes alternatives, conflicted hypotheses,
+untested assumptions, or missing discriminator. Exclude routine work, ordinary tests,
+unchanged packets, fixed counts/sign-off, and active incidents. Record a compact
+packet, triggers/rationale, owner, next check, decision change, quality and overhead.
 
 Use one suitable worker for a bounded task; it may inspect, change, verify and
 document its area. Explorer, planner, reviewer, verifier and writer are available
@@ -231,6 +227,15 @@ the native collaboration controls: `collaboration.wait_agent`,
 orchestration workers. Codex app thread tools are reserved for explicit user-owned
 task management, not worker coordination.
 
+If worker Cortex MCP is unavailable, use only shared closed
+`cortex-native-worker-result-v1`. Require one native spawn, terminal wait, parent/task,
+registered profile, and assignment digest. The coordinator publishes
+`Delegation evidence: native_worker_result` with `evidence_source=native_worker_result`,
+`worker_mcp_unavailable=true`, `host_enforcement_state=unverified`, correlation IDs,
+asserted hashes, and limits: coordinator evidence, never a worker report or host proof.
+Missing, duplicate, truncated, replayed, or competing evidence blocks; never invent a
+receipt or use generic shell work.
+
 Include only the short loading requirement, not pasted protocols, schemas or
 checklists. Workers load the selected complete skill normally and progressively load
 applicable artifact skills.
@@ -239,29 +244,29 @@ Use these 23 profiles:
 
 | Profile | Select for |
 | --- | --- |
-| `accessibility_auditor` | Independent accessibility and assistive-technology inspection |
-| `accessibility_fixer` | Bounded remediation of accepted accessibility defects |
-| `architect` | Consequential boundaries, contracts and cross-cutting design |
-| `backend_dev` | Server, API, business logic and persistence implementation |
-| `build_verification` | Independent build, package, install or release evidence |
-| `code_reviewer` | Defect-focused review of completed or proposed changes |
-| `data_engineer` | ETL, migrations, backfills and data-integrity work |
-| `database_architect` | Schema, index, query-plan and migration design |
-| `debugger` | Failure reproduction, root cause and focused repair |
-| `devops_engineer` | CI/CD, containers, deployment and runtime configuration |
-| `explorer` | Unknown execution paths, ownership and affected surfaces |
-| `frontend_dev` | Browser UI, state, styling and frontend tests |
-| `fullstack_dev` | One cohesive change across client and server |
-| `general` | Bounded work with no justified narrower specialty |
-| `mobile_dev` | iOS, Android, React Native or Flutter implementation |
-| `performance_engineer` | Measurement, profiling and optimization-risk analysis |
-| `planner` | Work breakdown or dependency analysis that changes execution |
-| `qa_engineer` | Acceptance coverage, regression tests and quality evidence |
-| `refactorer` | Behavior-preserving structural improvement |
-| `security_auditor` | Trust boundaries, auth, secrets, crypto and dependency risk |
-| `senior_consultant` | One coordinator decision using selected published reports only |
-| `technical_writer` | Source-backed durable project documentation |
-| `ux_designer` | User flows, hierarchy, responsive and interaction rules |
+| `accessibility_auditor` | WCAG and assistive-tech audit |
+| `accessibility_fixer` | Accepted accessibility remediation |
+| `architect` | Consequential contracts and boundaries |
+| `backend_dev` | APIs, logic, and persistence |
+| `build_verification` | Independent build/release evidence |
+| `code_reviewer` | Defect-focused change review |
+| `data_engineer` | ETL, migration, and integrity work |
+| `database_architect` | Schema, index, and query-plan design |
+| `debugger` | Reproduction, root cause, and repair |
+| `devops_engineer` | CI/CD and runtime configuration |
+| `explorer` | Unknown paths, ownership, and impact |
+| `frontend_dev` | Browser UI and tests |
+| `fullstack_dev` | Cohesive client/server change |
+| `general` | No justified narrower specialty |
+| `mobile_dev` | iOS, Android, React Native, Flutter |
+| `performance_engineer` | Measurement and optimization risk |
+| `planner` | Execution-changing work breakdown |
+| `qa_engineer` | Coverage, regression, and quality evidence |
+| `refactorer` | Behavior-preserving restructuring |
+| `security_auditor` | Auth, secrets, crypto, dependency risk |
+| `senior_consultant` | One decision from selected reports |
+| `technical_writer` | Source-backed documentation |
+| `ux_designer` | Flows, hierarchy, responsive interaction |
 
 ## Evidence, reports and acceptance
 
@@ -283,6 +288,10 @@ they do, the next coordinator action is acceptance and no project tool call. Whe
 technical check is missing, delegate that check to a worker; do not run it yourself.
 Document missing or failed checks as open work. Update the pipeline with the
 decision, evidence pointers and remaining actions.
+
+Published-report receipt establishes delivery only; accept only after reconciling
+current revision, boundary, and evidence. Repeat verification only with the matching
+reuse identity or recorded new evidence/rerun reason.
 
 Never emit a terminal final while an assigned owner is active or a required report/check
 is outstanding. Interim updates are non-terminal. Before acceptance/final, reconcile
@@ -309,8 +318,13 @@ list_agents/evidence reads are internal; never call `send_message`/`followup_tas
 after a wait alone. Legal: inbound same-owner reply, direct user
 steering/clarification or follow-up after terminal result/report reconciliation
 
-After a worker completion, require its report reference and reconcile the matching
-preview before dependent work. For parallel independent workers, wait for the group
+Wait silently when evidence/state is unchanged: timeout, pending, elapsed time, or a
+poll alone is not a user update. Communicate only a delta, blocker, decision, or action change.
+
+After a worker completion, require exactly that worker's current report reference in
+its native final and reconcile the matching preview before dependent work. Foreign or
+predecessor report IDs belong in its saved report/context, never its final handoff.
+For parallel independent workers, wait for the group
 and fetch their previews together unless one completed result safely unlocks useful
 work.
 

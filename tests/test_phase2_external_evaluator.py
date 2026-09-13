@@ -35,8 +35,8 @@ def _native_turn(thread_id: str = "thread-current", control: str = "1" * 64,
 def test_phase2_identity_lock_matches_current_plugin_manifest():
     manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
     expected_version = manifest["version"]
-    expected_payload_sha256 = "e4f332d43bf380248c5de142b835a62a888f8885ad6577677aa4f394804733d7"
-    assert expected_version == "1.15.9+codex.sha256.e4f332d43bf38024"
+    expected_payload_sha256 = "c4fcf10bf7708d970428d472dd362065cbe94d53c4a579eab380a00b0f4f8ded"
+    assert expected_version == "1.15.9+codex.sha256.c4fcf10bf7708d97"
     assert expected_version == phase2_cli_runner.CANDIDATE_VERSION
     assert expected_version == phase2_cli_auditor.CANDIDATE_VERSION
     assert expected_payload_sha256 == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
@@ -46,16 +46,20 @@ def test_phase2_identity_lock_matches_current_plugin_manifest():
 
 def test_phase2_live_harness_trusted_anchors_match_current_source():
     harness_sha256 = hashlib.sha256((ROOT / "scripts/cortex-live-smoke").read_bytes()).hexdigest()
+    observer_sha256 = hashlib.sha256((ROOT / "scripts/cortex-desktop-dev").read_bytes()).hexdigest()
     adapter_sha256 = hashlib.sha256((ROOT / "scripts/phase2_cli_adapter.py").read_bytes()).hexdigest()
     assert {phase2_cli_runner.TRUSTED_HARNESS_SHA256,
             phase2_cli_auditor.TRUSTED_HARNESS_SHA256,
             phase2_cli_adapter.TRUSTED_HARNESS_SHA256} == {harness_sha256}
     assert {phase2_cli_runner.TRUSTED_ADAPTER_SHA256,
             phase2_cli_auditor.TRUSTED_ADAPTER_SHA256} == {adapter_sha256}
+    assert {phase2_cli_runner.TRUSTED_OBSERVER_SHA256,
+            phase2_cli_auditor.TRUSTED_OBSERVER_SHA256,
+            phase2_cli_adapter.TRUSTED_OBSERVER_SHA256} == {observer_sha256}
     assert {phase2_cli_runner.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
-                "2cd411e289b6e9e8850136d733ae2f873e1702838ad6aef30b7fe68b4b8dbe63"
+                "7ccf65e07f5e54dd5196ec1622bc4d0669454baf929f84a7e9e11e077fb65103"
             }
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_auditor.EVIDENCE_COLLECTION
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_adapter.EVIDENCE_CONTRACT
@@ -2002,6 +2006,14 @@ def test_native_user_turn_rejects_unrelated_same_cwd_root_without_owned_process_
     assert receipt[0]["control_record_sha256"] == "c" * 64
     assert receipt[0]["session_receipt"] == "d" * 64
     assert receipt[0]["prompt_sha256"] == hashlib.sha256(b"exact prompt").hexdigest()
+    # Current-host observational MCP-first qualification has no Phase 2
+    # control record. The same owned rollout remains usable as native evidence
+    # without fabricating a strict control binding.
+    data.pop("phase2_control_sha256"); data.pop("session_receipt")
+    observational = reader(data, "exact prompt")
+    assert len(observational) == 1
+    assert "control_record_sha256" not in observational[0]
+    assert "session_receipt" not in observational[0]
 
 
 @pytest.mark.parametrize("churn", ["added", "removed", "retargeted"])
@@ -3223,3 +3235,87 @@ def test_offline_host_receipts_do_not_probe_live_tools(tmp_path):
     source = (ROOT / "scripts/phase2_cli_runner.py").read_text()
     assert '["tmux", "-V"]' not in source
     assert '["codex", "--version"]' not in source
+def test_live_exit_marker_evidence_waits_for_owned_bash_and_marks_missing(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="exit_marker_timing")
+    probe = harness["live_exit_marker_evidence"]
+    namespace = probe.__globals__
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    terminal = {"current_command":"bash", "dead":False, "descendants":[]}
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: terminal)
+    monkeypatch.setattr(namespace["time"], "sleep", lambda _interval: None)
+    assert probe({}, attempts=1, interval=0)["status"] == "evidence_incomplete_missing_exit_marker"
+    (tmp_path / "capture.txt").write_text("Cortex live-dev exit=0\n")
+    assert probe({}, attempts=1, interval=0)["status"] == "complete"
+
+
+def test_live_exit_marker_evidence_reports_idle_composer_for_outcome_based_completion(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="composer_marker_branch")
+    probe = harness["live_exit_marker_evidence"]
+    namespace = probe.__globals__
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: {
+        "current_command":"codex", "dead":False,
+        "descendants":[{"pid":1235,"ppid":1234,"command":"codex"}],
+    })
+    assert probe({}, attempts=1, interval=0)["status"] == "idle_composer_observed"
+
+
+def test_ordinary_stop_seals_immutable_pre_stop_bundle_and_reserves_distinct_post_stop_path(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="pre_stop_bundle")
+    seal = harness["seal_pre_stop_evidence"]
+    namespace = seal.__globals__
+    events = tmp_path / "events"
+    events.mkdir(mode=0o700)
+    (tmp_path / "capture.txt").write_text("Cortex live-dev exit=0\n")
+    receipt = "a" * 64
+    calls = [{"thread_id": "root", "role": "coordinator", "tool": "functions.exec", "outcome": "success"}]
+    mcp = [{"event_kind": "mcp", "operation": "write_report", "outcome": "success"}]
+    hooks = [{"event_kind": "hook", "hook_event": "PostToolUse", "outcome": "success"}]
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    monkeypatch.setitem(namespace, "_observer_namespace", lambda _name: {
+        "observed_tool_calls": lambda _data: calls,
+    })
+    monkeypatch.setitem(namespace, "normalized_observer_events", lambda _observer, _events: (mcp, hooks))
+    sealed = seal({"session_receipt": receipt, "events": str(events)}, {
+        "status": "complete", "exit_status": 0,
+    })
+    bundle = Path(sealed["path"])
+    manifest = json.loads((bundle / "evidence-bundle.json").read_text())
+    assert bundle.stat().st_mode & 0o777 == 0o700
+    assert manifest["schema_version"] == "cortex-live-pre-stop-evidence-v1"
+    assert manifest["session_receipt"] == receipt
+    assert sealed["sha256"] == hashlib.sha256((bundle / "evidence-bundle.json").read_bytes()).hexdigest()
+    for name, entry in manifest["artifacts"].items():
+        artifact = bundle / name
+        assert artifact.stat().st_mode & 0o777 == 0o600
+        assert entry["sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    post_stop = Path(sealed["post_stop_directory"])
+    assert post_stop != bundle
+    post_stop.mkdir(mode=0o700)
+    (post_stop / "calls.jsonl").write_text('{"error":"no active session"}\n')
+    assert 'no active session' not in (bundle / "calls.jsonl").read_text()
+    with pytest.raises(RuntimeError, match="already exists"):
+        seal({"session_receipt": receipt, "events": str(events)}, {"status": "complete", "exit_status": 0})
+
+
+def test_ordinary_stop_refuses_cleanup_before_owned_bash_exit_marker(tmp_path, monkeypatch):
+    harness = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="ordinary_stop_marker_gate")
+    main = harness["main"]
+    namespace = main.__globals__
+    events = tmp_path / "events"
+    events.mkdir(mode=0o700)
+    (tmp_path / "capture.txt").write_text("still running\n")
+    session = {"session_receipt": "b" * 64, "events": str(events)}
+    (tmp_path / "session.json").write_text(json.dumps(session))
+    actions = []
+    monkeypatch.setitem(namespace, "STATE", tmp_path)
+    monkeypatch.setitem(namespace, "terminal_snapshot", lambda _data: {
+        "current_command": "bash", "dead": False, "descendants": [],
+    })
+    monkeypatch.setitem(namespace, "tmux", lambda *args, **kwargs: actions.append(args))
+    monkeypatch.setattr(namespace["time"], "sleep", lambda _interval: None)
+    monkeypatch.setattr(sys, "argv", ["cortex-live-smoke", "stop"])
+    with pytest.raises(RuntimeError, match="Cortex live-dev exit=0"):
+        main()
+    assert (tmp_path / "session.json").exists()
+    assert not actions
