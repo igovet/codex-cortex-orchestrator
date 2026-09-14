@@ -69,8 +69,8 @@ python3 scripts/phase2_cli_runner.py \
   --baseline-commit 17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9 \
   --baseline-version 1.15.6+codex.sha256.cc786ae2fbd04cf1 \
   --baseline-payload-sha256 cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698 \
-  --candidate-version 1.15.9+codex.sha256.f9c04c7117827671 \
-  --candidate-payload-sha256 f9c04c7117827671407219726941391f6936180063447e6f90011e6513176e18 \
+  --candidate-version 1.15.9+codex.sha256.121a79864903aeee \
+  --candidate-payload-sha256 121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750 \
   --coordinator-model gpt-5.6-luna --coordinator-effort high \
   --worker-model gpt-5.6-luna --worker-effort medium \
   --cell-timeout-seconds 1800 --wait-timeout-ms 600000
@@ -364,6 +364,15 @@ active, changing-progress, ownership-raced, and disconnected evidence fails
 closed. The capture is reset at start. Stop repeats all final snapshots against
 the sealed bundle immediately before cleanup; use bundle-authorized
 `stop --interrupt` when the accepted terminal state is the idle composer.
+
+For every successful native spawn represented in an idle-composer proof, the
+owner must also have a successful exact native `wait_agent` recorded after that
+spawn. If the host exposes `wait_target_thread_ids`, the spawned worker must be
+listed; when that target metadata is unavailable, only the post-spawn owner-bound
+completed wait is the supported current-host fallback. The coordinator keeps
+pending or unchanged worker waits silent; this evaluator records evidence but does
+not create a host continuation primitive, and lifecycle hooks cannot resume a
+stopped turn.
 
 The completion bundle additionally records `cell_id`, the pre-submission nonce,
 workdir/store, session receipt, exact request digest, submission timestamp,

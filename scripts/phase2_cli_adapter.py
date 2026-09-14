@@ -35,11 +35,11 @@ MODEL = "gpt-5.6-luna"
 EFFORT = "high"
 TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
 TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "b8701f7c3e61c393f1d544926bba11aa7c82349c3b7ef8ab2b36f18ec1191a27"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.f9c04c7117827671"
-CANDIDATE_PAYLOAD_SHA256 = "f9c04c7117827671407219726941391f6936180063447e6f90011e6513176e18"
+CANDIDATE_VERSION = "1.15.9+codex.sha256.121a79864903aeee"
+CANDIDATE_PAYLOAD_SHA256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
 EVIDENCE_SCHEMA = "phase2-cli-evidence-bundle-v1"
 CELL_AUTH_SCHEMA = "phase2-cli-cell-authorization-v2"
 SESSION_BINDING_SCHEMA = "phase2-cli-session-binding-v1"
@@ -1780,7 +1780,7 @@ def _validate_inactive_activity(calls_body: str, audit_body: str, *,
     if any(not terminal_call(row) for row in calls):
         raise AdapterError("terminal proof refused while coordinator, worker, task, exec, or wait activity is active")
     for row in calls:
-        if "wait" not in str(row.get("tool", "")).lower():
+        if row.get("tool") != "wait_agent":
             continue
         if row.get("outcome") != "success" or row.get("host_status") not in TERMINAL_HOST_STATUSES:
             raise AdapterError("terminal proof requires an explicitly completed terminal wait")
@@ -1829,12 +1829,44 @@ def _validate_inactive_activity(calls_body: str, audit_body: str, *,
     final_report = None
     if require_completed_task:
         workers = thread_ids - {root}
+        spawned_workers = [
+            (index, row["spawned_thread_id"], row.get("thread_id"))
+            for index, row in enumerate(calls)
+            if row.get("tool") == "spawn_agent" and row.get("outcome") == "success"
+            and isinstance(row.get("spawned_thread_id"), str)
+        ]
         terminal_workers = {
             row.get("thread_id") for row in calls
             if row.get("tool") == "native_agent_result" and row.get("outcome") == "success"
         }
         if workers - terminal_workers:
             raise AdapterError("terminal proof refused while a worker lacks a terminal result")
+        terminal_waits = [
+            (index, row) for index, row in enumerate(calls)
+            if row.get("tool") == "wait_agent"
+            and row.get("outcome") == "success"
+            and row.get("host_status") in TERMINAL_HOST_STATUSES
+            and isinstance(row.get("completed_timestamp"), str)
+            and row["completed_timestamp"]
+        ]
+        for spawn_index, worker, owner in spawned_workers:
+            reconciled = False
+            for wait_index, wait in terminal_waits:
+                if wait_index <= spawn_index or wait.get("thread_id") != owner:
+                    continue
+                targets = wait.get("wait_target_thread_ids")
+                if targets is None:
+                    # Current hosts can expose a terminal wait without its
+                    # target list. Its owner-bound terminal receipt is the
+                    # supported reconciliation evidence in that case.
+                    reconciled = True
+                    break
+                if (isinstance(targets, list) and worker in targets
+                        and all(isinstance(target, str) and target for target in targets)):
+                    reconciled = True
+                    break
+            if not reconciled:
+                raise AdapterError("terminal proof requires a successful terminal worker wait/reconciliation")
         if any(
             next(row for row in reversed(thread_rows) if row["thread_id"] == worker).get("tool")
             != "native_agent_result"

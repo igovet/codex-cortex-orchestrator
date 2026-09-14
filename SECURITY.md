@@ -21,10 +21,18 @@ descriptions below: hooks never return a runtime veto. Proposed policy denials
 are retained as diagnostics with `runtime_enforcement=none`, not prevented-action
 receipts. Codex sandbox, permissions and approvals remain authoritative; storage
 and audit still report invalid or incomplete evidence rather than invent success.
+Terminal qualification also requires a successful exact native `wait_agent` recorded
+after each corresponding native spawn before an idle-composer result is admissible.
+When the host supplies wait target metadata, it must include the spawned worker;
+when that metadata is unavailable, only a post-spawn owner-bound completed wait is
+supported. This evidence rule is an audit boundary, not a host continuation
+primitive: hooks remain unable to resume a stopped host turn.
 
 ## Stable release status
 
-The current 1.15.9 source candidate is `1.15.9+codex.sha256.43359f40d04b0560`.
+The current 1.15.9 source candidate is `1.15.9+codex.sha256.121a79864903aeee`
+(payload SHA-256
+`121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`).
 The final CLI/Desktop qualification (`r_648c4f40dcf9`) applies only to the
 superseded `e4f332d43bf38024` payload, not to this changed candidate. Its package,
 sync, full-suite, and real-host qualification remain required, and no efficacy,
