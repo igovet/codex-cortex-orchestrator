@@ -11,6 +11,20 @@
   user-source reads and bounded evidence recovery beyond the first page.
 - Keep knowledge commands, index routing and rereading after summarization as
   bundled model instructions; do not rebuild a workflow engine around them.
+- Make ordinary completion include a model-owned documentation-impact review. Supported
+  impact assigns the appropriate documentation owner to load/apply `documentation-sync`,
+  with exact affected ownership and proportionate verification; after the owner's
+  published report, the coordinator uses only Cortex report/public-evidence reads to
+  compare owner-cited documentation hashes and check results before acceptance. The
+  coordinator does not read another role's `SKILL.md`; any additional project
+  inspection, file read/hash or command verification is delegated to an appropriate
+  worker and returned in a task-bound report, and the coordinator does not rerun
+  project checks itself. Sufficient no-impact evidence needs no token edit or extra
+  worker.
+  Missing inspection is not evidence of no impact, and `knowledge-harvest` remains
+  explicit-only. Partial or inconclusive inspection requires bounded evidence gathering
+  or leaves impact unresolved with acceptance withheld until synchronization or sufficient
+  no-impact evidence exists.
 - Keep explicit retention cleanup as a host-side command with project isolation.
 - Preserve semantic version 1.15.9 for this release; update the payload hash after
   every installable payload edit.

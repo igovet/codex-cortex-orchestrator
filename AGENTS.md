@@ -166,9 +166,17 @@ owned bash marker; missing-marker evidence remains incomplete and preserves the
 session for an explicit failure path. Never kill the tmux server.
 
 Real Desktop uses `scripts/cortex-desktop-dev`, the same isolated candidate and
-a disposable Electron profile. Start with `--prompt-file`, confirm the prepared
-composer, and use its `send` command, which focuses that exact window, submits with
-one plain `Return`, and succeeds only after one new task receipt appears. Use `events` for MCP outcomes and `calls` for every
+a disposable Electron profile. Before launch, compute the exact final result
+artifact SHA-256 and retain it as `EXACT_RESULT_SHA256`. Start with `--prompt-file`
+and both expected-result bindings: `--expected-result-path README.md` (or the
+exact project-root result leaf) and `--expected-result-sha256 EXACT_RESULT_SHA256`.
+Confirm the prepared composer, then use plain `send` with no `--prompt-file`;
+it focuses that exact window, submits with one plain `Return`, and succeeds only
+after one new task receipt appears. Wait for the task to become idle, the final
+worker report to be published, and coordinator report/public-evidence reconciliation
+to complete before collecting `calls` and `events` and running `audit`. Inspect the
+audit exit code; while the session state still exists, run plain `stop` only after
+the audit result has been captured. Use `events` for MCP outcomes and `calls` for every
 argument-free coordinator/worker host-tool invocation; review every call for necessity
 and correct role ownership. CLI/Desktop parity requires consecutive successful real-host
 runs on one unchanged payload. State an unavailable host as unverified.

@@ -25,7 +25,18 @@ The separate [control skill](../../plugins/cortex/skills/cortex-control/SKILL.md
 is limited to retention maintenance and optional report examples.
 
 Knowledge maintenance retains `harvest` and `harvest-refresh`, index-driven
-routing, preservation of manual docs and source-based completeness checks.
+routing, preservation of manual docs and source-based completeness checks. Ordinary
+completion now includes a model-owned review of verified changes for documentation
+impact: supported impact assigns the appropriate documentation owner to load/apply
+`documentation-sync`, and after that owner's report the coordinator uses only Cortex
+report/public-evidence reads to compare owner-cited documentation hashes and check
+results before acceptance. Additional project inspection, file read/hash or command
+verification is delegated to an appropriate worker and returned in a task-bound report;
+the coordinator does not rerun project checks itself. Sufficient no-impact evidence is
+recorded without an unnecessary worker. Harvest remains
+explicit-only. Partial or inconclusive inspection leaves impact unresolved and
+withholds acceptance until bounded evidence, synchronization, or sufficient no-impact
+evidence resolves it.
 See [knowledge routing](../features/knowledge-routing/index.md),
 [decisions](decisions.md) and [gotchas](gotchas.md).
 

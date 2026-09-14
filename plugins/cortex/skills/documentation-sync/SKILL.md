@@ -10,13 +10,26 @@ description: Update affected project knowledge after verified changes while pres
 | Role | Work |
 | --- | --- |
 | Coordinator | Select scope and specialists from documentation-impact previews and the current pipeline |
-| Technical writer | Confirm source-backed facts and update only affected documentation |
+| Technical writer / assigned documentation owner | Load/apply this skill, confirm source-backed facts and update only affected documentation |
 | Independent reviewer when warranted | Check material documentation changes against source, commands and links |
 
 The coordinator may read the bounded report evidence needed for a decision, while
-workers own project indexes, files, diffs and document edits. Delegate project
-inspection or specialist interpretation when needed. A stale or absent index does
-not automatically require harvest.
+workers own project indexes, files, diffs and document edits. For post-owner
+reconciliation, the coordinator reads only Cortex reports and public evidence to
+compare owner-cited artifact hashes and check results. Any additional project
+inspection, file read/hash or command verification is delegated to an appropriate
+worker and returned in a task-bound report; the coordinator must not rerun project
+checks itself. A stale or absent index does not automatically require harvest.
+
+The assigned documentation owner loads/applies this skill; the coordinator assigns
+that owner and does not read another role's `SKILL.md`.
+
+For ordinary completion, apply this skill only after the coordinator's evidence-backed
+impact review. Positive impact selects the exact affected documentation owner(s) and
+requires their updates and proportionate verification before acceptance; a supported
+no-impact conclusion remains a coordinator record and needs no token edit or worker.
+If inspection is partial or inconclusive, gather bounded missing evidence or leave the
+impact unresolved; acceptance waits for synchronization or sufficient no-impact evidence.
 
 ## Inputs for the writer
 

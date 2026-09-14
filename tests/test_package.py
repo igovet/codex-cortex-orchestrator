@@ -239,7 +239,9 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     # The opt-in consultant and explicit native-worker tracking boundary add a
     # bounded coordinator packet while retaining the compact companion budget.
     assert companion < 27_500
-    assert len(orchestrator) < 6500
+    # The coordinator-owner assignment and post-report reconciliation clauses add
+    # a bounded completion branch while retaining a compact source budget.
+    assert len(orchestrator) < 7700
     routing = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
     assert '`gpt-5.6-luna` at `medium` or `high`' in routing
     assert 'implementation returns to Luna/Terra' in routing
@@ -763,7 +765,8 @@ def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
     assert 'implementation_state' in orchestrator
     assert 'delivery_state' in orchestrator
     assert 'acceptance_state' in orchestrator
-    assert 'CI, reports and commands prove only their own boundary' in orchestrator
+    assert ' '.join(orchestrator.split()).find(
+        'CI, reports and commands prove only their own boundary') >= 0
     assert '(artifact_revision, acceptance_boundary, check_identity)' in orchestrator
     assert 'basis, uncertainty, and\ndisconfirmation' in worker
     assert 'receipt-backed' in worker
@@ -1889,7 +1892,8 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     import re
     root = PLUGIN/'skills/orchestrator'
     body = (root/'SKILL.md').read_text()
-    assert len(body) < 6500
+    # Keep the source compact while allowing the explicit owner/reconciliation branch.
+    assert len(body) < 7700
     links = re.findall(r'\]\((references/[^)]+)\)', body)
     assert len(set(links)) >= 7
     for link in links:
@@ -1897,6 +1901,99 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     routing = (root/'references/worker-routing.md').read_text()
     for profile in json.loads((PLUGIN/'profiles.json').read_text())['profiles']:
         assert '`'+profile['name']+'`' in routing
+
+
+def test_ordinary_completion_documentation_branches_are_semantic_and_conditional():
+    import re
+
+    def completion_text(source):
+        start = source.index('5. Before ordinary acceptance')
+        end = source.index('\n\nFor production', start)
+        return ' '.join(source[start:end].split())
+
+    def assert_contract(completion):
+        positive = re.search(
+            r'If impact is supported.*?assign the appropriate documentation owner to load/apply '
+            r'`cortex:documentation-sync`; give that owner exact affected documentation '
+            r'ownership and require its updates plus proportionate verification before acceptance',
+            completion)
+        insufficient = re.search(
+            r'If inspection is partial or inconclusive, gather bounded missing evidence '
+            r'or leave impact unresolved and withhold acceptance until either supported '
+            r'`documentation-sync` synchronization completes or sufficient no-impact '
+            r'evidence exists', completion)
+        no_impact = re.search(
+            r'If sufficient evidence supports no impact, record a concise no-impact '
+            r'conclusion without token edits or an unnecessary worker', completion)
+        owner = re.search(
+            r'assign the appropriate documentation owner to load/apply '
+            r'`cortex:documentation-sync`', completion)
+        reconcile = re.search(
+            r'After the owner.s published documentation report, only Cortex '
+            r'report/public-evidence reads may compare its cited documentation hashes'
+            r'/check results before acceptance', completion)
+        delegated = re.search(
+            r'delegate any additional project inspection, file read/hash or command '
+            r'verification to an appropriate worker; return evidence in a task-bound '
+            r'report; the coordinator must not rerun project checks', completion)
+        accept = completion.index('Then accept the observed outcome')
+        assert positive and owner and reconcile and delegated and insufficient and no_impact
+        assert positive.start() < owner.start() < reconcile.start() < delegated.start() < insufficient.start() < no_impact.start() < accept
+        assert 'missing inspection is not evidence of no impact' in completion
+        assert "The coordinator does not read another role's `SKILL.md`" in completion
+        assert re.search(
+            r'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census',
+            completion)
+        assert 'model-owned/advisory decisions are not runtime gates' in completion
+        assert not re.search(
+            r'\b(?:for every ordinary task|regardless of impact|without regard to impact|always)\b'
+            r'.*?`cortex:documentation-sync`',
+            completion,
+            re.IGNORECASE)
+
+    source = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    completion = completion_text(source)
+    assert_contract(completion)
+
+    # Branch polarity fixtures: these mutations must be rejected by the contract.
+    unconditional = completion.replace(
+        'If impact is supported, assign the appropriate documentation owner to load/apply',
+        'For every ordinary task, load/apply `cortex:documentation-sync`. '
+        'If impact is supported, assign the appropriate documentation owner to load/apply',
+        1)
+    with pytest.raises(AssertionError):
+        assert_contract(unconditional)
+    weakened_hold = completion.replace(
+        'withhold acceptance until either supported `documentation-sync` '
+        'synchronization completes or sufficient no-impact evidence exists',
+        'continue to acceptance without documentation evidence', 1)
+    with pytest.raises(AssertionError):
+        assert_contract(weakened_hold)
+    direct_reconciliation = completion.replace(
+        'only Cortex report/public-evidence reads may compare its cited documentation hashes'
+        '/check results',
+        'read project files and rerun project checks', 1)
+    with pytest.raises(AssertionError):
+        assert_contract(direct_reconciliation)
+    direct_verification = completion.replace(
+        'delegate any additional project inspection, file read/hash or command verification '
+        'to an appropriate worker; return evidence in a task-bound report; the coordinator '
+        'must not rerun project checks',
+        'may inspect files and rerun project checks directly', 1)
+    with pytest.raises(AssertionError):
+        assert_contract(direct_verification)
+    automatic_harvest = completion.replace(
+        'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census',
+        '`cortex:knowledge-harvest` runs after every ordinary task', 1)
+    with pytest.raises(AssertionError):
+        assert_contract(automatic_harvest)
+
+    documentation_sync = ' '.join((PLUGIN/'skills/documentation-sync/SKILL.md').read_text().split())
+    assert 'evidence-backed impact review' in documentation_sync
+    assert 'If inspection is partial or inconclusive' in documentation_sync
+    assert 'acceptance waits for synchronization or sufficient no-impact evidence' in documentation_sync
+    assert 'post-owner reconciliation' in documentation_sync
+    assert 'the coordinator must not rerun project checks itself' in documentation_sync
 
 
 def test_shared_worker_protocol_routes_rare_interactive_procedure():

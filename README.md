@@ -464,12 +464,23 @@ Missing indexes do not force harvest during an ordinary task.
 
 #### Documentation impact is assessed after verified tasks
 
-The coordinator obtains a concise documentation-impact finding from a specialist.
-When updates are required, a worker loads the bundled documentation-sync skill,
-updates affected knowledge and verifies it before the task is completed.
-Independent checking is proportional to the material impact. A supported no-impact
-conclusion may use existing evidence; no extra worker or fixed report section is
-required merely to state it. Source, tests and executable configuration outrank prose.
+Before accepting an ordinary completed task, the coordinator reviews verified changes
+for durable project-knowledge or public-documentation impact. Missing inspection is
+not evidence of no impact. When impact is supported, the coordinator assigns the
+appropriate documentation owner to load/apply the bundled documentation-sync skill,
+gives that owner exact documentation ownership, and requires affected knowledge
+updates plus proportionate verification before completion. The coordinator does not
+read another role's `SKILL.md`; after the owner's published documentation report, it
+uses only Cortex report/public-evidence reads to compare owner-cited documentation
+hashes and check results before acceptance. Any additional project inspection, file
+read/hash or command verification is delegated to an appropriate worker and returned
+in a task-bound report; the coordinator does not rerun project checks itself.
+When sufficient evidence supports no
+impact, the coordinator records a concise conclusion without token edits or an extra
+worker. This advisory review does not activate the explicit-only harvest route.
+If inspection is partial or inconclusive, it gathers bounded missing evidence or
+withholds acceptance until synchronization or sufficient no-impact evidence exists.
+Source, tests and executable configuration outrank prose.
 
 Never put secrets, personal data, private reports or diagnostic logs into public
 documentation.
@@ -1190,6 +1201,7 @@ Actual Desktop uses the same prepared candidate and a disposable Electron profil
 ```bash
 ./scripts/cortex-desktop-dev start --workdir /absolute/existing/test-project \
   --prompt-file /absolute/TASK_PROMPT.txt \
+  --expected-result-path README.md \
   --expected-result-sha256 EXACT_RESULT_SHA256
 ./scripts/cortex-desktop-dev status
 ./scripts/cortex-desktop-dev send
@@ -1269,7 +1281,7 @@ complete installable payload. Regenerate the suffix whenever that payload change
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
 
-The current source candidate is `1.15.9+codex.sha256.07c3aeae551a990e`.
+The current source candidate is `1.15.9+codex.sha256.f9c04c7117827671`.
 The recorded final CLI/Desktop qualification (`r_648c4f40dcf9`) belongs to the
 superseded `e4f332d43bf38024` payload and is historical evidence only; it does
 not qualify this changed payload. Package, sync, full-suite, and real-host
