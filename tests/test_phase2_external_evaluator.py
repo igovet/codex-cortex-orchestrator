@@ -35,8 +35,8 @@ def _native_turn(thread_id: str = "thread-current", control: str = "1" * 64,
 def test_phase2_identity_lock_matches_current_plugin_manifest():
     manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
     expected_version = manifest["version"]
-    expected_payload_sha256 = "f9c04c7117827671407219726941391f6936180063447e6f90011e6513176e18"
-    assert expected_version == "1.15.9+codex.sha256.f9c04c7117827671"
+    expected_payload_sha256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
+    assert expected_version == "1.15.9+codex.sha256.121a79864903aeee"
     assert expected_version == phase2_cli_runner.CANDIDATE_VERSION
     assert expected_version == phase2_cli_auditor.CANDIDATE_VERSION
     assert expected_payload_sha256 == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
@@ -59,7 +59,7 @@ def test_phase2_live_harness_trusted_anchors_match_current_source():
     assert {phase2_cli_runner.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
-                "b8701f7c3e61c393f1d544926bba11aa7c82349c3b7ef8ab2b36f18ec1191a27"
+                "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
             }
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_auditor.EVIDENCE_COLLECTION
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_adapter.EVIDENCE_CONTRACT
@@ -1806,7 +1806,8 @@ def _terminal_context():
     }
 
 
-def _idle_composer_bodies(*, active=False, completed_worker=True, spoofed=False):
+def _idle_composer_bodies(*, active=False, completed_worker=True, spoofed=False,
+                          wait_after_spawn=True):
     workdir = "/tmp/foreign" if spoofed else "/tmp/owned-workdir"
     terminal = json.dumps({
         "schema_version": "cortex-live-terminal-snapshot-v1", "session_id": "$1",
@@ -1817,11 +1818,16 @@ def _idle_composer_bodies(*, active=False, completed_worker=True, spoofed=False)
             {"pid": 1236, "ppid": 1235, "command": "python3"},
         ],
     }, sort_keys=True, separators=(",", ":")) + "\n"
+    wait = {"thread_id": "root", "parent_thread_id": None, "role": "coordinator",
+            "tool": "wait_agent", "outcome": "running" if active else "success",
+            "host_status": "running" if active else "completed",
+            **({} if active else {"completed_timestamp": "2026-09-10T23:04:37Z"})}
+    spawn = {"thread_id": "root", "parent_thread_id": None, "role": "coordinator",
+             "tool": "spawn_agent", "outcome": "success", "host_status": "completed",
+             "spawned_thread_id": "worker"}
+    coordination = ([spawn, wait] if wait_after_spawn else [wait, spawn]) if completed_worker else [wait]
     rows = [
-        {"thread_id": "root", "parent_thread_id": None, "role": "coordinator",
-         "tool": "wait_agent", "outcome": "running" if active else "success",
-         "host_status": "running" if active else "completed",
-         **({} if active else {"completed_timestamp": "2026-09-10T23:04:37Z"})},
+        *coordination,
         {"thread_id": "worker", "parent_thread_id": "root", "role": "build_verification",
          "tool": "native_agent_result" if completed_worker else "functions.exec",
          "outcome": "success"},
@@ -1911,7 +1917,7 @@ def test_idle_composer_rejects_active_model_and_open_wait():
 def test_idle_composer_rejects_explicit_active_wait_state(field):
     bodies = _idle_composer_bodies()
     rows = [json.loads(line) for line in bodies["calls"].splitlines()]
-    rows[0][field] = "active"
+    next(row for row in rows if row["tool"] == "wait_agent")[field] = "active"
     calls = "".join(json.dumps(row) + "\n" for row in rows)
     bodies["calls"] = bodies["calls-final"] = calls
     with pytest.raises(phase2_cli_adapter.AdapterError, match="activity is active"):
@@ -1921,7 +1927,7 @@ def test_idle_composer_rejects_explicit_active_wait_state(field):
 def test_idle_composer_rejects_wait_without_explicit_completion_receipt():
     bodies = _idle_composer_bodies()
     rows = [json.loads(line) for line in bodies["calls"].splitlines()]
-    rows[0].pop("completed_timestamp")
+    next(row for row in rows if row["tool"] == "wait_agent").pop("completed_timestamp")
     calls = "".join(json.dumps(row) + "\n" for row in rows)
     bodies["calls"] = bodies["calls-final"] = calls
     with pytest.raises(phase2_cli_adapter.AdapterError, match="explicitly completed terminal wait"):
@@ -1933,6 +1939,31 @@ def test_idle_composer_rejects_terminal_text_with_open_worker():
         phase2_cli_adapter._validate_terminal_proof(
             _idle_composer_bodies(completed_worker=False), _terminal_context(),
         )
+
+
+def test_idle_composer_rejects_spawned_worker_without_terminal_wait():
+    bodies = _idle_composer_bodies()
+    rows = [json.loads(line) for line in bodies["calls"].splitlines()]
+    calls = "".join(json.dumps(row) + "\n" for row in rows if row["tool"] != "wait_agent")
+    bodies["calls"] = bodies["calls-final"] = calls
+    with pytest.raises(phase2_cli_adapter.AdapterError, match="terminal worker wait/reconciliation"):
+        phase2_cli_adapter._validate_terminal_proof(bodies, _terminal_context())
+
+
+def test_idle_composer_rejects_terminal_wait_that_precedes_spawn():
+    with pytest.raises(phase2_cli_adapter.AdapterError, match="terminal worker wait/reconciliation"):
+        phase2_cli_adapter._validate_terminal_proof(
+            _idle_composer_bodies(wait_after_spawn=False), _terminal_context(),
+        )
+
+
+def test_idle_composer_accepts_post_spawn_wait_without_target_metadata():
+    assert phase2_cli_adapter._validate_terminal_proof(
+        _idle_composer_bodies(wait_after_spawn=True), _terminal_context(),
+    ) == {
+        "pane_state": "idle-live-codex-composer", "exit_status": None,
+        "session_receipt": "a" * 64,
+    }
 
 
 def test_idle_composer_rejects_foreign_or_duplicate_final_report_events():

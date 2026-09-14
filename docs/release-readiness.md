@@ -1,11 +1,20 @@
 # 1.15.9: Stable release readiness
 
-## Qualified source candidate — 2026-09-13
+## Qualified source candidate — 2026-09-14
 
-Current source: `1.15.9+codex.sha256.f9c04c7117827671`. This contract
-clarification supersedes the previously qualified source summary below. The
-bounded implementation update does not claim real CLI or Desktop qualification;
-those environments remain separate follow-up checks on this unchanged payload.
+Current source: `1.15.9+codex.sha256.121a79864903aeee` (payload SHA-256
+`121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`). This
+terminal-wait and silent-wait repair supersedes the previously qualified source
+summary below. After each successful native spawn, the coordinator must use
+a successful exact native `wait_agent` recorded after that spawn until the
+owner's terminal handoff/report is consumed; pending or unchanged waits remain
+silent. Qualification rejects a spawned worker without this post-spawn
+wait/reconciliation. Lifecycle hooks remain diagnostic and cannot resume a
+stopped host turn. Corrected source verification (`r_107322f34816`) reports 1004
+tests passed and 2 skipped; independent acceptance and real CLI/Desktop
+qualification remain open. The bounded implementation update does not claim
+real CLI or Desktop qualification; those environments remain separate follow-up
+checks on this unchanged payload.
 Stable installation, commit, push and promotion are separate delivery actions and
 were not performed. No incident-efficacy comparison is claimed.
 
@@ -31,6 +40,7 @@ for the bounded evidence record.
 | --- | --- | --- |
 | Final consecutive real CLI qualification | HISTORICAL — superseded payload only | `r_648c4f40dcf9`; audit clean for `e4f332d43bf38024`, not the current candidate |
 | Final consecutive real Desktop qualification | HISTORICAL — superseded payload only | `r_648c4f40dcf9`; audit clean for `e4f332d43bf38024`, not the current candidate |
+| Terminal worker wait/reconciliation | SOURCE VERIFIED — live hosts unrun | `r_107322f34816`; exact post-spawn `wait_agent`, prior-wait rejection, post-spawn no-target compatibility; adapter SHA-256 `9ab5bddad55c9dcf90daa37508c4f0c41440f71c85e3fc547bba79d7a04e6134` |
 | Phase 2 outcome evaluation | CANCELLED — non-blocking, non-scoring | User-directed cancellation; no efficacy comparison, score, promotion, or quality conclusion is claimed |
 | Phase 3 validator repairs | READY offline | `r_02db5d25f90e` — final adversarial review PASS |
 | Phase 4 telemetry repairs | READY offline | `r_6b761e716df9` — independent re-review READY |

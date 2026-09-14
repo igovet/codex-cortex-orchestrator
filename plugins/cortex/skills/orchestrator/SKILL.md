@@ -11,18 +11,20 @@ host work and does not erase the task or cancel active workers.
 The model owns decisions and acceptance. Cortex stores tasks, advisory metadata
 and Markdown reports. It never grants authority or chooses a workflow.
 
-Prioritize the user's outcome and time, safety and reversibility, the complete
-causal path, minimal handoffs, implementation and verification, then documentation.
+Prioritize user outcome, safety/reversibility, causal path, minimal handoffs,
+implementation, verification, then documentation.
 Use the user's language for conversation and English for internal handoffs.
 
 ## Control loop
 
-1. Establish outcome, safety state, constraints and completion boundary; separate
-   facts, hypotheses and unchecked transitions.
+1. Establish outcome, safety, constraints and completion boundary; separate facts,
+   hypotheses and unchecked transitions.
 2. Coordinator owns outcome/causal model; specialists own bounded assignments.
    Separate investigation, implementation and acceptance by need and risk.
-   Timeout alone never replaces its active owner. Developer self-tests are not
-   independent review.
+   Timeout alone never replaces its active owner. After every native spawn, use
+   bounded `wait_agent` calls until every owner's terminal handoff/report is
+   consumed; a timeout or pending wait is not reconciliation or permission to
+   finalize. Developer self-tests are not independent review.
 3. Before a patch, select a discriminating check and map the affected path. Delegate discovery AND requested files (notes included)
    in one assignment using [routing](references/worker-routing.md). Return missing output to that worker; never create it yourself.
    Edit only pipeline drafts.
@@ -75,19 +77,17 @@ edition before completion. A native final message is not a published Cortex
 report. If unavailable, retain the diagnostic; continue permitted work without
 claiming recorded or accepted evidence.
 
-The Cortex server exposes tools, not MCP resources: do not use `resources/list`
-or `read_mcp_resource` to fetch skills or reports. Load linked instruction files
-with a bounded literal read; fetch reports with the public report tools.
+The Cortex server exposes tools, not resources: never use `resources/list` or
+`read_mcp_resource` for skills/reports. Load instructions with a bounded literal
+read; fetch reports through public tools.
 
-Use only advertised tool schemas and code-mode globals (no Node.js crypto).
-Never guess IDs or inspect private storage. Forward complete command
-results, including exit status or running session handles. Read bounded evidence
-pages as far as a decision requires.
+Use advertised schemas and code-mode globals; never guess IDs/private storage.
+Forward complete command results, including exit status or running handles. Read
+bounded evidence pages only as far as a decision requires.
 
-Keep one newest-first `pipeline.md`. Update it when outcome, scope, causal model,
-artifact revision, safety posture or rollback strategy changes. Worker completion,
-review delivery, unchanged waits and small clarifications alone need no edition.
-Preserve older editions below.
+Keep one newest-first `pipeline.md`; update it for outcome, scope, causal model,
+artifact revision, safety or rollback changes. Worker completion, review delivery,
+unchanged waits and small clarifications alone need no edition. Preserve older editions.
 
 Keep the incident brief inside the current pipeline. Preserve implementation_state,
 delivery_state and acceptance_state and the existing delivery_state,
@@ -105,15 +105,14 @@ only for a concrete new risk. These are model decisions, not server approval gat
 
 ## Honest communication
 
-Use confidence levels `hypothesis`, `isolated_root_cause` and
-`end_to_end_root_cause`; reserve “exact/only cause”, “last blocker”, “final fix”
-and success promises for verified end-to-end evidence. Otherwise state the
-confirmed blocker and unchecked downstream path.
+Use `hypothesis`, `isolated_root_cause` and `end_to_end_root_cause`; reserve
+“exact/only cause”, “last blocker”, “final fix” and success promises for verified
+end-to-end evidence. Otherwise state blocker and unchecked downstream path.
 
-Wait silently when unchanged; communicate new facts, causal changes, blockers,
-artifact transitions, production mutations, completion and necessary decisions.
-Give ETA only after mapping remaining checks, deployment, activation, external
-delays and uncertainty; replan after a new failure class.
+While workers are pending/unchanged, use bounded native waits silently; speak only
+on a material state transition, blocker/question, or completion. Give ETA only
+after mapping checks, deployment, activation, external delays and uncertainty;
+replan after a new failure class.
 
 ## Load only relevant details
 

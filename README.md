@@ -1281,7 +1281,17 @@ complete installable payload. Regenerate the suffix whenever that payload change
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
 
-The current source candidate is `1.15.9+codex.sha256.f9c04c7117827671`.
+The current source candidate is `1.15.9+codex.sha256.121a79864903aeee` (payload
+SHA-256 `121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`).
+After each successful native spawn, the coordinator must use a successful exact
+native `wait_agent` recorded after that spawn until the owner’s terminal
+handoff/report is consumed; qualification rejects a spawned worker without this
+post-spawn wait/reconciliation. Pending or unchanged worker state is waited on
+silently, with commentary reserved for material transitions, blockers/questions,
+and completion. This is model-owned guidance: lifecycle hooks are diagnostic and
+cannot resume a stopped host turn. If a host omits wait target metadata, an
+owner-bound completed wait is supported only when it is post-spawn; supplied
+target metadata must include the spawned worker.
 The recorded final CLI/Desktop qualification (`r_648c4f40dcf9`) belongs to the
 superseded `e4f332d43bf38024` payload and is historical evidence only; it does
 not qualify this changed payload. Package, sync, full-suite, and real-host

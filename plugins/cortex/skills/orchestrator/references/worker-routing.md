@@ -111,6 +111,12 @@ the native collaboration controls: `collaboration.wait_agent`,
 orchestration workers. Codex app thread tools are reserved for explicit user-owned
 task management, not worker coordination.
 
+After each native spawn, the coordinator keeps the owner unresolved until it has
+performed bounded native waits and consumed that owner's terminal handoff/report.
+It repeats a bounded wait after a timeout or pending result; neither is terminal
+reconciliation, and neither authorizes a final answer. This is model-owned control
+guidance, not a promise that hooks can resume a stopped host turn.
+
 If worker Cortex MCP is unavailable, use only shared closed
 `cortex-native-worker-result-v1`. Require one native spawn, terminal wait, parent/task,
 registered profile, and assignment digest. The coordinator publishes
