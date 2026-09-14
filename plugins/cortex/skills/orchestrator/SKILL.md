@@ -17,31 +17,49 @@ Use the user's language for conversation and English for internal handoffs.
 
 ## Control loop
 
-1. Establish the observable outcome, safety state, constraints and completion
-   boundary. Separate facts, hypotheses and unchecked downstream transitions.
-2. The coordinator continuously owns the outcome and causal model. Specialists
-   own their bounded assignments. Timeout alone never replaces its active owner.
-   Separate investigation, implementation and independent acceptance by need and
-   risk. Developer self-tests are not independent review.
-3. Before a patch, select a discriminating check and map the affected path through
-   the user boundary. Delegate discovery AND requested files (notes included) in
-   one complete assignment; apply [routing](references/worker-routing.md). Return
-   missing output to that worker; never create it yourself. Edit only pipeline drafts.
-4. Await the specialist report before checking its cited source. Do not search the
-   same code in parallel. Reconcile files with bounded cat/sed/sha256sum reads;
-   justify repeated checks with new evidence.
-5. Accept an observed user outcome. Distinguish implemented, committed, pushed,
-   deployed and accepted. CI, reports and commands prove only their own boundary.
+1. Establish outcome, safety state, constraints and completion boundary; separate
+   facts, hypotheses and unchecked transitions.
+2. Coordinator owns outcome/causal model; specialists own bounded assignments.
+   Separate investigation, implementation and acceptance by need and risk.
+   Timeout alone never replaces its active owner. Developer self-tests are not
+   independent review.
+3. Before a patch, select a discriminating check and map the affected path. Delegate discovery AND requested files (notes included)
+   in one assignment using [routing](references/worker-routing.md). Return missing output to that worker; never create it yourself.
+   Edit only pipeline drafts.
+4. Await the specialist report before checking cited source.
+5. Before ordinary acceptance, assess verified changes for durable/public documentation
+   impact; missing inspection is not evidence of no impact. If impact is supported, assign the appropriate documentation
+   owner to load/apply `cortex:documentation-sync`; give that owner exact affected
+   documentation ownership and require its updates plus proportionate verification
+   before acceptance. The coordinator does not read another role's `SKILL.md`. After
+   the owner's published documentation report, only Cortex report/public-evidence reads
+   may compare its cited documentation hashes/check results before acceptance; delegate
+   any additional project inspection, file read/hash or command verification to an
+   appropriate worker; return evidence in a task-bound report; the coordinator must not
+   rerun project checks. If inspection is partial or
+   inconclusive, gather bounded missing evidence or leave impact unresolved and
+   withhold acceptance until either supported `documentation-sync` synchronization
+   completes or sufficient no-impact evidence exists. If sufficient evidence
+   supports no impact, record a concise no-impact conclusion without token edits or
+   an unnecessary worker. Keep `cortex:knowledge-harvest` explicit-only: this review
+   is not a broad census. These model-owned/advisory decisions are not runtime gates.
+   Then accept the observed outcome, distinguishing implemented, committed, pushed,
+   deployed and accepted; CI, reports and commands prove only their own boundary.
 
 For production failure/restoration load [incident protocol](references/incident.md)
-before the first patch. Routine tasks do not acquire incident stages.
+before the first patch. Routine work is not incident work.
 
 ## Apply governance to decisions
 
-Before selecting work, on mode changes and after context loss, apply
-[governance depth](references/governance.md). Record its concrete effect on
-assignments and checks. Governance guides model decisions, never runtime gates;
-unavailable metadata is diagnostic. Preserve explicit user choices.
+On fresh activation, use this exact coordinator bootstrap order: discover the
+deferred Cortex tools, call `create_task`, verify its successful task binding,
+then apply or restore governance with `set_governance`. Never call
+`set_governance` before successful `create_task`/binding on a fresh activation.
+Before work, mode changes and context loss, apply
+[governance depth](references/governance.md). Record effect on
+assignments/checks. Governance guides model decisions, never runtime gates;
+unavailable metadata is diagnostic. Preserve explicit choices. Model-owned guidance,
+not a server gate or approval machine.
 
 ## Durable decisions
 
@@ -50,11 +68,12 @@ Discover deferred tools by namespace:
 `create_task` before project inspection or delegation. Reuse the binding on
 follow-ups. Publish the initial
 pipeline through `create_draft` and `write_report` before assigning its owner.
-Pass the returned task identity to the owner. Read the owner's published report
-through `read_report`, reconcile the actual artifact/check outcome, and publish
-the final pipeline edition before claiming completion. A native final message
-alone is not a published Cortex report. If Cortex is unavailable, retain the diagnostic and
-continue host-permitted work without claiming recorded or accepted evidence.
+Pass returned task identity to owner. Read owner's published report
+through `read_report`. Reconcile actual outcomes only via Cortex report/public-evidence
+reads comparing owner-cited artifact hashes/check results; publish final pipeline
+edition before completion. A native final message is not a published Cortex
+report. If unavailable, retain the diagnostic; continue permitted work without
+claiming recorded or accepted evidence.
 
 The Cortex server exposes tools, not MCP resources: do not use `resources/list`
 or `read_mcp_resource` to fetch skills or reports. Load linked instruction files
@@ -87,16 +106,14 @@ only for a concrete new risk. These are model decisions, not server approval gat
 ## Honest communication
 
 Use confidence levels `hypothesis`, `isolated_root_cause` and
-`end_to_end_root_cause`. Reserve “exact/only cause”, “last blocker”, “final fix”
-and promises the next attempt will work for verified end-to-end evidence.
-Otherwise state the confirmed current blocker and unchecked downstream path.
+`end_to_end_root_cause`; reserve “exact/only cause”, “last blocker”, “final fix”
+and success promises for verified end-to-end evidence. Otherwise state the
+confirmed blocker and unchecked downstream path.
 
-Wait silently when state is unchanged. Communicate new facts, causal changes,
-blockers, artifact transitions, production mutations, completion or necessary user
-decisions. Do not repeat reassurance, status or ETA because a poll timed out.
-Give ETA only after mapping the critical path: remaining checks, CI/deploy,
-preflight, activation, stabilization, external delays and uncertainty. A new
-failure class invalidates the ETA; replan before estimating again.
+Wait silently when unchanged; communicate new facts, causal changes, blockers,
+artifact transitions, production mutations, completion and necessary decisions.
+Give ETA only after mapping remaining checks, deployment, activation, external
+delays and uncertainty; replan after a new failure class.
 
 ## Load only relevant details
 
@@ -108,5 +125,3 @@ failure class invalidates the ETA; replan before estimating again.
 - Actual context loss: [recovery](references/recovery.md).
 - Consequential independent decision: [senior consultation](references/senior-consultation.md).
 - Interrupted publication: [pipeline publication](references/pipeline-publication.md).
-
-Reconcile actual outcomes; disclose gaps.

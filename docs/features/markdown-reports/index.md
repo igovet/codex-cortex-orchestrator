@@ -41,6 +41,20 @@ findings depend. A later message or observed file change signals possible stale
 evidence. The coordinator decides what needs reconciliation or another check;
 the storage service and hooks do not decide semantic coverage or acceptance.
 
+Before ordinary acceptance, the coordinator records an evidence-backed documentation
+impact decision for verified changes. Supported impact assigns the appropriate
+documentation owner to load/apply `documentation-sync`, requires exact documentation
+ownership, updates and proportionate verification, and then uses only Cortex
+report/public-evidence reads to compare the owner's cited documentation hashes and
+check results before acceptance. The coordinator does not read another role's
+`SKILL.md`; any additional project inspection, file read/hash or command verification
+is delegated to an appropriate worker and returned in a task-bound report, and the
+coordinator does not rerun project checks itself. Sufficient no-impact evidence needs
+only a concise record. Missing inspection is not no impact, and the decision
+remains model-owned rather than a runtime stage or gate.
+Partial or inconclusive inspection leaves impact unresolved and withholds acceptance
+until bounded evidence, synchronization, or sufficient no-impact evidence resolves it.
+
 The current pipeline keeps model-owned `implementation_state`, `delivery_state`,
 and `acceptance_state` distinct. Implementation state records changed artifacts and
 evidence; delivery state records observed immutable-report, Git, CI, deployment, or

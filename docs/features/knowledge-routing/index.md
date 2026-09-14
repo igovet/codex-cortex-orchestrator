@@ -38,6 +38,22 @@ a first-page-only rule. Workers load their assigned complete skills, inspect rel
 indexes and source, and return findings with verification and limits. Current source,
 tests and executable configuration outrank generated docs.
 
+Before accepting an ordinary completed task, the coordinator reviews verified changes
+for durable project-knowledge or public-documentation impact. Supported impact assigns
+the appropriate documentation owner to load/apply `documentation-sync`, gives exact
+affected documentation ownership and requires proportionate verification; sufficient
+evidence of no impact is recorded concisely without token edits or an unnecessary
+worker. The coordinator does not read another role's `SKILL.md`; after the owner's
+published documentation report, it uses only Cortex report/public-evidence reads to
+compare owner-cited documentation hashes and check results before acceptance. Any
+additional project inspection, file read/hash or command verification is delegated to
+an appropriate worker and returned in a task-bound report; the coordinator does not
+rerun project checks itself. Missing inspection is not evidence of no impact.
+This review is advisory and does not broaden the explicit-only
+`knowledge-harvest` route. Partial or inconclusive inspection requires bounded
+evidence gathering or leaves impact unresolved with acceptance withheld until
+synchronization or sufficient no-impact evidence exists.
+
 Harvest preserves the canonical five project knowledge files and feature index.
 Features use a directory with `index.md` as entry point; large features can split
 into focused pages. A source-backed coverage matrix maps runtime owners and

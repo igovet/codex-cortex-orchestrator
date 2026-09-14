@@ -3,7 +3,7 @@
 | Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | Markdown storage and retention | Local Python runtime | Seven MCP operations; explicit cleanup command | plugins/cortex/scripts/cortex_runtime/ | [Reports](markdown-reports/index.md) | tests/test_markdown_store.py; tests/test_source_reports.py; tests/test_retention.py; tests/test_stdio.py; tests/test_thread_context.py | documented |
-| Coordination and project knowledge | Model and bundled skills | Explicit orchestration, help, harvest, refresh, clear, normal | plugins/cortex/skills/; plugins/cortex/agents/ | [Knowledge routing](knowledge-routing/index.md) | Package checks and real-host scenarios | documented |
+| Coordination and project knowledge | Model and bundled skills | Explicit orchestration, help, harvest, refresh, clear, normal; completion-time documentation-impact review | plugins/cortex/skills/; plugins/cortex/agents/ | [Knowledge routing](knowledge-routing/index.md) | Package checks and real-host scenarios | documented |
 
 ## Inventory totals
 

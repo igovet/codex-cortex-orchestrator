@@ -24,7 +24,7 @@ and audit still report invalid or incomplete evidence rather than invent success
 
 ## Stable release status
 
-The current 1.15.9 source candidate is `1.15.9+codex.sha256.07c3aeae551a990e`.
+The current 1.15.9 source candidate is `1.15.9+codex.sha256.43359f40d04b0560`.
 The final CLI/Desktop qualification (`r_648c4f40dcf9`) applies only to the
 superseded `e4f332d43bf38024` payload, not to this changed candidate. Its package,
 sync, full-suite, and real-host qualification remain required, and no efficacy,
@@ -311,6 +311,22 @@ bounded wait for the same owner. Before acceptance/final delivery, assignments a
 reconciled with native worker state and required evidence; failure or cancellation
 must be explicit and recorded. This policy is model guidance, not a server-side
 semantic acceptance gate.
+
+Before ordinary acceptance, the coordinator also reviews verified changes for durable
+project-knowledge or public-documentation impact. Missing inspection cannot support a
+no-impact conclusion. Supported impact assigns an appropriate documentation owner to
+load/apply `documentation-sync`, selects exact documentation ownership, and requires
+updates plus proportionate verification; sufficient no-impact evidence needs only a
+concise coordinator record. The coordinator does not read another role's `SKILL.md`
+and, after the owner's published report, uses only Cortex report/public-evidence reads
+to compare owner-cited documentation hashes and check results before acceptance. Any
+additional project inspection, file read/hash or command verification is delegated to
+an appropriate worker and returned in a task-bound report; the coordinator does not
+rerun project checks itself. This remains advisory and does not activate the
+explicit-only knowledge-harvest route or add a runtime continuation/gate.
+Partial or inconclusive inspection instead requires bounded evidence gathering or
+leaves impact unresolved with acceptance withheld until synchronization or sufficient
+no-impact evidence exists.
 
 The pipeline keeps `implementation_state`, receipt-backed `delivery_state`, and
 coordinator-owned `acceptance_state` separate. Immutable-report delivery does not

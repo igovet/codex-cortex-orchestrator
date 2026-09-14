@@ -2,14 +2,12 @@
 
 ## Qualified source candidate — 2026-09-13
 
-Current source: `1.15.9+codex.sha256.5fc202ee9d2fc515`. Package and source-only
-sync checks passed; 991 tests passed with no skips (eight aiohttp API-style
-warnings). Real CLI and Desktop were completed in that order on this unchanged
-payload, each with a clean `observational_accept` audit and exit 0. The final
-auditor additionally verifies native completion and rejects actual check failures.
-See [current qualification evidence](project/incident-outcomes.md#current-verification-boundary-2026-09-13).
+Current source: `1.15.9+codex.sha256.f9c04c7117827671`. This contract
+clarification supersedes the previously qualified source summary below. The
+bounded implementation update does not claim real CLI or Desktop qualification;
+those environments remain separate follow-up checks on this unchanged payload.
 Stable installation, commit, push and promotion are separate delivery actions and
-were not performed by this verification. No incident-efficacy comparison is claimed.
+were not performed. No incident-efficacy comparison is claimed.
 
 ## Historical release-readiness record
 

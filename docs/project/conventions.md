@@ -20,6 +20,18 @@ Bounded independent discovery may precede the first pipeline edition. Record use
 durable state before dependency, shared-resource or acceptance decisions rather than
 requiring pipeline publication as a universal first stage.
 
+Before ordinary acceptance, review verified changes for durable/public documentation
+impact. Route supported impact by assigning the appropriate documentation owner to
+load/apply `documentation-sync`, then use only Cortex report/public-evidence reads to
+compare the owner's cited artifact hashes and check results before acceptance; record
+sufficient no-impact evidence concisely. The coordinator does not read another role's
+`SKILL.md`. Any additional project inspection, file read/hash or command verification
+must be delegated to an appropriate worker and returned in a task-bound report; the
+coordinator must not rerun project checks itself. Missing inspection is not no impact,
+and partial or inconclusive inspection withholds acceptance pending bounded
+evidence, synchronization, or sufficient no-impact evidence. This review never activates
+explicit-only harvest or a runtime gate.
+
 Lifecycle hooks perform short local storage and integrity work. They do not select
 specialists, approve actions, accept results or impose mandatory stages. Confirmed
 registered-file integrity violations and the narrow worker private-root execution
