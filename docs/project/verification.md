@@ -1,10 +1,21 @@
 # Verification
 
-## Decision routing and isolated project qualification — 2026-09-13
+## Current 1.16.0 offline gate — 2026-09-15
+
+Current source candidate: `1.16.0+codex.sha256.5445b95361d15a5e` (payload SHA-256
+`5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35`). The offline
+gate report `r_e40cceaba46c` records package validation, source-only sync, focused
+checks, 221 evaluator tests and 1051 source tests passing. This is offline evidence
+only; no live CLI or Desktop qualification is claimed here. The user-approved
+Desktop observation remains diagnostic `submission_ambiguous` evidence, not a clean
+audit or release acceptance. Stable installation, commit, push and promotion are
+separate delivery actions and are not claimed by this record.
+
+## Historical 1.15.9 qualification — 2026-09-13
 
 The approved product matrix uses Luna medium/high for discovery and ordinary work,
 Terra medium/high for complex implementation/review, Sol medium/high for consequential
-decisions, and Astra medium only for exceptional system decisions. Assignments,
+decisions. Assignments,
 steering, worker summaries and handoffs are English; user-facing coordinator prose
 and explicitly localized deliverables retain the requested language. The host does
 not expose a verifiable language guarantee for hidden reasoning. No runtime language
@@ -47,7 +58,7 @@ intentionally remains Luna-only. Unavailable host enforcement stays `unverified`
 This result qualifies source; it does not claim commit, push or stable deployment.
 The following dated results are historical and do not supersede this result.
 
-## Discovery ownership follow-up — 2026-09-13
+## Historical discovery ownership follow-up — 2026-09-13
 
 Live workloads that produce only research/proof notes do not recursively launch
 release qualification. The outer change owner retains mandatory CLI-before-Desktop
@@ -68,7 +79,7 @@ The incomplete attempt was stopped with sealed pre-stop evidence
 Desktop was not started under CLI-first policy. Preferred graph routing and
 CLI/Desktop acceptance remain unverified; no runtime gate was added or relaxed.
 
-## Current source qualification — 2026-09-13
+## Historical source qualification — 2026-09-13
 
 Payload `1.15.9+codex.sha256.5fc202ee9d2fc515` passed package validation,
 source-only sync and 991 tests with isolated dependencies (no skips; eight
@@ -85,9 +96,9 @@ retained failures](incident-outcomes.md#current-verification-boundary-2026-09-13
 The sections below preserve earlier qualification history; their former
 "current" and "latest" labels do not supersede the dated result above.
 
-## Stable release payload — 1.15.9
+## Historical stable release payload — 1.15.9
 
-The current Cortex semantic version is `1.15.9`, with source payload
+At that historical snapshot, the Cortex semantic version was `1.15.9`, with source payload
 `1.15.9+codex.sha256.07c3aeae551a990e` as declared by the plugin manifest and
 resolved by the package validator. Final consecutive real CLI and Desktop
 qualification (`r_648c4f40dcf9`) applies only to superseded payload
@@ -232,7 +243,7 @@ complete result receipt: a nested success never repairs truncation. An idle
 composer requires the adapter-owned immutable evidence bundle; ordinary cleanup
 and a mutable post-stop probe are not terminal proof.
 
-## Current 1.15.9 stable release status
+## Historical 1.15.9 stable release status
 
 | Gate or evidence | Status | Exact retained evidence |
 | --- | --- | --- |
@@ -548,7 +559,7 @@ After the consultant follow-up repair, package/source-sync checks and all 382 te
 passed sequentially. Actual host
 outcomes, rejected attempts, consultation usage and unrun scenarios are recorded
 in the [focused verification report](../features/senior-consultant/verification.md).
-The consultant's explicit Sol/Astra exception is separate from the ordinary worker
+The consultant's explicit Sol exception is separate from the ordinary worker
 model policy below; it does not change the main session's model.
 
 ## Coordinator project-access enforcement — 2026-09-07
@@ -933,13 +944,20 @@ After the dev window is visible and the prepared composer is confirmed, run
 whose X11 PID equals the isolated process recorded by `start`, rechecks ownership,
 submits once, and refuses duplicate submission. It never targets another
 Desktop instance by title alone.
+If `start` or `send` raises, the helper returns a stable value-free diagnostic
+containing only the operation, a bounded category and reason, and a recovery
+action (`cleanup`, `retry`, `focus`, or related safe guidance). Exception text,
+private paths, commands, subprocess output, and logs are never printed.
 
 The Desktop `send` command preserves the URI-prepared composer focus rather than
 clicking a guessed coordinate. Before its sole plain `Return`, it requires the exact
 owned window to remain focused across two observations after a three-second URI
 hydration interval, within one monotonic 60-second budget shared by window lookup and
 focus retries. This is bounded readiness only, not a delivery receipt; delivery is
-acknowledged only after exactly one new task appears in isolated host state.
+acknowledged only after exactly one new task and one exact prompt receipt appear in
+isolated host state. If a task appears without a unique prompt receipt, the helper
+persists an ambiguous submission and refuses subsequent Return replay pending
+inspection; a zero-task result remains retryable.
 Use `scripts/cortex-desktop-dev events` while the task runs and
 `scripts/cortex-desktop-dev audit` before accepting it. The audit consumes the
 complete private metadata journal from every coordinator and worker MCP process
@@ -947,6 +965,12 @@ and fails if any non-initialization operation has an outcome other than `success
 Read events identify pipeline versus ordinary report, the short selected report ID,
 and start versus continuation without logging cursors, Markdown, request text or
 other arguments. This makes selective worker reads directly auditable.
+The submission helper and audit use the same strict native user-turn decoder:
+supported `response_item`/`event_msg` envelopes preserve the exact concatenation of
+multipart text content, while mismatched roles or threads, malformed parts, and
+unsupported outer envelopes remain rejected. Request-fidelity failures such as
+`coordinator_original_request_changed` therefore stay fail-closed without a
+helper/audit parsing discrepancy.
 
 Use `scripts/cortex-desktop-dev calls` to inspect every host-tool invocation from
 the coordinator and native workers. With no `--limit`, it emits the full run:
@@ -981,8 +1005,9 @@ self-parenting, cycles, and malformed recent edge components are emitted under
 `foreign_task_roots`, so they cannot disappear behind an empty roots array.
 The `usage` action consumes this validated inventory and fails explicitly with
 `invalid_topology` rather than recomputing an overwrite-prone child-parent map.
-Only the exact advertised orchestrator `SKILL.md` is a valid coordinator cache
-read; worker skills, other skills, and references remain forbidden.
+Only the exact advertised orchestrator `SKILL.md` and directly declared Markdown
+reference leaves are valid coordinator cache reads; worker skills, other skills,
+adjacent files, and unlinked references remain forbidden.
 For the next c4 follow-up parity qualification, create a fresh temporary empty Git
 project with `mktemp -d` and `git init`, then use that exact directory for both
 unchanged-candidate CLI and Desktop runs. This is experiment isolation for that
@@ -1030,6 +1055,16 @@ TOML, server internals and plugin enumeration remain forbidden accesses. A mixed
 command is not classified as instruction-only, but an approved skill read alongside
 ordinary worker project discovery is not itself forbidden cache access. Review each
 access and the participant's role, full loading evidence and truncation.
+A normal complete read may use any supported ordinary read-only means selected by the
+model. The observer binds the literal resource to its declaring skill; expansion,
+extra operations, shell control, nested shells, symlinks, directories, globs and
+mutation remain invalid.
+A host may record the selected read and its terminal execution separately. A failed
+execution receipt is retained as a diagnostic only when it joins exactly one
+same-worker, same-intent, declaration-bound safe read and independent successful
+assigned-skill/final-outcome evidence; this semantic join does not prescribe a
+reader or relax any private/project, mutable, ambiguous, replay, truncation or
+unregistered-access check.
 The observer preserves this distinction through simple `rg`/`grep` pipelines:
 quoted private-cache exclusion patterns are static mentions, while direct private
 operands, unquoted globs and opaque shell syntax remain unauthorized. A valid
@@ -1053,12 +1088,12 @@ skill attachment or exact advertised worker-skill-read evidence must be attribut
 to an opaque route. After that approved load, direct plugin/cache/candidate/registry
 operands remain forbidden; quoted static exclusions are not reads. Keep command
 wrappers bounded and reject any truncation even if covered child commands exited zero.
-When the installed host transports this read through `functions.exec`, the observer
-requires exactly one direct `tools.exec_command` call bound once to a safe
-JavaScript identifier and complete literal `text(<that-same-identifier>);`
-forwarding (for example, `const result = await ...; text(result);`). Aliases,
-property access, extra JavaScript/API/tool calls, partial forwarding, and mixed
-wrappers remain invalid.
+Any supported ordinary read-only means selected by the model may transport this
+resource read, provided it remains one attributable operation with a complete result
+receipt. A bounded wrapper may contain only that one literal read; it must not add
+operations, expansion, shell control, nested shells, aliases, redirection, output
+decoration, private or project targets, or mutation. The observer rejects truncation,
+ambiguity, replay, or a mismatched resource even when a nested command exits zero.
 Encrypted assignment content remains opaque. See [host compatibility](host-compatibility.md).
 A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.

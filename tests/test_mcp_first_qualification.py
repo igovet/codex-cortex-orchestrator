@@ -13,6 +13,14 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVER = runpy.run_path(str(ROOT / "scripts/cortex-desktop-dev"), run_name="mcp_first_test")
 LIVE = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="mcp_first_test")
+ACTIVE_VERSION = json.loads(
+    (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())["version"]
+
+
+def _trusted_cache_manifest(release):
+    manifest = release / ".codex-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_bytes())
 
 
 def state(tmp_path):
@@ -188,13 +196,13 @@ def _completed_current_host_rows():
     return [
         create(direct_public_mcp=True, server_observed=False, result_receipt_observed=True),
         {"thread_id": "worker-thread", "parent_thread_id": "child-thread", "role": "general",
-         "tool": "native_agent_result", "outcome": "success", "host_receipt_observed": True,
-         "host_receipt_outcome": "success", "replayed": False, "truncated": False,
-         "report_ids": [report_id], "native_worker_result": worker_result},
-        {"thread_id": "worker-thread", "parent_thread_id": "child-thread", "role": "general",
          "tool": "mcp__cortex__write_report", "report_id": report_id, "outcome": "success",
          "host_receipt_observed": True, "host_receipt_outcome": "success", "replayed": False,
          "truncated": False},
+        {"thread_id": "worker-thread", "parent_thread_id": "child-thread", "role": "general",
+         "tool": "native_agent_result", "outcome": "success", "host_receipt_observed": True,
+         "host_receipt_outcome": "success", "replayed": False, "truncated": False,
+         "report_ids": [report_id], "native_worker_result": worker_result},
         {"thread_id": "child-thread", "parent_thread_id": None, "role": "coordinator",
          "tool": "mcp__cortex__read_report", "report_id": report_id, "outcome": "success",
          "host_receipt_observed": True, "host_receipt_outcome": "success", "replayed": False,
@@ -214,10 +222,26 @@ def _strict_worker_skill_group_rows():
          "path_target_class": "approved_instruction_or_static_mention",
          "path_access_kind": "approved_instruction_read", "path_policy_decision": "allowed",
          "execution_status": "denied_before_dispatch", "truncated": False,
-         "replayed": False, "private_target_access": False,
+         "replayed": False, "replay_marker": False, "private_target_access": False,
          "project_target_access": False, "mutation_observed": False,
          "result_digest": "f" * 12},
     ]
+
+
+def _successful_worker_skill_receipt_row():
+    return {
+        "thread_id": "worker-thread", "parent_thread_id": "child-thread", "role": "general",
+        "tool": "read_file", "outcome": "success", "worker_skill_receipt_required": True,
+        "skill_instruction_read": True, "worker_skill_profile": "general",
+        "worker_skill_complete": True,
+        "worker_skill_assignment_receipt": "complete_exact_assigned",
+         "path_policy_provenance": "observer_literal_marker",
+         "path_target_class": "approved_instruction_or_static_mention",
+         "path_access_kind": "approved_instruction_read", "path_policy_decision": "allowed",
+         "truncated": False, "replayed": False, "private_target_access": False,
+        "replay_marker": False, "project_target_access": False, "mutation_observed": False,
+        "result_digest": "e" * 12, "wrapper_outcome": "success",
+    }
 
 
 def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_path):
@@ -237,6 +261,8 @@ def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_pat
         {"thread_id": "desktop-root", "parent_thread_id": None, "role": "coordinator",
          "tool": "mcp__cortex__write_report", "report_id": "r_0123456789ab", "outcome": "success",
          "host_receipt_observed": True, "host_receipt_outcome": "success"},
+        {**_successful_worker_skill_receipt_row(),
+         "thread_id":"desktop-worker", "parent_thread_id":"desktop-root"},
         {"thread_id": "desktop-worker", "parent_thread_id": "desktop-root", "role": "general",
          "tool": "apply_patch", "outcome": "success", "path_target_class": "worker_workspace_or_external"},
     ]
@@ -267,8 +293,6 @@ def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_pat
                  open_sessions=[],open_cells=[])[0] is None
     policy = [
         {"thread_id": "desktop-root", "tool": "spawn_agent", "violation": "worker_assignment_policy_unverified"},
-        {"thread_id": "desktop-worker", "tool": "exec_command", "violation": "worker_skill_load_failed"},
-        {"thread_id": "desktop-worker", "tool": "apply_patch", "violation": "worker_project_action_before_skill_receipt"},
     ]
     historical = [
         {"thread_id": "desktop-root", "tool": "wait_agent", "outcome": "pending"},
@@ -280,11 +304,168 @@ def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_pat
     retained_host, retained_policy, diagnostics, final, reason = OBSERVER["desktop_current_host_partition"](
         rows, data, historical, policy, open_sessions=[], open_cells=[])
     assert not retained_host and not retained_policy and reason is None and final == outcome
-    assert len(diagnostics) == 6
+    assert len(diagnostics) == 4
     classification = OBSERVER["classify_audit_findings"](
         failures=[], hook_failures=[], host_failures=retained_host,
         policy_violations=retained_policy, open_sessions=[], open_cells=[])
     assert classification["evidence_valid"] and classification["score_eligible"]
+
+    missing_receipt_rows=[row for row in rows if row.get('worker_skill_complete') is not True]
+    missing_policy=[
+        {"thread_id":"desktop-worker","tool":"exec_command","violation":"worker_skill_load_failed"},
+        {"thread_id":"desktop-worker","tool":"apply_patch","violation":"worker_project_action_before_skill_receipt"},
+    ]
+    _,retained,_,_,_=OBSERVER["desktop_current_host_partition"](
+        missing_receipt_rows,data,[],missing_policy,open_sessions=[],open_cells=[])
+    assert retained==missing_policy
+
+    safe_failure={
+        "thread_id":"desktop-worker","parent_thread_id":"desktop-root","role":"general",
+        "worker_skill_profile":"general","tool":"read_file","outcome":"error",
+        "worker_skill_receipt_required":True,"skill_instruction_read":True,
+        "path_policy_provenance":"observer_literal_marker",
+        "path_target_class":"approved_instruction_or_static_mention",
+        "path_access_kind":"approved_instruction_read","path_policy_decision":"allowed",
+        "execution_status":"executed","exit_code":2,"result_digest":"a"*12,
+        "wrapper_outcome":"success",
+        "replayed":False,"replay_marker":False,"truncated":False,"private_target_access":False,
+        "project_target_access":False,"mutation_observed":False,
+    }
+    safe_policy={**safe_failure,"violation":"worker_skill_load_failed"}
+    retained_host,retained_policy,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+        [*rows,safe_failure],data,[safe_failure],[safe_policy],open_sessions=[],open_cells=[])
+    assert retained_host==[] and retained_policy==[]
+    assert [item["diagnostic_reason"] for item in diagnostics]==[
+        "failed_safe_declared_resource_read","failed_safe_declared_resource_read"]
+
+    # Desktop exposes a nested tool invocation separately from its authoritative
+    # command-execution receipt.  A non-zero command exit remains diagnostic
+    # when one exact same-worker nested read carries the registered-resource
+    # safety identity; this test deliberately does not depend on an executable.
+    command_source={**safe_failure,"tool":"exec_command",
+                    "outcome":"covered_by_command_execution","wrapper_outcome":"success",
+                    "intent_digest":"c"*12}
+    command_exit={"thread_id":"desktop-worker","parent_thread_id":"desktop-root",
+                  "role":"general","tool":"command_execution","outcome":"error",
+                  "intent_digest":"c"*12,"exit_code":1,"error_code":"command_exit_1",
+                  "wrapper_outcome":"success", "replayed":False,"replay_marker":False,
+                  "truncated":False,"private_target_access":False,
+                  "project_target_access":False,"mutation_observed":False}
+    retained_host,retained_policy,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+        [*rows,command_source],data,[command_exit],[],open_sessions=[],open_cells=[])
+    assert retained_host==[] and retained_policy==[]
+    assert [item["diagnostic_reason"] for item in diagnostics]==[
+        "failed_safe_declared_resource_read"]
+
+    # Terminal and nested evidence are both exact-one correlations.  Do not
+    # select a safe candidate while ignoring an equivalent terminal receipt or
+    # a same-intent nested read that is unsafe or incomplete.
+    duplicate_exit={**command_exit,"result_digest":"d"*12}
+    retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+        [*rows,command_source,command_exit,duplicate_exit],data,
+        [command_exit,duplicate_exit],[],open_sessions=[],open_cells=[])
+    assert retained_host==[command_exit,duplicate_exit] and diagnostics==[]
+
+    for name, changed in (
+        ("unsafe", {"mutation_observed": True}),
+        ("incomplete", {"wrapper_outcome": "pending"}),
+        ("missing-marker", {"skill_instruction_read": None}),
+        ("dispatched", {"execution_status": "dispatched"}),
+    ):
+        competing_source={**command_source, **changed, "result_digest": "b"*12}
+        if name=="missing-marker":
+            del competing_source["skill_instruction_read"]
+        retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+            [*rows,command_source,competing_source],data,[command_exit],[],
+            open_sessions=[],open_cells=[])
+        assert retained_host==[command_exit] and diagnostics==[]
+    # The terminal receipt cannot supply declaration identity by itself.  Each
+    # nested marker is mandatory, so an otherwise safe-looking unregistered
+    # source leaves the terminal failure blocking.
+    for missing_marker in ("worker_skill_receipt_required", "skill_instruction_read"):
+        incomplete_command_source={key:value for key,value in command_source.items()
+                                   if key!=missing_marker}
+        retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+            [*rows,incomplete_command_source],data,[command_exit],[],
+            open_sessions=[],open_cells=[])
+        assert retained_host==[command_exit] and diagnostics==[]
+    # A terminal receipt cannot compensate for an incomplete or unknown nested
+    # execution state: only the explicit completed ``executed`` state proves
+    # that the declaration-bound read actually ran.
+    for incomplete_status in (*OBSERVER["INCOMPLETE_OUTCOMES"], "unknown"):
+        incomplete_command_source={**command_source,"execution_status":incomplete_status}
+        retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+            [*rows,incomplete_command_source],data,[command_exit],[],
+            open_sessions=[],open_cells=[])
+        assert retained_host==[command_exit] and diagnostics==[]
+    # Both the nested source and terminal receipt need the explicit established
+    # completed wrapper state.  A missing, failed, incomplete, or unknown
+    # wrapper outcome cannot demote the terminal command failure.
+    for bad_wrapper_outcome in (*OBSERVER["INCOMPLETE_OUTCOMES"], "error", "mystery"):
+        for failed_row in ("source", "terminal"):
+            candidate_source=dict(command_source)
+            candidate_exit=dict(command_exit)
+            if failed_row=="source":
+                candidate_source["wrapper_outcome"]=bad_wrapper_outcome
+            else:
+                candidate_exit["wrapper_outcome"]=bad_wrapper_outcome
+            retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+                [*rows,candidate_source],data,[candidate_exit],[],
+                open_sessions=[],open_cells=[])
+            assert retained_host==[candidate_exit] and diagnostics==[]
+    for failed_row in ("source", "terminal"):
+        candidate_source=dict(command_source)
+        candidate_exit=dict(command_exit)
+        if failed_row=="source":
+            del candidate_source["wrapper_outcome"]
+        else:
+            del candidate_exit["wrapper_outcome"]
+        retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+            [*rows,candidate_source],data,[candidate_exit],[],
+            open_sessions=[],open_cells=[])
+        assert retained_host==[candidate_exit] and diagnostics==[]
+    wrapped_command_source={**command_source,"wrapper_outcome":"error"}
+    retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+        [*rows,wrapped_command_source],data,[wrapped_command_source,command_exit],[],
+        open_sessions=[],open_cells=[])
+    assert retained_host==[wrapped_command_source,command_exit] and diagnostics==[]
+    unsafe_command={**command_exit,"mutation_observed":True}
+    retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+        [*rows,command_source],data,[unsafe_command],[],open_sessions=[],open_cells=[])
+    assert retained_host==[unsafe_command] and diagnostics==[]
+
+    # Safety is an exact affirmative proof on both the declaration-bound
+    # source and the terminal receipt.  Missing, unknown, replay-marked, and
+    # otherwise unsafe values must retain the terminal exit-1 finding.
+    safety_markers=("replayed", "replay_marker", "truncated",
+                    "private_target_access", "project_target_access",
+                    "mutation_observed")
+    for failed_row in ("source", "terminal"):
+        for marker in safety_markers:
+            for value in ("absent", "unknown", True):
+                candidate_source=dict(command_source)
+                candidate_exit=dict(command_exit)
+                candidate=(candidate_source if failed_row=="source" else candidate_exit)
+                if value=="absent":
+                    del candidate[marker]
+                elif value=="unknown":
+                    candidate[marker]="unknown"
+                else:
+                    candidate[marker]=value
+                retained_host,_,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+                    [*rows,candidate_source],data,[candidate_exit],[],
+                    open_sessions=[],open_cells=[])
+                assert retained_host==[candidate_exit] and diagnostics==[]
+
+    alternate={**safe_failure,"role":"other_profile",
+               "worker_skill_profile":"other_profile","result_digest":"b"*12}
+    alternate_policy={**safe_policy,"role":"other_profile","worker_skill_profile":"other_profile",
+                      "result_digest":"b"*12}
+    retained_host,retained_policy,diagnostics,_,_=OBSERVER["desktop_current_host_partition"](
+        [*rows,alternate],data,[alternate],[alternate_policy],open_sessions=[],open_cells=[])
+    assert retained_host==[alternate] and retained_policy==[alternate_policy]
+    assert diagnostics==[]
+
     for name, changed in (
         ("artifact", lambda: artifact.write_bytes(b"wrong")),
         ("open", lambda: None),
@@ -305,7 +486,7 @@ def test_desktop_current_host_final_outcome_uses_supported_receipts_only(tmp_pat
             # Apply the mutation to the independent fixture copy.
             if name == "unsafe": candidate.append({"thread_id": "desktop-worker", "private_target_access": True})
             elif name == "duplicate": candidate.append(dict(candidate[0]))
-            elif name == "missing-worker": candidate[2] = {"thread_id": "desktop-root", "role": "coordinator", "tool": "noop"}
+            elif name == "missing-worker": candidate = candidate[:2]
             elif name == "truncated": candidate.append({"thread_id": "desktop-worker", "truncated": True})
         blocked, blocked_reason = OBSERVER["desktop_supported_outcome_receipt"](
             candidate, data, open_sessions=[], open_cells=[])
@@ -334,11 +515,15 @@ def test_current_host_live_shape_accepts_opaque_task_and_native_result_receipts(
         "tool": "native_agent_result", "outcome": "success", "report_id": report_id,
         "agent_path": "/root/fixture-worker", "replayed": False, "truncated": False,
     }
-    rows = [static_read, opaque_create, *_strict_worker_skill_group_rows(), opaque_worker,
+    rows = [static_read, opaque_create,
+            {"thread_id": "child-thread", "parent_thread_id": None, "role": "coordinator",
+             "tool": "spawn_agent", "spawned_thread_id": "worker-thread", "outcome": "success"},
+            _successful_worker_skill_receipt_row(),
             {"thread_id": "worker-thread", "parent_thread_id": "child-thread", "role": "general",
              "tool": "mcp__cortex__write_report", "report_id": report_id, "outcome": "success",
              "host_receipt_observed": True, "host_receipt_outcome": "success", "replayed": False,
              "truncated": False},
+            opaque_worker,
             {"thread_id": "child-thread", "parent_thread_id": None, "role": "coordinator",
              "tool": "mcp__cortex__read_report", "report_id": report_id, "outcome": "success",
              "host_receipt_observed": True, "host_receipt_outcome": "success", "replayed": False,
@@ -370,12 +555,13 @@ def test_current_host_live_shape_accepts_opaque_task_and_native_result_receipts(
         "skill_instruction_read": True, "path_policy_provenance": "observer_literal_marker",
         "path_target_class": "approved_instruction_or_static_mention",
         "path_access_kind": "approved_instruction_read", "path_policy_decision": "allowed",
-        "result_digest": "a" * 12,
+        "execution_status": "executed", "exit_code": 2,
+        "private_target_access": False, "project_target_access": False,
+        "mutation_observed": False, "truncated": False, "replayed": False,
+        "replay_marker": False,
+        "result_digest": "a" * 12, "wrapper_outcome": "success",
     }
-    # The earlier strict group is deliberately excluded from this unit's
-    # identity comparison; a different denied read must not be coalesced with
-    # the established group merely because it has the same worker thread.
-    rows_without_group = [row for row in rows if row.get("worker_skill_receipt_required") is not True]
+    rows_without_group = list(rows)
     rows_with_failed_skill = [*rows_without_group, failed_skill]
     assert OBSERVER["observational_worker_skill_read_failure_diagnostic"](
         rows_with_failed_skill, failed_skill, data)
@@ -390,19 +576,22 @@ def test_current_host_live_shape_accepts_opaque_task_and_native_result_receipts(
 
     duplicate = {**failed_skill, "timestamp": "later", "completed_timestamp": "later-complete"}
     equivalent_rows = [*rows_without_group, failed_skill, duplicate]
-    assert OBSERVER["observational_worker_skill_read_failure_diagnostic"](
+    assert not OBSERVER["observational_worker_skill_read_failure_diagnostic"](
         equivalent_rows, failed_skill, data)
-    assert OBSERVER["observational_worker_skill_read_failure_diagnostic"](
+    assert not OBSERVER["observational_worker_skill_read_failure_diagnostic"](
         equivalent_rows, duplicate, data)
     for changed in (
         {"path_argument_digest": "b" * 12},
         {"tool": "functions.exec"},
         {"worker_skill_profile": "other-profile"},
         {"mutation_observed": True},
-        {"execution_status": "executed"},
+        {"execution_status": None, "exit_code": None},
+        {"execution_status": "denied_before_dispatch", "exit_code": None},
+        {"execution_status": "dispatched", "exit_code": 2},
+        {"execution_status": "executed", "exit_code": 0},
         {"result_digest": "b" * 12},
     ):
-        unsafe = {**duplicate, **changed}
+        unsafe = {**failed_skill, **changed}
         candidate_rows = [*rows_without_group, failed_skill, unsafe]
         assert not OBSERVER["observational_worker_skill_read_failure_diagnostic"](
             candidate_rows, failed_skill, data)
@@ -414,6 +603,84 @@ def test_current_host_live_shape_accepts_opaque_task_and_native_result_receipts(
     incomplete_rows = [*rows_without_group, failed_skill, duplicate, {"tool": "wait_agent", "outcome": "pending"}]
     assert not OBSERVER["observational_worker_skill_read_failure_diagnostic"](
         incomplete_rows, failed_skill, data)
+
+
+def test_current_host_outcome_accepts_one_worker_followup_but_not_ambiguous_finals(tmp_path):
+    """A continued worker has one terminal result, not two competing workers."""
+    rows = _completed_current_host_rows()
+    earlier_report = "r_fedcba987654"
+    earlier_result = {**rows[2], "report_ids": [earlier_report]}
+    rows.insert(1, earlier_result)
+    rows.insert(1, {"thread_id": "worker-thread", "parent_thread_id": "child-thread",
+                    "role": "general", "tool": "mcp__cortex__write_report",
+                    "report_id": earlier_report, "outcome": "success",
+                    "host_receipt_observed": True, "host_receipt_outcome": "success",
+                    "replayed": False, "truncated": False})
+    outcome, reason = OBSERVER["current_host_outcome_receipt"](
+        rows, state(tmp_path / "continued-worker"))
+    assert reason is None and outcome["report_id"] == "r_0123456789ab"
+
+    duplicate = [*rows, {**rows[2], "timestamp": "duplicate"}]
+    outcome, reason = OBSERVER["current_host_outcome_receipt"](
+        duplicate, state(tmp_path / "duplicate-final"))
+    assert outcome is None and reason == "outcome_native_worker_missing_or_ambiguous"
+
+    foreign = [*rows, {**rows[2], "thread_id": "other-worker"}]
+    outcome, reason = OBSERVER["current_host_outcome_receipt"](
+        foreign, state(tmp_path / "foreign-worker"))
+    assert outcome is None and reason == "outcome_native_worker_missing_or_ambiguous"
+
+    delayed = list(rows)
+    delayed_publication = delayed.pop(1)
+    delayed.append(delayed_publication)
+    outcome, reason = OBSERVER["current_host_outcome_receipt"](
+        delayed, state(tmp_path / "delayed-prior-publication"))
+    assert outcome is None and reason == "outcome_worker_report_missing_or_ambiguous"
+
+    delayed_terminal = list(rows)
+    terminal_publication = delayed_terminal.pop(3)
+    delayed_terminal.insert(2, terminal_publication)
+    outcome, reason = OBSERVER["current_host_outcome_receipt"](
+        delayed_terminal, state(tmp_path / "early-terminal-publication"))
+    assert outcome is None and reason == "outcome_worker_report_missing_or_ambiguous"
+
+
+def test_current_host_outcome_rejects_distinct_extra_worker_publication(tmp_path):
+    """A second successful bound-worker report cannot hide beside the valid one."""
+    rows = _completed_current_host_rows()
+    rows.append({**rows[1], "report_id": "r_deadbeefdead"})
+    outcome, reason = OBSERVER["current_host_outcome_receipt"](
+        rows, state(tmp_path / "distinct-extra-publication"))
+    assert outcome is None and reason == "outcome_worker_report_missing_or_ambiguous"
+
+
+def test_current_host_outcome_rejects_replay_marked_worker_evidence(tmp_path):
+    """Replay-marked worker finals or publications cannot complete the interval."""
+    for name, row_index, expected_reason in (
+        ("publication", 1, "outcome_worker_report_missing_or_ambiguous"),
+        ("final", 2, "outcome_native_worker_missing_or_ambiguous"),
+    ):
+        rows = _completed_current_host_rows()
+        rows[row_index]["replay_marker"] = True
+        outcome, reason = OBSERVER["current_host_outcome_receipt"](
+            rows, state(tmp_path / name))
+        assert outcome is None and reason == expected_reason
+
+
+def test_current_host_outcome_rejects_replay_marked_duplicate_worker_evidence(tmp_path):
+    """A replayed duplicate cannot be hidden beside valid lifecycle evidence."""
+    for marker in ("replay_marker", "replayed"):
+        for name, row_index, expected_reason in (
+            ("publication", 1, "outcome_worker_report_missing_or_ambiguous"),
+            ("final", 2, "outcome_native_worker_missing_or_ambiguous"),
+        ):
+            rows = _completed_current_host_rows()
+            duplicate = {**rows[row_index], "timestamp": f"replay-{marker}"}
+            duplicate[marker] = True
+            rows.append(duplicate)
+            outcome, reason = OBSERVER["current_host_outcome_receipt"](
+                rows, state(tmp_path / f"duplicate-{marker}-{name}"))
+            assert outcome is None and reason == expected_reason
 
 
 def test_current_host_unsupported_labels_are_diagnostics_without_outcome_shortcuts(tmp_path):
@@ -445,8 +712,8 @@ def test_current_host_unsupported_labels_are_diagnostics_without_outcome_shortcu
     assert qualified["host_enforcement_state"] == "unverified"
 
 
-def test_current_host_exact_denied_worker_skill_group_retains_only_safe_receipt_gaps(tmp_path):
-    """A verified host capability gap cannot hide a later unsafe operation."""
+def test_current_host_failed_declared_read_is_diagnostic_but_missing_skill_receipt_blocks(tmp_path):
+    """A benign read failure cannot replace the mandatory worker-SKILL receipt."""
     rows = [*_completed_current_host_rows(), *_strict_worker_skill_group_rows()]
     data = state(tmp_path / "worker-receipt-gap")
     policy = [
@@ -459,11 +726,29 @@ def test_current_host_exact_denied_worker_skill_group_retains_only_safe_receipt_
          "violation": "worker_project_action_before_skill_receipt"},
     ]
     blocking, diagnostics = OBSERVER["observational_policy_partition"](rows, data, policy)
-    assert blocking == []
-    assert {item["violation"] for item in diagnostics} == {
+    assert {item["violation"] for item in blocking} == {
         "worker_skill_load_failed", "worker_project_action_before_skill_receipt"}
-    assert {item["diagnostic_reason"] for item in diagnostics} == {
-        "missing_current_host_worker_skill_receipt"}
+    assert diagnostics == []
+
+    safe_failure={**_strict_worker_skill_group_rows()[-1],
+                  "execution_status":"executed", "exit_code":2,
+                  "result_digest":"a"*12,"wrapper_outcome":"success"}
+    complete_rows=[*_completed_current_host_rows(),_successful_worker_skill_receipt_row(),safe_failure]
+    failure_policy={**policy[0],"result_digest":"a"*12}
+    blocking,diagnostics=OBSERVER["observational_policy_partition"](
+        complete_rows,state(tmp_path/"safe-failure"),[failure_policy])
+    assert blocking==[]
+    assert [item["diagnostic_reason"] for item in diagnostics]==[
+        "failed_safe_declared_resource_read"]
+
+    alternate={**safe_failure,"role":"other_profile",
+               "worker_skill_profile":"other_profile","result_digest":"b"*12}
+    alternate_policy={**failure_policy,"role":"other_profile","result_digest":"b"*12}
+    blocking,diagnostics=OBSERVER["observational_policy_partition"](
+        [*_completed_current_host_rows(),_successful_worker_skill_receipt_row(),alternate],
+        state(tmp_path/"alternate-profile"),[alternate_policy])
+    assert blocking==[alternate_policy]
+    assert diagnostics==[]
 
     for name, change in (
         ("mutation", {"mutation_observed": True}),
@@ -487,7 +772,7 @@ def test_current_host_exact_denied_worker_skill_group_retains_only_safe_receipt_
 
 def test_current_host_completed_outcome_retains_actual_incomplete_or_mismatched_facts_as_blocks(tmp_path):
     for name, mutate, expected in (
-        ("missing-report", lambda rows: rows.pop(2), "outcome_worker_report_missing_or_ambiguous"),
+        ("missing-report", lambda rows: rows.pop(1), "outcome_worker_report_missing_or_ambiguous"),
         ("wrong-hash", lambda rows: rows[-1].update(reported_artifact_bindings=[]),
          "outcome_artifact_reconciliation_missing"),
         ("pending", lambda rows: rows.append({"tool": "wait_agent", "outcome": "pending"}),
@@ -503,12 +788,35 @@ def test_current_host_completed_outcome_retains_actual_incomplete_or_mismatched_
     assert qualified["status"] == "BLOCK" and qualified["reason"] == "observational_evidence_incomplete"
 
 
+def test_current_host_quality_finding_blocks_qualification_without_changing_clean_acceptance(tmp_path):
+    rows = _completed_current_host_rows()
+    data = state(tmp_path / "quality")
+    clean = OBSERVER["current_host_observational_qualification"](
+        rows, data, {"evidence_valid": True, "quality_findings": []}, {"status": "unverified"},
+        capture_complete=True, events_complete=True, terminal_complete=True, exit_complete=True)
+    assert clean["status"] == "observational_accept"
+
+    quality = OBSERVER["current_host_observational_qualification"](
+        rows, data, {"evidence_valid": True, "quality_findings": [
+            {"classification": "product_quality_outcome", "reason": "complete_attributable_failure"},
+        ]}, {"status": "unverified"},
+        capture_complete=True, events_complete=True, terminal_complete=True, exit_complete=True)
+    assert quality["status"] == "BLOCK"
+    assert quality["reason"] == "product_quality_outcome"
+    assert LIVE["current_host_audit_exit_code"](
+        {"evidence_valid": True, "score_eligible": True,
+         "evidence_integrity_invalidators": [], "quality_findings": [
+             {"classification": "product_quality_outcome"},
+         ]}, quality, failures=[], host_failures=[], audit_policy=[],
+        observational_diagnostics=[]) == 1
+
+
 def test_completed_current_host_outcome_accepts_redundant_missing_final_id_and_harmless_lookup(tmp_path):
     """Match the completed interactive workload without waiving outcome proof."""
     rows = _completed_current_host_rows()
     # The native final omitted a redundant report ID, but exactly one
     # task-bound worker publication and exact coordinator reconciliation remain.
-    rows[1].pop("report_ids")
+    rows[2].pop("report_ids")
     lookup = {"thread_id": "child-thread", "parent_thread_id": None, "role": "coordinator",
               "tool": "mcp__cortex__read_report", "outcome": "error",
               "error_code": "invalid_arguments", "mutation_observed": False,
@@ -537,7 +845,7 @@ def test_completed_current_host_outcome_accepts_redundant_missing_final_id_and_h
 
 
 def test_redundant_final_id_and_lookup_relaxation_never_hides_unsafe_or_ambiguous_evidence(tmp_path):
-    rows = _completed_current_host_rows(); rows[1].pop("report_ids")
+    rows = _completed_current_host_rows(); rows[2].pop("report_ids")
     rows.insert(1, {"thread_id": "child-thread", "parent_thread_id": None, "role": "coordinator",
                     "tool": "mcp__cortex__read_report", "outcome": "error",
                     "error_code": "invalid_arguments", "mutation_observed": True,
@@ -553,8 +861,8 @@ def test_redundant_final_id_and_lookup_relaxation_never_hides_unsafe_or_ambiguou
     }])
     assert diagnostics == [] and blocking[0]["violation"] == "mcp_tool_error_observed"
 
-    ambiguous = _completed_current_host_rows(); ambiguous[1].pop("report_ids")
-    ambiguous.append(dict(ambiguous[2]))
+    ambiguous = _completed_current_host_rows()
+    ambiguous.append(dict(ambiguous[1]))
     outcome, reason = OBSERVER["current_host_outcome_receipt"](ambiguous, state(tmp_path / "ambiguous-publication"))
     assert outcome is None and reason == "outcome_worker_report_missing_or_ambiguous"
 
@@ -1073,7 +1381,8 @@ def test_direct_public_create_marker_rejects_aliases_and_mixed_wrappers():
 def test_current_host_static_bundle_reads_allow_only_exact_skill_or_public_declaration(tmp_path, monkeypatch):
     """Model the observed installed-cache reads without widening cache access."""
     home = tmp_path / "home"
-    release = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex/1.15.9-test"
+    release = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
     skill = release / "skills/orchestrator/SKILL.md"
     declaration = release / ".mcp.json"
     skill.parent.mkdir(parents=True)
@@ -1081,7 +1390,7 @@ def test_current_host_static_bundle_reads_allow_only_exact_skill_or_public_decla
     declaration.write_bytes((ROOT / "plugins/cortex/.mcp.json").read_bytes())
     candidate = home / ".cortex-dev/.codex/cortex-candidate.json"
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_text(json.dumps({"version": "1.15.9-test"})); candidate.chmod(0o600)
+    candidate.write_text(json.dumps({"version": ACTIVE_VERSION})); candidate.chmod(0o600)
     monkeypatch.setattr(Path, "home", lambda: home)
     check = OBSERVER["skill_instruction_read"]
     command = lambda path: json.dumps({"cmd": f"cat {path}"})
@@ -1107,16 +1416,206 @@ def test_current_host_static_bundle_reads_allow_only_exact_skill_or_public_decla
     assert not check("exec_command", command(unknown), coordinator_only=True)
 
 
-def test_current_host_bounded_shell_wrapper_allows_only_exact_registered_worker_skill(tmp_path, monkeypatch):
-    """The host transport wrapper cannot turn a cache probe into a skill read."""
+def test_declared_public_leaves_accept_stable_cache_without_relaxing_failure_safety(tmp_path, monkeypatch):
+    """Stable and isolated cache roots share declaration identity, not receipts."""
     home = tmp_path / "home"
-    release = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex/1.15.9-test"
+    stable = home / ".codex/plugins/cache/cortex/cortex" / ACTIVE_VERSION
+    isolated = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(stable)
+    _trusted_cache_manifest(isolated)
+    stable_reference = stable / "skills/orchestrator/references/worker-routing.md"
+    isolated_reference = isolated / "skills/orchestrator/references/worker-routing.md"
+    for reference in (stable_reference, isolated_reference):
+        reference.parent.mkdir(parents=True)
+        reference.write_bytes(
+            (ROOT / "plugins/cortex/skills/orchestrator/references/worker-routing.md").read_bytes())
+    monkeypatch.setattr(Path, "home", lambda: home)
+    check = OBSERVER["skill_instruction_read"]
+    declared = OBSERVER["declared_skill_instruction_read"]
+    command = lambda path: json.dumps({"cmd": f"sed -n '1,$p' {path}"})
+
+    for reference in (stable_reference, isolated_reference):
+        arguments = command(reference)
+        assert check("exec_command", arguments, coordinator_only=True)
+        assert declared("exec_command", arguments, coordinator_only=True)
+        assert OBSERVER["call_policy_flags"](
+            "exec_command", arguments, "coordinator", "/fixture") == []
+
+    # A complete non-zero read retains declaration identity for diagnostics but
+    # cannot establish a successful skill receipt.
+    stable_reference.unlink()
+    failed = command(stable_reference)
+    assert not check("exec_command", failed, coordinator_only=True)
+    assert declared("exec_command", failed, coordinator_only=True)
+    metadata = OBSERVER["path_policy_metadata"](
+        "exec_command", failed, "coordinator", "/fixture")
+    assert metadata["path_policy_decision"] == "allowed"
+    assert metadata["path_access_kind"] == "approved_instruction_read"
+    assert OBSERVER["call_policy_flags"](
+        "exec_command", failed, "coordinator", "/fixture") == []
+
+    # Unknown leaves, registries, directories, mixed commands, and private
+    # Cortex storage remain outside the declaration-bound exception.
+    unknown = stable / "skills/orchestrator/references/not-linked.md"
+    registry = stable / "agents/orchestrator.toml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("private registry")
+    for unsafe in (
+        command(unknown),
+        command(stable / "skills/orchestrator"),
+        json.dumps({"cmd": f"cat {registry}"}),
+        json.dumps({"cmd": f"sed -n '1,$p' {stable_reference} && cat {registry}"}),
+        json.dumps({"cmd": "cat .codex/cortex/private"}),
+    ):
+        assert not declared("exec_command", unsafe, coordinator_only=True)
+        assert "forbidden_plugin_or_cache_access" in OBSERVER["call_policy_flags"](
+            "exec_command", unsafe, "coordinator", "/fixture")
+
+
+def test_declared_public_leaves_are_command_neutral_for_multiple_safe_readers(tmp_path, monkeypatch):
+    """Several modelled readers bind the leaf, while unknown tools fail closed."""
+    home = tmp_path / "home"
+    release = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
     skill = release / "skills/worker-general/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
+    monkeypatch.setattr(Path, "home", lambda: home)
+    check = OBSERVER["skill_instruction_read"]
+
+    # These ordinary readers use different argument shapes, but none is a
+    # prompt/skill requirement. The positive observer model binds their one
+    # literal leaf and leaves quoting to the model/tool transport.
+    for command in (
+        f'head -n 80 "{skill}"',
+        f'tail --lines=40 "{skill}"',
+        f'nl -ba "{skill}"',
+    ):
+        assert check("exec_command", json.dumps({"cmd": command}), worker_only=True)
+
+    assert OBSERVER["path_policy_metadata"](
+        "exec_command", json.dumps({"cmd": f"head -n 80 {skill}"}),
+        "general", "/fixture")["path_policy_decision"] == "allowed"
+    missing = release / "skills/worker-general/references/report-publication.md"
+    missing_arguments = json.dumps({"cmd": f"head -n 80 {missing}"})
+    assert not check("exec_command", missing_arguments, worker_only=True)
+    assert OBSERVER["declared_skill_instruction_read"](
+        "exec_command", missing_arguments, worker_only=True)
+    assert OBSERVER["path_policy_metadata"](
+        "exec_command", missing_arguments, "general", "/fixture")[
+        "path_policy_decision"] == "allowed"
+
+    # Shell control, redirection, extra operands, and write-like commands stay
+    # outside the declaration-bound exception.
+    for command in (
+        f"head -n 80 {skill} > /tmp/copied-skill",
+        f"head -n 80 {skill} && touch /tmp/changed",
+        f"head -n 80 {skill} /tmp/other",
+        f"rm {skill}",
+        f"head --output=/tmp/copied-skill {skill}",
+        f"vim {skill}",
+        f"/tmp/custom-reader {skill}",
+        f"python3 -c 'Path({str(skill)!r}).write_text(\"changed\")' {skill}",
+    ):
+        arguments = json.dumps({"cmd": command})
+        assert not check("exec_command", arguments, worker_only=True)
+        assert "forbidden_plugin_or_cache_access" in OBSERVER["call_policy_flags"](
+            "exec_command", arguments, "general", "/fixture")
+
+
+def test_command_neutral_reader_binds_canonical_executable_identity(tmp_path, monkeypatch):
+    """Path-qualified and PATH-shadowed readers cannot borrow the read model."""
+    home = tmp_path / "home"
+    release = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
+    skill = release / "skills/worker-general/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
+    monkeypatch.setattr(Path, "home", lambda: home)
+    check = OBSERVER["skill_instruction_read"]
+
+    # Even a trusted system path is outside the model's command-neutral token
+    # identity; the model is free to choose ordinary readers, but path-qualified
+    # tokens are not treated as the registered executable identity.
+    qualified = json.dumps({"cmd": f"/usr/bin/head -n 80 {skill}"})
+    assert not check("exec_command", qualified, worker_only=True)
+    assert OBSERVER["call_policy_flags"](
+        "exec_command", qualified, "general", "/fixture")
+
+    # A same-basename executable earlier in PATH is not the trusted binary.
+    shadow_dir = tmp_path / "shadow"
+    shadow_dir.mkdir()
+    shadow = shadow_dir / "head"
+    shadow.write_text("#!/bin/sh\nprintf shadow\n")
+    shadow.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shadow_dir}:/usr/bin:/bin")
+    shadowed = json.dumps({"cmd": f"head -n 80 {skill}"})
+    assert not check("exec_command", shadowed, worker_only=True)
+    assert OBSERVER["call_policy_flags"](
+        "exec_command", shadowed, "general", "/fixture")
+
+    # Restoring the canonical PATH keeps the supported bare reader valid.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert check("exec_command", json.dumps({"cmd": f"head -n 80 {skill}"}), worker_only=True)
+
+
+def test_stable_worker_skill_requires_active_manifest_and_trusted_bytes(tmp_path, monkeypatch):
+    """A stable cache leaf is valid only for the active released payload."""
+    home = tmp_path / "home"
+    stable_root = home / ".codex/plugins/cache/cortex/cortex"
+    active = stable_root / ACTIVE_VERSION
+    _trusted_cache_manifest(active)
+    active_skill = active / "skills/worker-general/SKILL.md"
+    active_skill.parent.mkdir(parents=True)
+    active_skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
+    monkeypatch.setattr(Path, "home", lambda: home)
+    command = lambda path: json.dumps({"cmd": f"cat {path}"})
+
+    # The active stable release is a valid equivalent of the isolated cache.
+    assert OBSERVER["worker_skill_read"](
+        "exec_command", command(active_skill))
+
+    # A stale version directory cannot become trusted merely by containing a
+    # correctly named worker skill; its manifest identity is not active.
+    stale = stable_root / "1.15.9-stale"
+    stale_manifest = stale / ".codex-plugin/plugin.json"
+    stale_manifest.parent.mkdir(parents=True)
+    stale_value = json.loads(
+        (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
+    stale_value["version"] = stale.name
+    stale_manifest.write_text(json.dumps(stale_value))
+    stale_skill = stale / "skills/worker-general/SKILL.md"
+    stale_skill.parent.mkdir(parents=True)
+    stale_skill.write_bytes(active_skill.read_bytes())
+    assert not OBSERVER["worker_skill_read"](
+        "exec_command", command(stale_skill))
+    assert not OBSERVER["declared_skill_instruction_read"](
+        "exec_command", command(stale_skill), worker_only=True)
+
+    # Even under the active version, injected worker-SKILL bytes are not a
+    # trusted receipt and remain blocking for both successful and failed reads.
+    active_skill.write_text("tampered worker instructions")
+    assert not OBSERVER["worker_skill_read"](
+        "exec_command", command(active_skill))
+    assert not OBSERVER["declared_skill_instruction_read"](
+        "exec_command", command(active_skill), worker_only=True)
+
+
+def test_current_host_bounded_shell_wrapper_allows_registered_worker_resources_only(tmp_path, monkeypatch):
+    """Worker references are normal reads but never become the skill receipt."""
+    home = tmp_path / "home"
+    release = home / ".cortex-dev/.codex/plugins/cache/cortex/cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
+    skill = release / "skills/worker-general/SKILL.md"
+    reference = release / "skills/worker-general/references/report-publication.md"
     neighbor = release / "skills/worker-general/references/diagnostic.md"
     registry = release / "agents/general.toml"
     skill.parent.mkdir(parents=True); neighbor.parent.mkdir(parents=True)
     skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
+    reference.write_bytes((ROOT / "plugins/cortex/skills/worker-general/references/report-publication.md").read_bytes())
     neighbor.write_text("not a worker instruction leaf")
+    symlink = reference.parent / "publication-link.md"
+    symlink.symlink_to(reference)
     registry.parent.mkdir(parents=True); registry.write_text("not a skill")
     monkeypatch.setattr(Path, "home", lambda: home)
     wrapped = lambda inner: json.dumps({"cmd": f"bash -lc {json.dumps(inner)}"})
@@ -1128,11 +1627,24 @@ def test_current_host_bounded_shell_wrapper_allows_only_exact_registered_worker_
     assert metadata["path_access_kind"] == "approved_instruction_read"
     assert OBSERVER["call_policy_flags"](
         "exec_command", wrapped(f"cat {skill}"), "general", "/fixture") == []
+    for command in (f"cat {reference}", f"sed -n '1,$p' {reference}"):
+        arguments = wrapped(command) if command.startswith('sed') else json.dumps({'cmd': command})
+        assert OBSERVER["skill_instruction_read"](
+            "exec_command", arguments, worker_only=True)
+        assert not OBSERVER["worker_skill_read"]("exec_command", arguments)
+        assert OBSERVER["worker_skill_profile"]("exec_command", arguments) is None
+        assert OBSERVER["path_policy_metadata"](
+            "exec_command", arguments, "general", "/fixture")["path_policy_decision"] == "allowed"
+        assert OBSERVER["call_policy_flags"](
+            "exec_command", arguments, "general", "/fixture") == []
     for command in (
         f"cat {neighbor}",
+        f"cat {symlink}",
         f"cat {registry}",
         f"cat {skill.parent}",
         f"cat {skill} && touch {tmp_path / 'mutated'}",
+        f"sed -n 1,$p {reference}",
+        f"cat {reference} {skill}",
         f"find {release} -name SKILL.md",
         f"bash -lc {json.dumps(f'cat {skill}')}",
     ):
@@ -1143,12 +1655,23 @@ def test_current_host_bounded_shell_wrapper_allows_only_exact_registered_worker_
         assert "forbidden_plugin_or_cache_access" in OBSERVER["call_policy_flags"](
             "exec_command", arguments, "general", "/fixture")
 
+    reference_target = reference.parent / "reference-target.md"
+    reference_target.write_bytes(reference.read_bytes())
+    reference.unlink()
+    reference.symlink_to(reference_target)
+    arguments = json.dumps({'cmd': f'cat {reference}'})
+    assert not OBSERVER["skill_instruction_read"](
+        "exec_command", arguments, worker_only=True)
+    assert OBSERVER["path_policy_metadata"](
+        "exec_command", arguments, "general", "/fixture")["path_policy_decision"] == "unauthorized_access"
+
 
 def test_current_host_functions_exec_static_read_transport_is_exact_for_coordinator_and_worker(
         tmp_path, monkeypatch):
     """Require one direct nested read and same-identifier result forwarding."""
     home = tmp_path / "home"
-    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "1.15.9-test"
+    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
     coordinator_skill = release / "skills" / "orchestrator" / "SKILL.md"
     worker_skill = release / "skills" / "worker-general" / "SKILL.md"
     coordinator_skill.parent.mkdir(parents=True)
@@ -1157,7 +1680,7 @@ def test_current_host_functions_exec_static_read_transport_is_exact_for_coordina
     worker_skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())
     candidate = home / ".cortex-dev" / ".codex" / "cortex-candidate.json"
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_text(json.dumps({"version": "1.15.9-test"}))
+    candidate.write_text(json.dumps({"version": ACTIVE_VERSION}))
     candidate.chmod(0o600)
     monkeypatch.setattr(Path, "home", lambda: home)
 
@@ -1261,13 +1784,14 @@ def test_current_host_functions_exec_static_read_transport_marks_observed_coordi
         tmp_path, monkeypatch):
     """Exercise wrapper promotion only after the exact nested source parses."""
     home = tmp_path / "home"
-    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "1.15.9-test"
+    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
     skill = release / "skills" / "orchestrator" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_bytes((ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_bytes())
     candidate = home / ".cortex-dev" / ".codex" / "cortex-candidate.json"
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_text(json.dumps({"version": "1.15.9-test"}))
+    candidate.write_text(json.dumps({"version": ACTIVE_VERSION}))
     candidate.chmod(0o600)
     monkeypatch.setattr(Path, "home", lambda: home)
 
@@ -1319,7 +1843,8 @@ def test_current_host_functions_exec_static_read_transport_marks_observed_coordi
 def test_current_host_worker_wrapper_result_credits_exact_skill_receipt(tmp_path, monkeypatch):
     """A successful permitted worker read must create the normal receipt."""
     home = tmp_path / "home"
-    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "1.15.9-test"
+    release = home / ".cortex-dev" / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / ACTIVE_VERSION
+    _trusted_cache_manifest(release)
     skill = release / "skills" / "worker-general" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_bytes((ROOT / "plugins/cortex/skills/worker-general/SKILL.md").read_bytes())

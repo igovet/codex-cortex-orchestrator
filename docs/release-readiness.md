@@ -1,9 +1,9 @@
-# 1.15.9: Stable release readiness
+# 1.16.0: Stable release readiness
 
 ## Qualified source candidate — 2026-09-14
 
-Current source: `1.15.9+codex.sha256.121a79864903aeee` (payload SHA-256
-`121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`). This
+Current source: `1.16.0+codex.sha256.5445b95361d15a5e` (payload SHA-256
+`5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35`). This
 terminal-wait and silent-wait repair supersedes the previously qualified source
 summary below. After each successful native spawn, the coordinator must use
 a successful exact native `wait_agent` recorded after that spawn until the
@@ -18,12 +18,12 @@ checks on this unchanged payload.
 Stable installation, commit, push and promotion are separate delivery actions and
 were not performed. No incident-efficacy comparison is claimed.
 
-## Historical release-readiness record
+## Historical 1.15.9 release-readiness record
 
 The former current/latest labels below are retained history, not the status of
 the qualified source candidate above.
 
-The current Cortex semantic version is `1.15.9`, with source payload
+At that historical snapshot, the Cortex semantic version was `1.15.9`, with source payload
 `1.15.9+codex.sha256.07c3aeae551a990e` as declared by the plugin manifest and
 resolved by the package validator. The final consecutive real CLI/Desktop
 qualification (`r_648c4f40dcf9`) belongs to superseded payload
@@ -34,7 +34,7 @@ claim. The user cancelled the Phase 2 outcome comparison; it is non-blocking and
 non-scoring, and no efficacy comparison is claimed. See [project verification](project/verification.md)
 for the bounded evidence record.
 
-## Current 1.15.9 stable release status
+## Historical 1.15.9 stable release status
 
 | Gate or evidence | Status | Exact retained evidence |
 | --- | --- | --- |

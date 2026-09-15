@@ -132,9 +132,8 @@ def test_observational_mode_retains_only_unavailable_host_labels_without_proof()
              "bootstrap_expected_child_thread_id": "root"}
 
     # The assignment-policy capability is not emitted by the current host, so
-    # that exact label is diagnostic even before any worker read grouping. The
-    # worker receipt gap remains hard until the separate strict denied-read
-    # group below establishes the supported host limitation.
+    # that exact label is diagnostic. Worker receipt gaps remain hard unless a
+    # separate exact successful assigned-SKILL receipt proves completion.
     blocking, diagnostics = OBSERVER["observational_policy_partition"](entries, state, policy)
     assert {row["violation"] for row in diagnostics} == {
         "worker_assignment_policy_unverified", "cortex_call_missing_server_event"}
@@ -155,10 +154,10 @@ def test_observational_mode_retains_only_unavailable_host_labels_without_proof()
          "result_digest": "d" * 12})
     blocking, diagnostics = OBSERVER["observational_policy_partition"](entries, state, policy)
     assert {row["violation"] for row in diagnostics} == {
-        "worker_assignment_policy_unverified", "cortex_call_missing_server_event",
-        "worker_project_action_before_skill_receipt"}
+        "worker_assignment_policy_unverified", "cortex_call_missing_server_event"}
     assert {row["violation"] for row in blocking} == {
-        "worker_skill_route_mismatch", "pre_binding_host_action"}
+        "worker_project_action_before_skill_receipt", "worker_skill_route_mismatch",
+        "pre_binding_host_action"}
     assert {row["host_enforcement_state"] for row in diagnostics} == {"unverified"}
 
     # Truncation still blocks the real worker receipt-gap findings, while the

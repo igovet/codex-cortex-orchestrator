@@ -88,15 +88,11 @@ provenance, replay/truncation, publication, cleanup, audit, or protected action
 responses, and does not catch or demote `StoreError` or `PermissionError`.
 
 Current-host static skill reads retain the same strict boundary at pre-dispatch and
-when transported through `functions.exec`: one direct `tools.exec_command` call must be bound once
-to a safe JavaScript identifier with `const` and forwarded completely with
-`text(<that-same-identifier>);` (for example, `const result = await ...;
-text(result);`). The
-observer rejects aliases, extra calls, partial forwarding, nested shells, and
-non-manifest paths. The pre-dispatch boundary admits only the exact manifest-bound
-`SKILL.md` leaf through a bounded literal `cat`/`sed` command, optionally inside one
-literal `bash -lc` envelope; the complete successful result is then available for
-the normal worker-skill receipt correlation.
+when transported through a host wrapper: the observer requires one attributable,
+completely forwarded read-only result for the exact declaration-bound leaf. It rejects
+aliases, extra operations, partial forwarding, nested shells, and non-manifest paths.
+The model chooses the supported ordinary read-only means; only a complete successful
+read of the exact manifest-bound `SKILL.md` can satisfy worker-skill receipt correlation.
 
 Private observation streams contain event types, safe identities/digests, statuses,
 terminal receipts, actor/thread lineage and bounded path-policy provenance

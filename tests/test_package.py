@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import runpy
 import shutil
 import subprocess
@@ -14,6 +15,16 @@ from generate_agent_profiles import (
     expected_profiles,
     expected_worker_references,
 )
+
+CANDIDATE_VERSION = json.loads((PLUGIN / '.codex-plugin/plugin.json').read_text())['version']
+
+
+def trusted_cache(base):
+    cache = base / CANDIDATE_VERSION
+    manifest = cache / '.codex-plugin/plugin.json'
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes((PLUGIN / '.codex-plugin/plugin.json').read_bytes())
+    return cache
 
 
 def _private_candidate_home(tmp_path, monkeypatch):
@@ -42,7 +53,7 @@ def _inject_portable_noreplace(cli, monkeypatch):
 
 
 def test_stamped_package_and_profiles():
-    assert validate().startswith('1.15.9+codex.sha256.')
+    assert validate().startswith('1.16.0+codex.sha256.')
     assert len(list((PLUGIN/'agents').glob('*.toml')))==23
     payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     assert all((PLUGIN/path).is_file() for path in payload)
@@ -132,7 +143,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
             'Quality criteria',
             'Recovery',
         } <= headings
-        assert len(instructions) < 12_000
+        assert len(instructions) < 12_500
         assert 'page of at most\n4,000 characters' in instructions
         assert 'not a total context limit' in instructions
         assert 'references/report-publication.md' in instructions
@@ -180,6 +191,12 @@ def test_source_check_is_read_only():
 
 def test_desktop_helper_can_submit_one_literal_prompt_file():
     source=(ROOT/'scripts/cortex-desktop-dev').read_text()
+    live_source=(ROOT/'scripts/cortex-live-smoke').read_text()
+    for bootstrap in (source, live_source):
+        assert 'text(ALL_TOOLS.filter(x =>' in bootstrap
+        assert 'immediately ' in bootstrap
+        assert 'first Cortex ' in bootstrap
+        assert 'returned complete advertised schemas' in bootstrap
     assert "add_argument('--prompt-file',type=Path)" in source
     assert "add_argument('--data-dir',type=Path)" not in source
     assert "codex://threads/new?" in source
@@ -223,7 +240,8 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     assert "owner.stdout.strip()==str(pid)" in source
     assert 'def desktop_thread_ids(workdir,started_at):' in source
     assert 'def wait_desktop_window(pid,deadline=None):' in source
-    assert "[xdotool,'key','--window',window,'Return']" in source
+    assert "[xdotool,'key','Return']" in source
+    assert "[xdotool,'key','--window',window,'Return']" not in source
     assert "state['thread_id']=created.pop()" in source
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     companion=sum(
@@ -243,7 +261,9 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     # a bounded completion branch while retaining a compact source budget.
     assert len(orchestrator) < 7700
     routing = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
-    assert '`gpt-5.6-luna` at `medium` or `high`' in routing
+    assert '`gpt-5.6-luna`' in routing
+    assert 'Prefer `high`' in routing
+    assert 'Code review uses Terra' in routing
     assert 'implementation returns to Luna/Terra' in routing
     assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
 
@@ -257,6 +277,8 @@ def test_desktop_activation_keeps_strict_success_path_and_records_ownership(monk
         calls.append(args)
         if args[1]=='windowactivate':
             return types.SimpleNamespace(returncode=0,stdout='',stderr='')
+        if args[1]=='getactivewindow':
+            return types.SimpleNamespace(returncode=0,stdout='456\n',stderr='')
         assert args[1]=='getwindowpid'
         return types.SimpleNamespace(returncode=0,stdout='123\n',stderr='')
     monkeypatch.setattr(helper['subprocess'],'run',fake_run)
@@ -264,8 +286,29 @@ def test_desktop_activation_keeps_strict_success_path_and_records_ownership(monk
     state={}
     result=helper['activate_desktop_window']('/usr/bin/xdotool','456',123,state,state_file)
     assert result=={'method':'windowactivate','returncode':0}
-    assert [call[1] for call in calls]==['windowactivate','getwindowpid']
+    assert [call[1] for call in calls]==['windowactivate','getwindowpid','getactivewindow']
     assert json.loads(state_file.read_text())['desktop_activation']==result
+
+
+def test_desktop_activation_normal_success_fails_closed_when_active_window_mismatches(monkeypatch,tmp_path):
+    import runpy
+    import types
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='normal_activation_mismatch')
+    calls=[]
+    def fake_run(args,**kwargs):
+        calls.append(args)
+        if args[1]=='windowactivate':
+            return types.SimpleNamespace(returncode=0,stdout='',stderr='')
+        if args[1]=='getwindowpid':
+            return types.SimpleNamespace(returncode=0,stdout='123\n',stderr='')
+        assert args[1]=='getactivewindow'
+        return types.SimpleNamespace(returncode=0,stdout='other-window\n',stderr='')
+    monkeypatch.setattr(helper['subprocess'],'run',fake_run)
+    state_file=tmp_path/'session.json'
+    with pytest.raises(RuntimeError,match='did not make the owned Desktop window active'):
+        helper['activate_desktop_window']('/usr/bin/xdotool','456',123,{},state_file)
+    assert [call[1] for call in calls]==['windowactivate','getwindowpid','getactivewindow']
+    assert json.loads(state_file.read_text())['desktop_activation']['active_window']=='mismatch'
 
 
 def test_desktop_activation_allows_only_exact_desktop_warning_focus_fallback(monkeypatch,tmp_path):
@@ -399,34 +442,38 @@ def test_desktop_activation_fails_closed_on_focus_ownership_change(monkeypatch,t
 def test_desktop_prepared_send_keeps_prompt_retryable_when_no_new_task_receipt(monkeypatch,tmp_path):
     """The verified plain-Return transport stays non-accepting without a receipt."""
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
-    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True}
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True,'prepared_prompt':'prompt'}
     state_file=tmp_path/'session.json'
     calls=[]
     scope=helper['submit_prepared_desktop_prompt'].__globals__
     monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
     monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:{'existing'})
+    monkeypatch.setitem(scope,'desktop_prompt_receipts',lambda state,prompt:set())
     monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
     monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
     with pytest.raises(RuntimeError,match='produced 0 new task receipts'):
         helper['submit_prepared_desktop_prompt'](state,state_file)
     assert state.get('prompt_sent') is None
-    assert calls==[['/usr/bin/xdotool','key','--window','456','Return']]
+    assert calls==[['/usr/bin/xdotool','key','Return']]
 
 
 def test_desktop_prepared_send_uses_owned_window_shortcut_and_one_durable_task_receipt(monkeypatch,tmp_path):
     """Current-host transport has no composer locator: it preserves URI focus."""
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
-    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True}
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True,'prepared_prompt':'prompt'}
     state_file=tmp_path/'session.json'
     calls=[];receipts=iter(({'existing'},{'existing','new-task'}))
     scope=helper['submit_prepared_desktop_prompt'].__globals__
     monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
     monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setitem(scope,'desktop_prompt_receipts',lambda state,prompt:{'prompt-receipt'})
     monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
     monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
     monkeypatch.setattr(helper['time'],'time',lambda:99.0)
     assert helper['submit_prepared_desktop_prompt'](state,state_file)=='456'
-    assert calls==[['/usr/bin/xdotool','key','--window','456','Return']]
+    assert calls==[['/usr/bin/xdotool','key','Return']]
     assert state['prompt_sent'] is True
     assert state['thread_id']=='new-task'
     assert state['first_submission_at']==99.0
@@ -435,18 +482,115 @@ def test_desktop_prepared_send_uses_owned_window_shortcut_and_one_durable_task_r
 
 def test_desktop_prepared_send_rejects_duplicate_task_receipts_after_one_plain_return(monkeypatch,tmp_path):
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_duplicate_receipt')
-    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True}
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True,'prepared_prompt':'prompt'}
     state_file=tmp_path/'session.json'
     calls=[];receipts=iter(({'existing'},{'existing','task-one','task-two'}))
     scope=helper['submit_prepared_desktop_prompt'].__globals__
     monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
     monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setitem(scope,'desktop_prompt_receipts',lambda state,prompt:set())
     monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
     monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
     with pytest.raises(RuntimeError,match='produced 2 new task receipts'):
         helper['submit_prepared_desktop_prompt'](state,state_file)
     assert state.get('prompt_sent') is None
-    assert calls==[['/usr/bin/xdotool','key','--window','456','Return']]
+    assert calls==[['/usr/bin/xdotool','key','Return']]
+
+
+def test_desktop_prepared_send_revalidates_focus_immediately_before_plain_return(monkeypatch,tmp_path):
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_focus_recheck')
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True,
+           'prepared_prompt':'prompt'}
+    state_file=tmp_path/'session.json'
+    sequence=[];receipts=iter(({'existing'},{'existing','new-task'}))
+    scope=helper['submit_prepared_desktop_prompt'].__globals__
+    monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setitem(scope,'desktop_prompt_receipts',lambda state,prompt:{'prompt-receipt'})
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:sequence.append('revalidated'))
+    monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:sequence.append(args))
+    monkeypatch.setattr(helper['time'],'time',lambda:99.0)
+    helper['submit_prepared_desktop_prompt'](state,state_file)
+    assert sequence==['revalidated',['/usr/bin/xdotool','key','Return']]
+
+
+def test_desktop_prepared_send_rejects_unrelated_new_task_without_exact_prompt_receipt(monkeypatch,tmp_path):
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_prompt_receipt')
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True,
+           'prepared_prompt':'prepared prompt'}
+    state_file=tmp_path/'session.json'
+    receipts=iter(({'existing'},*([{'existing','unrelated-task'}]*60)))
+    scope=helper['submit_prepared_desktop_prompt'].__globals__
+    monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
+    monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setitem(scope,'desktop_prompt_receipts',lambda state,prompt:set())
+    monkeypatch.setattr(helper['subprocess'],'run',lambda *args,**kwargs:None)
+    monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+    with pytest.raises(RuntimeError,match='no unique exact prepared-prompt receipt'):
+        helper['submit_prepared_desktop_prompt'](state,state_file)
+    assert state.get('prompt_sent') is None
+    assert state.get('desktop_transport_receipt') is None
+
+
+def test_desktop_prepared_send_persists_ambiguous_receipt_and_never_replays_return(monkeypatch,tmp_path):
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_no_replay')
+    state={'pid':123,'workdir':'/project','started_at':10.0,'prompt_supplied':True,
+           'prepared_prompt':'prepared prompt'}
+    state_file=tmp_path/'session.json'
+    receipts=iter(({'existing'},*([{'existing','new-task'}]*60)))
+    calls=[]
+    scope=helper['submit_prepared_desktop_prompt'].__globals__
+    monkeypatch.setitem(scope,'wait_prepared_desktop_readiness',lambda state,path:('/usr/bin/xdotool','456'))
+    monkeypatch.setitem(scope,'activate_desktop_window',lambda *args:None)
+    monkeypatch.setitem(scope,'desktop_thread_ids',lambda workdir,started_at:next(receipts))
+    monkeypatch.setitem(scope,'desktop_prompt_receipts',lambda state,prompt:set())
+    monkeypatch.setattr(helper['subprocess'],'run',lambda args,**kwargs:calls.append(args))
+    monkeypatch.setattr(helper['time'],'sleep',lambda _:None)
+    with pytest.raises(RuntimeError,match='inspect receipts'):
+        helper['submit_prepared_desktop_prompt'](state,state_file)
+    assert state['desktop_submission_status']=='ambiguous'
+    assert state['desktop_submission_task_ids']==['new-task']
+    first_calls=list(calls)
+    with pytest.raises(RuntimeError,match='submission is ambiguous'):
+        helper['submit_prepared_desktop_prompt'](state,state_file)
+    assert calls==first_calls==[['/usr/bin/xdotool','key','Return']]
+
+
+def test_desktop_public_failure_diagnostics_are_stable_and_value_free():
+    helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='desktop_public_diagnostics')
+    classify=helper['public_desktop_failure']
+    message=helper['public_desktop_failure_message']
+
+    error=RuntimeError('Desktop submission produced 0 new task receipts; private path /secret/project remains retryable')
+    assert classify('send',error)=={
+        'operation':'send','category':'submission',
+        'reason':'task_receipt_count_mismatch','recovery':'retry',
+    }
+    rendered=message('send',error)
+    assert rendered=='Desktop test operation failed; operation=send; category=submission; reason=task_receipt_count_mismatch; recovery=retry.'
+    assert '/secret/project' not in rendered
+    assert 'private logs' not in rendered
+
+    assert classify('send',RuntimeError('isolated Desktop window activation failed'))['recovery']=='focus'
+    assert classify('start',RuntimeError('candidate preparation failed'))['recovery']=='cleanup_retry'
+
+
+def test_desktop_send_missing_session_reports_public_recovery_without_private_path(tmp_path):
+    state_dir=tmp_path/'private-desktop-state'
+    result=subprocess.run(
+        [sys.executable,str(ROOT/'scripts/cortex-desktop-dev'),'send'],
+        env={**os.environ,'CORTEX_DESKTOP_STATE_DIR':str(state_dir)},
+        text=True,capture_output=True,
+    )
+    assert result.returncode==1
+    assert result.stderr.strip()==(
+        'Desktop test operation failed; operation=send; category=state; '
+        'reason=session_unavailable; recovery=cleanup.'
+    )
+    assert str(state_dir) not in result.stderr
+    assert 'private logs' not in result.stderr
 
 
 def test_desktop_readiness_waits_for_hydration_and_stable_owned_window(monkeypatch,tmp_path):
@@ -749,8 +893,13 @@ def test_worker_safety_and_post_wait_rules_are_payload_guidance():
     for rule in ('rm -rf', 'find ... -delete', 'git clean', 'reset/checkout', 'recursive cleanup'):
         assert rule in worker
     assert 'Checks `PYTHONDONTWRITEBYTECODE=1`' in worker
-    assert 'Before any project action' in worker
-    assert 'a coordinator read never satisfies that' in worker
+    assert 'Before project action' in worker
+    assert 'most specific native tool' in worker
+    assert 'avoid Python/ad-hoc parsing' in ' '.join(worker.split())
+    consultant = (PLUGIN/'agent-sources/consultant-protocol.md').read_text()
+    assert 'most specific suitable native tool' in consultant
+    assert 'fallback is valid otherwise' in consultant
+    assert 'a coordinator read never satisfies it' in worker
     assert 'one bounded command per wrapper' in worker
     assert "native final names exactly one ID: this worker's own current" in worker
     assert 'other-worker report ID only in the saved report' in worker
@@ -789,7 +938,7 @@ def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management
     assert 'scripts/cortex_runtime/hooks.py' in payload
     assert (PLUGIN/'skills/orchestrator/SKILL.md').is_file()
     package_version = json.loads((PLUGIN/'.codex-plugin/plugin.json').read_text())['version']
-    assert package_version.startswith('1.15.9+codex.sha256.')
+    assert package_version.startswith('1.16.0+codex.sha256.')
     assert payload_digest(PLUGIN).startswith(package_version.rsplit('.', 1)[-1])
     for path, body in expected_profiles().items():
         if path.stem == 'senior-consultant':
@@ -2199,6 +2348,147 @@ def test_resumed_cli_observes_existing_thread_without_replaying_old_calls(monkey
     assert rows[0]['timestamp']==datetime.fromtimestamp(211,timezone.utc).isoformat()
 
 
+def test_desktop_audit_preserves_split_current_prompt_provenance(monkeypatch,tmp_path):
+    import hashlib
+    import runpy
+    import sqlite3
+    from datetime import datetime,timezone
+
+    monkeypatch.setenv('HOME',str(tmp_path))
+    home=tmp_path/'.cortex-dev/.codex';home.mkdir(parents=True)
+    rollout=tmp_path/'rollout.jsonl'
+    request='exact prompt split across native text parts'
+    routed='$cortex:orchestrator '+request
+    request_digest=hashlib.sha256(request.encode()).hexdigest()
+
+    def entry(payload):
+        return json.dumps(dict(timestamp=datetime.fromtimestamp(200,timezone.utc).isoformat(),
+                               type='response_item',payload=payload))
+
+    rollout.write_text('\n'.join([
+        entry(dict(type='message',role='user',id='native-user',content=[
+            dict(type='input_text',text='$cortex:orchestrator exact prompt split '),
+            dict(type='input_text',text='across native text parts'),
+        ])),
+        entry(dict(type='item_completed',item=dict(
+            type='McpToolCall',server='cortex',tool='create_task',status='completed',
+            arguments={'request':routed},
+            result={'structuredContent':{
+                'task_id':'task-1','original_request_sha256':request_digest,
+            }},
+        ))),
+    ])+'\n')
+    with sqlite3.connect(home/'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads (id,rollout_path,agent_role,model,reasoning_effort,created_at,cwd)')
+        db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id,child_thread_id)')
+        db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',
+                   ('root',str(rollout),None,'gpt-5.6-luna','high',200,'/project'))
+
+    desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    events=tmp_path/'events';events.mkdir()
+    state={
+        'workdir':'/project','started_at':200,'thread_created_since':200,
+        'events':str(events),
+        'thread_id':'root','original_request_sha256':request_digest,
+        'desktop_editor_source_sha256':desktop['original_request_digest'](
+            desktop['desktop_editor_source'](routed)),
+    }
+    rows=desktop['observed_tool_calls'](state)
+    creates=[row for row in rows if row.get('tool')=='mcp__cortex__create_task']
+    assert len(creates)==1
+    assert creates[0]['original_request_preserved'] is True
+    assert creates[0]['task_id']=='task-1'
+
+
+def test_desktop_audit_native_input_lifecycle_uses_strict_decoder(monkeypatch,tmp_path):
+    import runpy
+    import sqlite3
+    from datetime import datetime,timezone
+
+    desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
+    cases=[
+        ('current',dict(type='response_item',payload=dict(
+            type='message',role='user',id='current-user',
+            content=[dict(type='input_text',text='continue current')],
+        )),True,'root'),
+        ('legacy',dict(type='event_msg',payload=dict(
+            type='item_completed',thread_id='root',item=dict(
+                type='UserMessage',id='legacy-user',
+                content=[dict(type='text',text='continue legacy')],
+            ),
+        )),True,'root'),
+        ('malformed legacy',dict(type='event_msg',payload=dict(
+            type='item_completed',thread_id='root',item=dict(
+                type='UserMessage',id='malformed-user',
+                content=[dict(type='text',text='continue malformed'),
+                         dict(type='image',url='not-text')],
+            ),
+        )),False,'root'),
+        ('wrong-thread current',dict(type='response_item',payload=dict(
+            type='message',role='user',id='wrong-thread-user',thread_id='other',
+            content=[dict(type='input_text',text='continue wrong thread')],
+        )),False,'root'),
+        ('non-selected child current',dict(type='response_item',payload=dict(
+            type='message',role='user',id='child-user',thread_id='child',
+            content=[dict(type='input_text',text='continue child')],
+        )),False,'child'),
+        ('malformed current',dict(type='response_item',payload=dict(
+            type='message',role='user',id='malformed-current-user',
+            content=[dict(type='input_text',text='continue malformed current'),
+                     dict(type='image',url='not-text')],
+        )),False,'root'),
+        ('unsupported current',dict(type='response_item',payload=dict(
+            type='unsupported_message',role='user',id='unsupported-user',
+            content=[dict(type='input_text',text='continue unsupported')],
+        )),False,'root'),
+    ]
+
+    for index,(label,user_entry,clears_wait,source_thread) in enumerate(cases):
+        case_root=tmp_path/f'case-{index}'
+        home=case_root/'.cortex-dev/.codex';home.mkdir(parents=True)
+        monkeypatch.setenv('HOME',str(case_root))
+        rollout=case_root/'rollout.jsonl'
+        def entry(at,payload,entry_type='response_item'):
+            return json.dumps(dict(
+                timestamp=datetime.fromtimestamp(at,timezone.utc).isoformat(),
+                type=entry_type,payload=payload,
+            ))
+        wait_call=dict(type='function_call',call_id='wait',name='wait_agent',arguments='{}')
+        wait_output=dict(type='function_call_output',call_id='wait',output='Script completed')
+        send_call=dict(type='function_call',call_id='send',name='send_message',arguments='{}')
+        send_output=dict(type='function_call_output',call_id='send',output='Script completed')
+        root_entries=[
+            entry(100,dict(type='session_meta',id='root',cwd='/project',parent_thread_id=None),
+                  'session_meta'),
+            entry(110,wait_call),entry(111,wait_output),
+        ]
+        if source_thread=='root':
+            root_entries.append(entry(120,user_entry.get('payload'),user_entry.get('type')))
+        root_entries.extend([entry(130,send_call),entry(131,send_output)])
+        rollout.write_text('\n'.join(root_entries)+'\n')
+        if source_thread=='child':
+            child_rollout=case_root/'child-rollout.jsonl'
+            child_rollout.write_text(entry(120,user_entry.get('payload'),user_entry.get('type'))+'\n')
+        with sqlite3.connect(home/'state_5.sqlite') as db:
+            db.execute('CREATE TABLE threads (id,rollout_path,agent_role,model,reasoning_effort,created_at,cwd)')
+            db.execute('CREATE TABLE thread_spawn_edges (parent_thread_id,child_thread_id)')
+            db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',
+                       ('root',str(rollout),None,'gpt-5.6-luna','high',100,'/project'))
+            if source_thread=='child':
+                db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?)',
+                           ('child',str(child_rollout),None,'gpt-5.6-luna','medium',101,'/project'))
+                db.execute('INSERT INTO thread_spawn_edges VALUES (?,?)',('root','child'))
+        state=dict(workdir='/project',started_at=100,thread_created_since=100,
+                   events=str(case_root/'events'),thread_id='root')
+        rows=desktop['observed_tool_calls'](state)
+        native=[row for row in rows if row.get('tool')=='native_user_input']
+        violations=desktop['call_policy_violations'](rows)
+        unsolicited=[row for row in violations
+                     if row.get('violation')=='coordinator_unsolicited_message_after_wait']
+        assert len(native)==int(clears_wait), label
+        assert len(unsolicited)==int(not clears_wait), label
+
+
 def test_marketplace_skills_deliver_profiles_and_progressive_references():
     from generate_agent_profiles import (
         expected_agent_references,
@@ -2224,6 +2514,15 @@ def test_marketplace_skills_deliver_profiles_and_progressive_references():
     assert 'cortex_setup.py' not in prepare
 
 
+def test_prompt_and_skill_editing_subagents_use_the_explicit_sol_medium_override():
+    instructions = (ROOT / 'AGENTS.md').read_text()
+    assert 'Any subagent assigned to edit prompts or skills must use only `gpt-5.6-sol` with' in instructions
+    assert '`medium` reasoning effort' in instructions
+    protocol = (PLUGIN / 'agent-sources/worker-protocol.md').read_text()
+    assert 'directly declared Markdown reference leaves may then be read' in protocol
+    assert 'never count as the initial\nworker-skill receipt' in protocol
+
+
 def test_marketplace_audit_extracts_only_known_role_from_assignment():
     import runpy
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
@@ -2242,8 +2541,10 @@ def test_skill_instruction_exception_does_not_allow_cache_exploration(tmp_path,m
     import runpy
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    path=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-technical-writer/SKILL.md'
-    path.parent.mkdir(parents=True);path.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    path=cache/'skills/worker-technical-writer/SKILL.md'
+    path.parent.mkdir(parents=True)
+    path.write_bytes((PLUGIN/'skills/worker-technical-writer/SKILL.md').read_bytes())
     check=helper['worker_skill_read']
     assert check('exec_command',json.dumps({'cmd':f'cat {path}'}))
     assert check('exec_command','{cmd:'+json.dumps(f"sed -n '1,240p' {path}")+'}')
@@ -2265,8 +2566,10 @@ def test_skill_read_allows_only_an_exit_preserving_suffix(tmp_path,monkeypatch):
     import runpy
     helper=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    path=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
-    path.parent.mkdir(parents=True);path.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    path=cache/'skills/worker-general/SKILL.md'
+    path.parent.mkdir(parents=True)
+    path.write_bytes((PLUGIN/'skills/worker-general/SKILL.md').read_bytes())
     suffix='; rc=$?; printf \'\\n__EXIT_STATUS__=%s\\n\' "$rc"; exit "$rc"'
     check=helper['worker_skill_read']
     combined=f"wc -l {path} && sed -n '1,240p' {path}"

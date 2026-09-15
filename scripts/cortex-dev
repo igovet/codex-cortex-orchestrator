@@ -9,6 +9,8 @@ if [[ "${owner_home}" == */.cortex-dev ]]; then
 fi
 prepare_only=0
 if [[ "${1:-}" == '--prepare-only' ]]; then prepare_only=1; shift; fi
+rubber_duck_opt_in=0
+if [[ "${1:-}" == '--rubber-duck-opt-in' ]]; then rubber_duck_opt_in=1; shift; fi
 if [[ "${1:-}" == '--help' ]]; then
   echo 'Usage: scripts/cortex-dev [--prepare-only] [ordinary codex arguments]'; exit 0
 fi
@@ -16,6 +18,10 @@ export CORTEX_DEV_OWNER_HOME="${owner_home}"
 export HOME="${owner_home}/.cortex-dev"
 export CODEX_HOME="${HOME}/.codex"
 export PYTHONDONTWRITEBYTECODE=1
+if [[ "${rubber_duck_opt_in}" == 1 ]]; then
+  # Closed, explicit opt-in. No ambient MCP configuration or credentials are copied.
+  export CORTEX_RUBBER_DUCK_OPT_IN=1
+fi
 umask 077
 # The gateway's pinned third-party dependencies are installed only into the
 # isolated dev CODEX_HOME. Stable user environments are never modified here.

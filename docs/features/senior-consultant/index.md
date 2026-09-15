@@ -62,7 +62,7 @@ effort, selected reports, conclusion report and coordinator decision.
 ## Models and access
 
 Sol medium is the default, including narrow questions; high is for harder
-ones. Astra only at medium requires a justified exceptional assessment. Native model
+ones. Native model
 and effort choices are explicit and configurable per assignment; the main session
 is unchanged. Repeating an unchanged question and evidence packet is prohibited.
 

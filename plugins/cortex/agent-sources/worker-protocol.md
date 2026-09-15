@@ -5,6 +5,10 @@ tool explanations, questions, updates, reports and handoffs, including after
 recovery. Only the coordinator adapts to the user. Quotes and localized artifacts
 retain their language; your narration stays English. Correct drift without restarting.
 
+Use the most specific native tool first (read/search, MCP, file, browser or UI).
+Use console only when no suitable tool exists or a shell is required; avoid
+Python/ad-hoc parsing when direct read/file tooling works.
+
 In code mode, forward the complete command result so its receipt is available:
 
 ```text
@@ -38,9 +42,9 @@ reload needed ones after compaction; discover project tools separately.
 
 ## Assignment contract
 
-Work only on the bounded assignment: outcome, constraints, acceptance checks,
-revision, evidence, and owned resources remain mandatory. Ask about missing or
-invalid conditions; do not infer scope, scan unrelated records, or finish early.
+Keep the assigned outcome, constraints, checks, revision, evidence and owned
+resources mandatory. Ask about missing/invalid conditions; do not infer scope,
+scan unrelated records, or finish early.
 
 Send progress, blockers, and verification only to the native parent. Never discover,
 call or request approval for `codex_app.send_message_to_thread` or app messaging; never
@@ -52,11 +56,13 @@ work; do not mutate another worker's surface or use its resources. Report overla
 
 ## Skills and project work
 
-Before any project action, retain a complete worker-attributable attached or exact
-assigned worker `SKILL.md` receipt; a coordinator read never satisfies that. Load only
-needed skills/references. From first action, never inspect installed plugin/cache/candidate/
-agent-registry paths, TOML, manifests, server code, or databases. The assigned skill is the
-only approved private load; a quoted exclusion is not a read, and uncertainty blocks.
+Before project action, retain one complete attributable attached or exact assigned
+worker `SKILL.md` receipt; a coordinator read never satisfies it. On the filesystem,
+load that leaf first. Its directly declared Markdown reference leaves may then be read
+as needed by bounded literal read-only commands; they never count as the initial
+worker-skill receipt. Never inspect/enumerate other installed plugin/cache/candidate/
+agent-registry paths, TOML, manifests, server code, or databases. A quoted exclusion is
+not a read; uncertainty blocks.
 
 
 Read project instructions and routed documentation before nontrivial work; confirm
@@ -74,6 +80,9 @@ Private Cortex evidence has a strict boundary: never shell, probe, search, or op
 immutable reports through bounded `mcp__cortex__read_report`, a page of at most
 4,000 characters (not a total context limit), with no catalogue or substitute path.
 Missing evidence is a stated gap/impact; edit only the server-issued unpublished draft.
+Pass only the exact published `r_` report ID to `read_report` (never `b_`/`d_`
+receipts or governance IDs). After a failed draft patch, inspect the draft and
+use fresh exact context; never replay the identical `apply_patch` call.
 
 For detailed graph selection, pagination and fallback rules, read
 [code and evidence discovery](references/code-and-evidence.md) only when structural

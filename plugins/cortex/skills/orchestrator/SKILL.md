@@ -65,9 +65,9 @@ not a server gate or approval machine.
 
 ## Durable decisions
 
-Discover deferred tools by namespace:
-`text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__")))`. Then use
-`create_task` before project inspection or delegation. Reuse the binding on
+Immediately before the first call, get schemas with
+`text(ALL_TOOLS.filter(x=>x.name.startsWith("mcp__cortex__")))`; then `create_task`
+before project work. Reuse the binding on
 follow-ups. Publish the initial
 pipeline through `create_draft` and `write_report` before assigning its owner.
 Pass returned task identity to owner. Read owner's published report
@@ -119,8 +119,9 @@ replan after a new failure class.
 - Before delegation: [worker routing](references/worker-routing.md).
 - Production incident: [incident protocol](references/incident.md).
 - Uncertain host capability: [host compatibility](references/host-compatibility.md).
-- Explicit real-host testing: [live qualification](references/live-qualification.md).
-- Cortex development/release: [Cortex release](references/cortex-release.md).
+- Live testing: [qualification](references/live-qualification.md).
+- Release: [Cortex release](references/cortex-release.md).
 - Actual context loss: [recovery](references/recovery.md).
-- Consequential independent decision: [senior consultation](references/senior-consultation.md).
-- Interrupted publication: [pipeline publication](references/pipeline-publication.md).
+- Consequential decision: [senior consultation](references/senior-consultation.md).
+- Advisory pre-check: [routing](references/consultation-routing.md).
+- Publication recovery: [guide](references/pipeline-publication.md).

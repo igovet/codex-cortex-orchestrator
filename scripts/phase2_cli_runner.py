@@ -28,12 +28,12 @@ SCHEMA = "phase2-cli-v1-control-v2"
 BASELINE_COMMIT = "17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.121a79864903aeee"
-CANDIDATE_PAYLOAD_SHA256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
-TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
-TRUSTED_ADAPTER_SHA256 = "9ab5bddad55c9dcf90daa37508c4f0c41440f71c85e3fc547bba79d7a04e6134"
-TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
+CANDIDATE_VERSION = "1.16.0+codex.sha256.5445b95361d15a5e"
+CANDIDATE_PAYLOAD_SHA256 = "5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35"
+TRUSTED_HARNESS_SHA256 = "1797cb8b34bc7e572c2969fe45dde3d80659984eefbcaceba2263e66593addef"
+TRUSTED_ADAPTER_SHA256 = "6d9f4a88e30bdb3644d53f0007cc97095293c985e9af4f3336169c60b996f5bc"
+TRUSTED_OBSERVER_SHA256 = "8283f34cbbfeeac2f98765b27f23980b2110377aefe36f30b9ebbf13eb391f51"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "e47c84033c911425094e39ed7e54f2bf24fd1c2747b8815edcd446a604bfb344"
 EVIDENCE_COLLECTION = {
     "begin_command": "begin-cell",
     "cell_authorization_schema": "phase2-cli-cell-authorization-v2",
@@ -439,10 +439,14 @@ def _require_file(path: Path, label: str) -> Path:
 def _observer_dependency_manifest(source: Path) -> dict[str, str]:
     """Return the complete dynamic file closure used by the common observer."""
     profiles = _require_file(source / "plugins/cortex/profiles.json", "observer profiles dependency")
+    plugin_manifest = _require_file(
+        source / "plugins/cortex/.codex-plugin/plugin.json",
+        "observer plugin identity dependency",
+    )
     skills = source / "plugins/cortex/skills"
     if not skills.is_dir() or skills.is_symlink():
         raise PreparationError("observer skills dependency must be a real directory")
-    paths = [profiles]
+    paths = [plugin_manifest, profiles]
     for path in sorted(skills.rglob("*")):
         if path.is_symlink():
             raise PreparationError("observer dependency closure contains a symlink")

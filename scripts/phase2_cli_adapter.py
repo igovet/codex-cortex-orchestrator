@@ -33,13 +33,13 @@ SCHEMA = "phase2-cli-v1-control-v2"
 MECHANISM = "phase2-common-live-harness-v1"
 MODEL = "gpt-5.6-luna"
 EFFORT = "high"
-TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
-TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
+TRUSTED_HARNESS_SHA256 = "1797cb8b34bc7e572c2969fe45dde3d80659984eefbcaceba2263e66593addef"
+TRUSTED_OBSERVER_SHA256 = "8283f34cbbfeeac2f98765b27f23980b2110377aefe36f30b9ebbf13eb391f51"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "e47c84033c911425094e39ed7e54f2bf24fd1c2747b8815edcd446a604bfb344"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.121a79864903aeee"
-CANDIDATE_PAYLOAD_SHA256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
+CANDIDATE_VERSION = "1.16.0+codex.sha256.5445b95361d15a5e"
+CANDIDATE_PAYLOAD_SHA256 = "5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35"
 EVIDENCE_SCHEMA = "phase2-cli-evidence-bundle-v1"
 CELL_AUTH_SCHEMA = "phase2-cli-cell-authorization-v2"
 SESSION_BINDING_SCHEMA = "phase2-cli-session-binding-v1"
@@ -327,7 +327,9 @@ def _verify_observer_dependencies(record_root: Path, launcher: dict[str, Any]) -
                                for key, value in manifest.items()):
         raise AdapterError("common observer dependency manifest is malformed")
     required = "plugins/cortex/profiles.json"
-    if required not in manifest or not any(key.startswith("plugins/cortex/skills/") for key in manifest):
+    identity = "plugins/cortex/.codex-plugin/plugin.json"
+    if (required not in manifest or identity not in manifest
+            or not any(key.startswith("plugins/cortex/skills/") for key in manifest)):
         raise AdapterError("common observer dependency closure is incomplete")
     expected_keys = set(manifest)
     actual_keys = set()
@@ -344,7 +346,8 @@ def _verify_observer_dependencies(record_root: Path, launcher: dict[str, Any]) -
     for relative, digest in manifest.items():
         path = Path(relative)
         if (path.is_absolute() or ".." in path.parts
-                or not (relative == required or relative.startswith("plugins/cortex/skills/"))):
+                or not (relative in {required, identity}
+                        or relative.startswith("plugins/cortex/skills/"))):
             raise AdapterError("common observer dependency path is invalid")
         target = _canonical_file(record_root / path, "common observer dependency")
         info = target.stat()

@@ -141,17 +141,17 @@ def test_exact_manifest_bound_active_skill_read_precedes_private_operand_deny(tm
     skill.write_text("complete worker skill\n")
     manifest = root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.15.9+codex.sha256.0123456789abcdef","skills":"./skills/"}')
-    command = {"cmd": f"sed -n 1,4000p {skill}"}
+    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    resource = {"path": str(skill)}
     allowed = authorize_pre_dispatch(
-        "exec_command", command, actor_kind="native_worker", role="worker",
+        "read_file", resource, actor_kind="native_worker", role="worker",
         task_id="task", assignment_id="bound", route="native_hook",
         capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path), project_root=str(tmp_path),
         expected_skill="skills/worker-explorer/SKILL.md",
     )
     assert allowed["allowed"] is True and allowed["reason"] == "exact_active_skill_read"
     wrong = authorize_pre_dispatch(
-        "exec_command", command, actor_kind="native_worker", role="worker",
+        "read_file", resource, actor_kind="native_worker", role="worker",
         task_id="task", assignment_id="bound", route="native_hook",
         capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path), project_root=str(tmp_path),
         expected_skill="skills/worker-debugger/SKILL.md",
@@ -159,7 +159,7 @@ def test_exact_manifest_bound_active_skill_read_precedes_private_operand_deny(tm
     assert wrong["allowed"] is False and wrong["code"] == PERMISSION_DENIED
 
     opaque_first = authorize_pre_dispatch(
-        "exec_command", command, actor_kind="native_worker", role="worker",
+        "read_file", resource, actor_kind="native_worker", role="worker",
         task_id="task", assignment_id="bound", route="native_hook",
         capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path), project_root=str(tmp_path),
         expected_skill=None,
@@ -168,7 +168,7 @@ def test_exact_manifest_bound_active_skill_read_precedes_private_operand_deny(tm
     unknown = root / "skills" / "worker-unregistered" / "SKILL.md"
     unknown.parent.mkdir(); unknown.write_text("not a registered worker\n")
     arbitrary = authorize_pre_dispatch(
-        "exec_command", {"cmd": f"sed -n 1,4000p {unknown}"}, actor_kind="native_worker",
+        "read_file", {"path": str(unknown)}, actor_kind="native_worker",
         role="worker", task_id="task", assignment_id="bound", route="native_hook",
         capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path), project_root=str(tmp_path),
         expected_skill=None,
@@ -188,39 +188,51 @@ def test_exact_manifest_bound_active_skill_read_precedes_private_operand_deny(tm
     assert audit["evidence_integrity_invalidators"][0]["reason"] == "host_pre_dispatch_bypassed"
 
 
-def test_worker_skill_read_accepts_one_bounded_cat_or_bash_envelope_and_rejects_neighbors(tmp_path):
+def test_worker_skill_read_accepts_declared_leaves_and_rejects_neighbors(tmp_path):
     root = tmp_path / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "candidate"
     skill = root / "skills" / "worker-backend-dev" / "SKILL.md"
     skill.parent.mkdir(parents=True)
-    skill.write_text("complete worker skill\n")
+    skill.write_text("complete worker skill\n\n[publication](references/report-publication.md)\n")
+    reference = skill.parent / "references" / "report-publication.md"
+    reference.parent.mkdir()
+    reference.write_text("declared publication guidance\n")
+    unlinked = reference.with_name("unlinked.md")
+    unlinked.write_text("not declared\n")
+    reference_link = reference.with_name("linked-by-symlink.md")
+    reference_link.symlink_to(reference)
     manifest = root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.15.9+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
     context = dict(actor_kind="native_worker", role="worker", task_id="task", assignment_id="bound",
                    route="native_hook", capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path),
                    project_root=str(tmp_path), expected_skill="skills/worker-backend-dev/SKILL.md")
-    commands = (
-        {"cmd": f"cat {skill}"},
-        {"cmd": f"sed -n 1,4000p {skill}"},
-        {"cmd": f"bash -lc 'cat {skill}'"},
-        {"cmd": f"/bin/bash -lc 'sed -n 1,80p {skill}'"},
-    )
-    for tool_input in commands:
-        decision = authorize_pre_dispatch("exec_command", tool_input, **context)
+    for path in (skill, reference):
+        decision = authorize_pre_dispatch("read_file", {"path": str(path)}, **context)
         assert decision == {"allowed": True, "code": None,
                             "capability": "cortex.skill.read", "reason": "exact_active_skill_read"}
-    for command in (
-        f"bash -lc 'bash -lc \\\"cat {skill}\\\"'",
-        f"cat {skill} {skill}",
-        f"cat {skill.parent}",
-        f"cat {skill.with_name('README.md')}",
-        f"cat {skill} && echo extra",
-        f"cat {skill} > {tmp_path / 'copy'}",
-        f"sed -n 1,4001p {skill}",
-        f"bash -c 'cat {skill}'",
+    for tool_input in (
+        {"path": str(skill.parent)},
+        {"path": str(skill.with_name('README.md'))},
+        {"path": str(unlinked)},
+        {"path": str(reference_link)},
+        {"path": str(skill), "offset": 1},
+        {"path": str(skill.relative_to(tmp_path))},
     ):
-        decision = authorize_pre_dispatch("exec_command", {"cmd": command}, **context)
+        decision = authorize_pre_dispatch("read_file", tool_input, **context)
         assert decision["allowed"] is False and decision["code"] == PERMISSION_DENIED
+
+    reference_target = reference.with_name("reference-target.md")
+    reference_target.write_text(reference.read_text())
+    reference.unlink()
+    reference.symlink_to(reference_target)
+    decision = authorize_pre_dispatch("read_file", {"path": str(reference)}, **context)
+    assert decision["allowed"] is False and decision["code"] == PERMISSION_DENIED
+
+    other_skill = root / "skills" / "worker-debugger" / "SKILL.md"
+    other_skill.parent.mkdir(parents=True)
+    other_skill.write_text("other registered worker\n")
+    decision = authorize_pre_dispatch("read_file", {"path": str(other_skill)}, **context)
+    assert decision["allowed"] is False and decision["code"] == PERMISSION_DENIED
 
 
 def test_worker_execution_is_not_pre_dispatch_denied_for_missing_skill_receipt():
