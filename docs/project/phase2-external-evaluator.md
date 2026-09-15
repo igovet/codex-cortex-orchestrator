@@ -69,8 +69,8 @@ python3 scripts/phase2_cli_runner.py \
   --baseline-commit 17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9 \
   --baseline-version 1.15.6+codex.sha256.cc786ae2fbd04cf1 \
   --baseline-payload-sha256 cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698 \
-  --candidate-version 1.16.0+codex.sha256.5084e8b72d4e4ccc \
-  --candidate-payload-sha256 5084e8b72d4e4ccc6523393a4882abe44ce920ba598e718ac58ae72da4c5b61b \
+  --candidate-version 1.16.0+codex.sha256.5445b95361d15a5e \
+  --candidate-payload-sha256 5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35 \
   --coordinator-model gpt-5.6-luna --coordinator-effort high \
   --worker-model gpt-5.6-luna --worker-effort medium \
   --cell-timeout-seconds 1800 --wait-timeout-ms 600000
