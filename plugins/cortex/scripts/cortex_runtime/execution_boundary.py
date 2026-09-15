@@ -90,7 +90,7 @@ def _candidate_skill_root(path: Path):
         if (isinstance(value, dict) and value.get("name") == "cortex"
                 and value.get("skills") == "./skills/"
                 and isinstance(value.get("version"), str)
-                and re.fullmatch(r"1\.15\.9\+codex\.sha256\.[0-9a-f]{16}", value["version"])):
+                and re.fullmatch(r"1\.16\.0\+codex\.sha256\.[0-9a-f]{16}", value["version"])):
             return parent
         return None
     return None
@@ -98,50 +98,59 @@ def _candidate_skill_root(path: Path):
 
 def active_bundled_skill_read(tool: str, tool_input, *, role: str,
                               expected_skill: str | None) -> bool:
-    """Recognize one bounded literal read of an assigned bundled skill.
+    """Recognize one bounded literal read of an assigned bundled skill resource.
 
     The host still owns dispatch and file access.  This predicate merely avoids
-    classifying the documented, manifest-bound skill leaf itself as a generic
-    cache probe.  No directory, glob, alias, second operand, mutation, or
-    unassigned worker profile qualifies.
+    classifying the documented, manifest-bound skill leaf or one of its directly
+    declared Markdown references as a generic cache probe.  No directory, glob,
+    alias, second operand, mutation, or unassigned worker profile qualifies.
     """
-    if tool not in {"exec_command", "Bash"} or role not in {"coordinator", "worker"}:
+    if tool not in {"exec_command", "Bash", "read_file"} or role not in {"coordinator", "worker"}:
         return False
     if expected_skill is not None and (not isinstance(expected_skill, str) or not re.fullmatch(
             r"skills/(?:orchestrator|worker-[a-z][a-z-]*)/SKILL\.md", expected_skill)):
         return False
-    command = tool_input.get("cmd", tool_input.get("command")) if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return False
-    # The installed interactive transport may wrap this one literal read in
-    # exactly one bash -lc envelope.  Unwrap only that three-token shape; a
-    # second shell, option, or command remains outside this exception.
-    outer_tokens = _tokens(command)
-    if (outer_tokens and len(outer_tokens) == 3
-            and outer_tokens[0] in {"bash", "/bin/bash"}
-            and outer_tokens[1] == "-lc" and outer_tokens[2]):
-        command = outer_tokens[2]
-    if not isinstance(command, str) or any(mark in command for mark in ("\n", "$", "`", "*", "?", "[", "]", "{", "}", "|", ";", "&&", "||", ">", "<")):
-        return False
-    tokens = _tokens(command)
-    if not tokens or any(token in CONTROL for token in tokens):
-        return False
-    # A literal cat of the single skill leaf is bounded by file size. A sed
-    # slice is bounded by line count. In both forms the selected full skill is
-    # proven only by the observed complete-result marker.
-    if len(tokens) == 2 and tokens[0] == "cat":
-        path_token = tokens[1]
-        max_bytes = _SKILL_READ_MAX_BYTES
-    elif len(tokens) == 4 and tokens[0] == "sed" and tokens[1] == "-n":
-        match = re.fullmatch(r"1,([1-9][0-9]{0,3})p", tokens[2])
-        if match is None or int(match.group(1)) > _SKILL_READ_MAX_LINES:
+    if tool == "read_file":
+        if (not isinstance(tool_input, dict) or set(tool_input) != {"path"}
+                or not isinstance(tool_input.get("path"), str)):
             return False
-        path_token = tokens[3]
-        max_bytes = None
+        path_token = tool_input["path"]
+        max_bytes = _SKILL_READ_MAX_BYTES
     else:
-        return False
+        command = tool_input.get("cmd", tool_input.get("command")) if isinstance(tool_input, dict) else None
+        if not isinstance(command, str):
+            return False
+        # A host transport may wrap one literal read. Unwrap only this exact
+        # observed shape; the declaration/path checks below remain authoritative.
+        outer_tokens = _tokens(command)
+        if (outer_tokens and len(outer_tokens) == 3
+                and outer_tokens[0] in {"bash", "/bin/bash"}
+                and outer_tokens[1] == "-lc" and outer_tokens[2]):
+            command = outer_tokens[2]
+        if any(mark in command for mark in ("\n", "`", "*", "?", "[", "]", "{", "}", "|", ";", "&&", "||", ">", "<")):
+            return False
+        if "$" in command and (command.count("$") != 1
+                                or re.search(r"(?:^|\s)sed\s+-n\s+'1,\$p'\s+", command) is None):
+            return False
+        tokens = _tokens(command)
+        if not tokens or any(token in CONTROL for token in tokens):
+            return False
+        if len(tokens) == 2 and tokens[0] == "cat":
+            path_token = tokens[1]
+            max_bytes = _SKILL_READ_MAX_BYTES
+        elif len(tokens) == 4 and tokens[0] == "sed" and tokens[1] == "-n":
+            match = re.fullmatch(r"1,([1-9][0-9]{0,3})p", tokens[2])
+            if tokens[2] == "1,$p":
+                max_bytes = _SKILL_READ_MAX_BYTES
+            elif match is None or int(match.group(1)) > _SKILL_READ_MAX_LINES:
+                return False
+            else:
+                max_bytes = None
+            path_token = tokens[3]
+        else:
+            return False
     supplied = Path(path_token)
-    if not supplied.is_absolute() or supplied.is_symlink() or supplied.name != "SKILL.md":
+    if not supplied.is_absolute() or supplied.is_symlink():
         return False
     try:
         resolved = supplied.resolve(strict=True)
@@ -160,16 +169,34 @@ def active_bundled_skill_read(tool: str, tool_input, *, role: str,
         relative = resolved.relative_to(root).as_posix()
     except ValueError:
         return False
+    resource_match = re.fullmatch(
+        r"skills/(orchestrator|worker-([a-z][a-z-]*))/(SKILL\.md|references/[A-Za-z0-9_-]+\.md)",
+        relative,
+    )
+    if resource_match is None:
+        return False
+    skill_name, worker_slug, resource = resource_match.groups()
+    skill_leaf = f"skills/{skill_name}/SKILL.md"
+    if resource != "SKILL.md":
+        entry = root / skill_leaf
+        try:
+            if (entry.is_symlink() or entry.stat().st_size > _SKILL_READ_MAX_BYTES
+                    or resource not in re.findall(
+                        r"\]\((references/[A-Za-z0-9_-]+\.md)\)",
+                        entry.read_text(encoding="utf-8"),
+                    )):
+                return False
+        except OSError:
+            return False
     if role == "coordinator":
-        return expected_skill == "skills/orchestrator/SKILL.md" and relative == expected_skill
+        return expected_skill == "skills/orchestrator/SKILL.md" and skill_leaf == expected_skill
     # The current host can keep the authenticated worker assignment opaque at
     # the first hook event.  Permit only a single registered worker SKILL leaf
     # in that case; the observer must later bind its exact profile and
     # assignment digest to the native result before it becomes usable evidence.
     if expected_skill is None:
-        match = re.fullmatch(r"skills/worker-([a-z][a-z-]*)/SKILL\.md", relative)
-        return match is not None and match.group(1) in _REGISTERED_WORKER_SKILL_SLUGS
-    return relative == expected_skill and expected_skill.startswith("skills/worker-")
+        return worker_slug is not None and worker_slug in _REGISTERED_WORKER_SKILL_SLUGS
+    return skill_leaf == expected_skill and worker_slug in _REGISTERED_WORKER_SKILL_SLUGS
 
 
 def _private_root(project_root: str) -> Path:

@@ -4,7 +4,7 @@
 
 The approved product matrix uses Luna medium/high for discovery and ordinary work,
 Terra medium/high for complex implementation/review, Sol medium/high for consequential
-decisions, and Astra medium only for exceptional system decisions. Assignments,
+decisions. Assignments,
 steering, worker summaries and handoffs are English; user-facing coordinator prose
 and explicitly localized deliverables retain the requested language. The host does
 not expose a verifiable language guarantee for hidden reasoning. No runtime language
@@ -548,7 +548,7 @@ After the consultant follow-up repair, package/source-sync checks and all 382 te
 passed sequentially. Actual host
 outcomes, rejected attempts, consultation usage and unrun scenarios are recorded
 in the [focused verification report](../features/senior-consultant/verification.md).
-The consultant's explicit Sol/Astra exception is separate from the ordinary worker
+The consultant's explicit Sol exception is separate from the ordinary worker
 model policy below; it does not change the main session's model.
 
 ## Coordinator project-access enforcement — 2026-09-07
@@ -933,13 +933,20 @@ After the dev window is visible and the prepared composer is confirmed, run
 whose X11 PID equals the isolated process recorded by `start`, rechecks ownership,
 submits once, and refuses duplicate submission. It never targets another
 Desktop instance by title alone.
+If `start` or `send` raises, the helper returns a stable value-free diagnostic
+containing only the operation, a bounded category and reason, and a recovery
+action (`cleanup`, `retry`, `focus`, or related safe guidance). Exception text,
+private paths, commands, subprocess output, and logs are never printed.
 
 The Desktop `send` command preserves the URI-prepared composer focus rather than
 clicking a guessed coordinate. Before its sole plain `Return`, it requires the exact
 owned window to remain focused across two observations after a three-second URI
 hydration interval, within one monotonic 60-second budget shared by window lookup and
 focus retries. This is bounded readiness only, not a delivery receipt; delivery is
-acknowledged only after exactly one new task appears in isolated host state.
+acknowledged only after exactly one new task and one exact prompt receipt appear in
+isolated host state. If a task appears without a unique prompt receipt, the helper
+persists an ambiguous submission and refuses subsequent Return replay pending
+inspection; a zero-task result remains retryable.
 Use `scripts/cortex-desktop-dev events` while the task runs and
 `scripts/cortex-desktop-dev audit` before accepting it. The audit consumes the
 complete private metadata journal from every coordinator and worker MCP process
@@ -947,6 +954,12 @@ and fails if any non-initialization operation has an outcome other than `success
 Read events identify pipeline versus ordinary report, the short selected report ID,
 and start versus continuation without logging cursors, Markdown, request text or
 other arguments. This makes selective worker reads directly auditable.
+The submission helper and audit use the same strict native user-turn decoder:
+supported `response_item`/`event_msg` envelopes preserve the exact concatenation of
+multipart text content, while mismatched roles or threads, malformed parts, and
+unsupported outer envelopes remain rejected. Request-fidelity failures such as
+`coordinator_original_request_changed` therefore stay fail-closed without a
+helper/audit parsing discrepancy.
 
 Use `scripts/cortex-desktop-dev calls` to inspect every host-tool invocation from
 the coordinator and native workers. With no `--limit`, it emits the full run:
@@ -981,8 +994,9 @@ self-parenting, cycles, and malformed recent edge components are emitted under
 `foreign_task_roots`, so they cannot disappear behind an empty roots array.
 The `usage` action consumes this validated inventory and fails explicitly with
 `invalid_topology` rather than recomputing an overwrite-prone child-parent map.
-Only the exact advertised orchestrator `SKILL.md` is a valid coordinator cache
-read; worker skills, other skills, and references remain forbidden.
+Only the exact advertised orchestrator `SKILL.md` and directly declared Markdown
+reference leaves are valid coordinator cache reads; worker skills, other skills,
+adjacent files, and unlinked references remain forbidden.
 For the next c4 follow-up parity qualification, create a fresh temporary empty Git
 project with `mktemp -d` and `git init`, then use that exact directory for both
 unchanged-candidate CLI and Desktop runs. This is experiment isolation for that
@@ -1030,6 +1044,16 @@ TOML, server internals and plugin enumeration remain forbidden accesses. A mixed
 command is not classified as instruction-only, but an approved skill read alongside
 ordinary worker project discovery is not itself forbidden cache access. Review each
 access and the participant's role, full loading evidence and truncation.
+A normal complete read may use any supported ordinary read-only means selected by the
+model. The observer binds the literal resource to its declaring skill; expansion,
+extra operations, shell control, nested shells, symlinks, directories, globs and
+mutation remain invalid.
+A host may record the selected read and its terminal execution separately. A failed
+execution receipt is retained as a diagnostic only when it joins exactly one
+same-worker, same-intent, declaration-bound safe read and independent successful
+assigned-skill/final-outcome evidence; this semantic join does not prescribe a
+reader or relax any private/project, mutable, ambiguous, replay, truncation or
+unregistered-access check.
 The observer preserves this distinction through simple `rg`/`grep` pipelines:
 quoted private-cache exclusion patterns are static mentions, while direct private
 operands, unquoted globs and opaque shell syntax remain unauthorized. A valid

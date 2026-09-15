@@ -8,9 +8,12 @@ controls. Graph limitations permit bounded native fallback. Live helpers preserv
 the isolated graph configuration without modifying stable settings.
 Decision-model and English-only guidance never terminate workers or deny calls.
 The observer retains a literal unary file predicate's exit 1 as `predicate_false`,
-not a command crash; raw receipts and independent required-artifact, completion,
-mutation and path-policy checks remain intact. Syntax/permission errors, stderr,
-compound commands and unknown predicates do not receive this interpretation.
+not a command crash. Separately, a complete failed read of one exact registered
+skill or declared Markdown reference may remain a diagnostic only after independent
+successful assigned-skill and final-outcome evidence establishes its safe resource
+identity. Both interpretations preserve raw receipts and independent required-artifact,
+completion, mutation and path-policy checks; unsafe, private/project, mutable,
+ambiguous, replayed, truncated or unregistered access remains audit-critical.
 See [incident outcomes](docs/project/incident-outcomes.md).
 The observational collector recognizes only a bounded literal word filter over
 public tool names/descriptions, not arbitrary JavaScript. Publication identity
@@ -30,9 +33,9 @@ primitive: hooks remain unable to resume a stopped host turn.
 
 ## Stable release status
 
-The current 1.15.9 source candidate is `1.15.9+codex.sha256.121a79864903aeee`
+The current 1.16.0 source candidate is `1.16.0+codex.sha256.5084e8b72d4e4ccc`
 (payload SHA-256
-`121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`).
+`5084e8b72d4e4ccc6523393a4882abe44ce920ba598e718ac58ae72da4c5b61b`).
 The final CLI/Desktop qualification (`r_648c4f40dcf9`) applies only to the
 superseded `e4f332d43bf38024` payload, not to this changed candidate. Its package,
 sync, full-suite, and real-host qualification remain required, and no efficacy,
@@ -160,9 +163,7 @@ use Luna only when review judgment is not needed. It never inherits the inspecte
 implementation model or effort.
 
 The opt-in `senior_consultant` uses Sol medium for a standard or narrow question
-and Sol high for a harder question. Astra (`gpt-6-astra`) only at medium is
-reserved for an explicitly justified exceptional system decision after unresolved
-Sol evidence. The
+and Sol high for a harder question. The
 coordinator keeps its own model unchanged and must state the consultation policy
 class in the native assignment.
 
@@ -207,6 +208,13 @@ permissions, project ownership, worker evidence, and coordinator acceptance
 remain unchanged. This repository does not claim that the MCP is installed or
 that any provider produces useful advice.
 
+The runtime helper enforces the same boundary: only a live entry named
+`mcp__rubber_duck__ask_duck` with explicit Rubber Duck identity qualifies. The
+required request field is `prompt`; provider, model, temperature, and images
+are optional. Packet telemetry stores only a bounded hash/status/reason, and
+explicit isolated launch opt-in does not copy ambient MCP configuration or
+credentials.
+
 When native assignment bodies are encrypted in host records, the audit reports
 `worker_assignment_policy_unverified` unless the exact native name
 `senior_consultant`, explicit Sol medium and no conversation inheritance prove
@@ -221,7 +229,7 @@ actual-route join may verify effective route compliance
 and records bounded provenance; it never fills or infers the hidden request. If
 either requested field is visible, strict requested/observed matching remains
 required. Missing, partial, conflicting or duplicate evidence, mismatched routes,
-and other opaque routes (including Astra escalation) remain unverified. Assignment
+and other opaque or disallowed model routes remain unverified. Assignment
 prose and rationale are never claimed as inspected. All visible worker calls
 still receive the full error, access, ownership and publication audit.
 Declared reference reads remain valid instruction loading without creating a second
@@ -279,44 +287,46 @@ Its artifact hashes are asserted, not independently verified; the route remains
 `host_enforcement_state=unverified` and any absent, duplicate, truncated, replayed,
 or competing receipt invalidates qualification.
 Only within that current-host observational route, a fully correlated closed native
-worker result may retain missing assignment/worker-skill receipt evidence as a
-non-blocking diagnostic, and a complete public MCP result plus one later same-thread
+worker result may retain unavailable assignment-policy evidence as a non-blocking
+diagnostic, and a complete public MCP result plus one later same-thread
 publication may retain a missing separate server event. These are post-observation
-classifications, not an authorization bypass: failed, malformed, truncated, replayed,
+classifications, not an authorization bypass: the exact assigned worker-SKILL receipt
+remains mandatory, and failed, malformed, truncated, replayed,
 private/state/registry, project-target, mutating, or ambiguous operations remain hard
 integrity invalidators and cannot become accepted evidence.
 Where the installed host omits task/native-result bodies, one expected root, one
 parent-bound native worker/report, and one exact non-replayed coordinator artifact
 reconciliation are the only opaque observational binding. Missing, duplicate,
-replayed, or mismatched links remain blocking. One or more exact-equivalent
-denied-before-dispatch errors from the bounded registered worker `SKILL.md` leaf may
-be diagnostic only after that same full outcome proof. They require the same
-worker/profile/manifest-bound static-read identity; differing, replayed, private,
-project-target, mutating, dispatched, truncated, or ambiguous reads remain blocking
-and never credit a skill receipt.
-One literal `bash -lc` transport envelope around the exact registered worker leaf is
-reparsed under that same closed grammar. It does not authorize nested shells, extra
-operations, directories, globs, adjacent plugin/cache files, private paths, or writes.
-If the installed host places the read inside `functions.exec`, the observer requires
-exactly one direct `tools.exec_command` call bound as one safe JavaScript identifier
-and followed by complete literal forwarding of that same identifier (for example,
-`const result = await ...; text(result);`). The identifier is bound once and
-forwarded once; aliases, property access, extra JavaScript, API/tool calls,
-incomplete forwarding, mixed wrappers, and unknown provenance remain fail-closed.
-If the installed interactive host cannot emit bootstrap attestation, assignment or
-skill receipts, a separate server event, or a process self-exit marker, that absence
+replayed, or mismatched links remain blocking. One or more exact-equivalent failures
+while inspecting a declared skill/reference leaf may be diagnostic only after that
+same full outcome proof and a separate successful mandatory worker-SKILL receipt.
+They require the same worker/profile/manifest-bound read identity; differing,
+replayed, private, project-target, mutating, dispatched, truncated, or ambiguous
+reads remain blocking and never credit a skill receipt. The model chooses any
+supported ordinary read-only means. If the installed host transports the read
+through a wrapper, the observer requires one attributable operation and a completely
+forwarded result; nested shells, aliases, extra operations, incomplete forwarding,
+directories, globs, adjacent plugin/cache files, private paths, and writes fail closed.
+If the installed interactive host cannot emit bootstrap attestation, assignment-policy
+attestation, a separate server event, or a process self-exit marker, that absence
 is `not_applicable`/diagnostic rather than a hard failure. It cannot substitute for
 complete observed outcome evidence: exactly one direct task binding, one completed
 native worker, one task-bound worker report, coordinator reconciliation of the exact
 artifact hash, no pending/open work, and either owned `exit=0` or a verified idle
 composer followed by exact owned cleanup. This remains observational only and never
 sets `host_enforcement_state=host_enforced`.
+A later final from the same parent-bound worker can be a sequential follow-up only
+when each earlier final names a distinct, exactly-one observed worker publication;
+each publication must follow its final and precede the next final, and the terminal
+final still needs exact artifact reconciliation. A duplicate final, multiple workers,
+replay, truncation, or an absent, competing, early, or delayed publication remains
+BLOCK.
 Generic `pre_binding_host_action` is never a current-host diagnostic because it
 lacks strict actor/profile/path proof and can describe an unsafe dispatch. The sole
 coordinator setup exception is an observer-proven manifest-bound, bounded, read-only
 literal `skills/orchestrator/SKILL.md` read carrying the active-skill marker; the
-separate exact-equivalent registered-worker static-SKILL-read predicate can retain
-complete read-only denied records. Failed, duplicate, replayed, ambiguous,
+separate declaration-bound read predicate can retain complete, safe read failures
+only after the mandatory worker-SKILL receipt. Duplicate, replayed, ambiguous,
 directory/glob/other-skill, private/project-target, dispatched, truncated, or
 mutating bootstrap actions remain hard invalidators.
 Compaction recovery repeats this boundary. Where the host supplies an explicit
@@ -673,6 +683,9 @@ two observations after a three-second hydration interval. One monotonic 60-secon
 deadline covers both owned-window lookup and focus retries, so a missing window cannot
 restart a fresh lookup budget. This bounded readiness check may delay or fail a
 submission; it never substitutes for the exact one-new-task receipt.
+If the helper's `start` or `send` boundary raises, its public output contains
+only fixed `operation`, `category`, `reason`, and `recovery` values. Exception
+text, private paths, commands, subprocess output, and logs remain suppressed.
 
 Routine worker checks are permission-safe by guidance: isolated CLI and Desktop
 helpers force `PYTHONDONTWRITEBYTECODE=1` and suppress only a complete inherited
@@ -710,8 +723,9 @@ server internals are not worker instruction-loading routes.
 Live diagnostics retain safe argument/result digests, observed roles, command exit
 or running-session receipts and errors, not raw host logs. Inspect every observed
 call, including after the first fault; preserve unresolved and corrected failures.
-The coordinator may read only the exact advertised orchestrator `SKILL.md` from
-the isolated cache; other skills and references are unauthorized. Live helpers
+The coordinator may read only the exact advertised orchestrator `SKILL.md` and its
+directly declared Markdown reference leaves from the isolated cache; other skills,
+adjacent files, and unlinked references are unauthorized. Live helpers
 validate that the supplied workdir is already a Git repository root and never
 initialize it or write identity settings. A missing-repository worker probe remains
 advisory rather than a coordinator-boundary breach.

@@ -87,6 +87,7 @@ def test_review_defaults_to_terra_without_implementation_inheritance():
                   implementation_model="gpt-5.6-luna",
                   implementation_effort="max") == []
     assert policy("gpt-5.6-luna", "high", "review") == ["worker_model_policy_violation"]
+    assert "worker_model_policy_violation" in policy("gpt-6-astra", "medium", "review")
 
 
 def test_security_implementation_never_routes_to_sol():
@@ -121,15 +122,17 @@ def test_explicit_user_override_is_preserved():
 def test_consequential_decision_matrix_is_explicit_and_never_inherited():
     policy = OBSERVER["worker_model_policy"]
     accepted = {("decision", "gpt-5.6-sol", "medium"),
-                ("decision-hard", "gpt-5.6-sol", "high"),
-                ("decision-exceptional", "gpt-6-astra", "medium")}
-    for task_class in ("decision", "decision-hard", "decision-exceptional"):
+                ("decision-hard", "gpt-5.6-sol", "high")}
+    for task_class in ("decision", "decision-hard"):
         for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"):
             for effort in ("low", "medium", "high", "xhigh", "max"):
                 errors = policy(model, effort, task_class)
                 assert (not errors) == ((task_class, model, effort) in accepted)
         metadata = spawn_metadata(spawn_payload("gpt-5.6-sol", "medium", task_class))
         assert metadata["policy_class"] == task_class
+    assert policy("gpt-6-astra", "medium", "decision-exceptional") == [
+        "worker_model_policy_violation"
+    ]
     for task_class in ("research", "exploration", "ordinary"):
         assert policy("gpt-5.6-luna", "max", task_class) == []
         assert policy("gpt-6-astra", "medium", task_class)

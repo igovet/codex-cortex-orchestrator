@@ -87,7 +87,9 @@ The coordinator avoids loading a worker's full protocol without a concrete need.
 
 Each structured profile names responsibility, inputs, workflow, checks and recovery.
 The compact shared protocol is generated into every profile; rare procedures are
-declared references loaded only when relevant. Conditional recovery and report-example skills load by exact ordinary skill
+declared references loaded only when relevant. These direct Markdown leaves may be
+inspected through ordinary read-only means chosen by the model, but never replace the
+initial complete worker-SKILL receipt. Conditional recovery and report-example skills load by exact ordinary skill
 names only when needed. No installation paths are put into worker assignments.
 
 The coordinator preserves its selected model and applies the worker route matrix.

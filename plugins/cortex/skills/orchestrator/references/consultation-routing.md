@@ -11,10 +11,13 @@ or an unnecessary assignment; otherwise continue directly.
 Detect this capability only from the tools exposed in the current live host
 catalogue. V1 activates only when one catalogue entry has an explicit
 mcp-rubber-duck provider/server identity (the identity must name
-`mcp-rubber-duck`) and the tool name is exactly `ask_duck`. An unrelated
-`ask_duck`-like tool, or a tool with no explicit mcp-rubber-duck identity, does
+`mcp-rubber-duck`) and the fully-qualified tool name is exactly
+`mcp__rubber_duck__ask_duck`. An unrelated bare `ask_duck`-like tool, or a tool with no explicit mcp-rubber-duck identity, does
 not qualify. Do not infer availability from a static manifest, package name,
 configuration, cached assumption, or a generic host-equivalent name.
+In other words, the tool name is exactly `ask_duck` only as the final qualified
+operation; a bare name is never sufficient. An unrelated
+`ask_duck`-like tool remains ineligible.
 
 If no such tool is exposed, do not execute Advisory Lane logic at all. Continue
 the current Cortex routing silently: absence is not a warning, blocker, degraded
@@ -28,9 +31,15 @@ never infer one from package names, static configuration, cached assumptions, or
 an invented schema. Missing, malformed, or ambiguous provider/model metadata is
 not safely selectable and therefore remains a silent no-op.
 
+At material consequential, contradictory-evidence, and repeated-failure
+transitions, explicitly run the model-owned `consider_advisory_lane` step and
+record either `consult` or machine-readable `skip(reason)`. Routine or
+reversible work, normal reads, ordinary verification, active incident recovery,
+and questions requiring repository evidence remain negative controls.
+
 ## V1 consultation contract
 
-When `ask_duck` is actually exposed and the coordinator chooses consultation, make
+When `mcp__rubber_duck__ask_duck` is actually exposed and the coordinator chooses consultation, make
 one bounded call with one compact decision packet containing: the question and
 decision boundary, desired outcome, constraints, verified artifact/report versions,
 relevant facts and hypotheses, attempted approaches, and the next discriminating
@@ -45,10 +54,17 @@ mutation, execution, verification, or acceptance is required. Escalate consequen
 architecture, security, migration, or public-contract decisions to the applicable
 senior route.
 
-Keep budgets bounded per decision and task; no councils, debates, multi-model
+The actual schema requires only `prompt`; `provider`, `model`, `temperature`, and
+images are optional and must never become required metadata. Keep budgets bounded
+per decision and task; no councils, debates, multi-model
 comparison, voting, conversation fan-out, or bridge is part of V1. Provider/model
 choice remains limited to metadata exposed by the live capability and the concrete
 question; it never creates a recursive worker route or changes Cortex routing.
+
+Deduplicate calls by a privacy-safe hash of the canonical packet; unchanged
+packets are skipped, while new evidence permits a retry. Duck absence, errors,
+and timeouts continue Cortex normally with a short diagnostic status/reason and
+no noisy user message.
 
 The result is advisory context only. The coordinator retains causal ownership,
 chooses assignments, interprets uncertainty, and makes every implementation,

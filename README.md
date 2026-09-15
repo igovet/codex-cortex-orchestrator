@@ -933,18 +933,15 @@ supports that effort. Terra (`gpt-5.6-terra`) at `medium/high` is reserved for
 genuinely complex or tightly coupled implementation and is the default for
 code review. Sol (`gpt-5.6-sol`) `medium` handles consequential architectural,
 contract, migration and planning decisions; `high` handles conflicting requirements,
-difficult rollback, data-loss or security-boundary risk. Astra (`gpt-6-astra`)
-is only `medium`, for exceptional consequential system decisions with a concrete
-reason Sol is insufficient. Role names, timeouts and production labels alone never
-raise the model. Sol/Astra consume bounded evidence gathered by Luna; implementation
+difficult rollback, data-loss or security-boundary risk. Role names, timeouts and
+production labels alone never raise the model. Sol consumes bounded evidence gathered by Luna; implementation
 returns to Luna/Terra. A review does not inherit the implementation model. These
 are advisory model-selection rules, not runtime gates.
 
 The opt-in `senior_consultant` route answers one bounded coordinator question from
 selected published reports. Standard consultation is Sol (`gpt-5.6-sol`) at
-`medium`; narrow questions stay `medium`, harder questions use `high`.
-`gpt-6-astra` only at `medium` is reserved for a justified deeper
-escalation after Sol evidence remains unresolved. The consultant cannot read
+`medium`; narrow questions stay `medium`, and harder questions use `high`.
+The consultant cannot read
 project sources or indexes, run commands/tests/network/environment checks, edit
 project files, launch agents, accept tasks, or alter the coordinator plan. Its only
 write is its own Markdown report. Each packet carries one question, goal/constraints,
@@ -961,6 +958,12 @@ keeps the 22 executor profiles unchanged. See the [consultation cycle and access
 limits](docs/features/senior-consultant/index.md).
 
 ### Optional Advisory Lane
+
+The live implementation uses only the identity-verified qualified tool
+`mcp__rubber_duck__ask_duck`; bare or unrelated `ask_duck` entries never
+qualify. Consideration is recorded at consequential, contradictory-evidence,
+and repeated-failure transitions, with bounded `consult`/`skip(reason)` outcomes,
+privacy-safe packet deduplication, and quiet absence/failure diagnostics.
 
 The optional Advisory Lane is a cheap, coordinator-owned conceptual pre-check,
 not a worker, pipeline stage, runtime dependency, routing rule, gate, or
@@ -1015,7 +1018,8 @@ is reported as an overlap/topology failure rather than merging or hiding session
 Usage accounting consumes that same validated inventory and returns an explicit
 `invalid_topology` result instead of silently dropping a multiply-owned child.
 The coordinator cache exception covers only the exact advertised orchestrator
-`SKILL.md`; worker skills, other skills, and references remain forbidden to it.
+`SKILL.md` and Markdown reference leaves directly declared by that skill. Worker
+skills, other skills, adjacent files, and unlinked references remain forbidden to it.
 The c4 follow-up parity experiment uses a fresh `mktemp -d` directory initialized
 with `git init` for both hosts, avoiding historical task roots without turning the
 clean-project setup into a general product stage.
@@ -1138,14 +1142,15 @@ native_worker_result`; it must state `evidence_source=native_worker_result`,
 hashes remain asserted until independently receipt-bound. Missing, duplicate,
 truncated, replayed, or competing evidence blocks qualification.
 In this observational mode only, a complete correlated native worker result and
-delegation-evidence report retain missing assignment/worker-skill receipts and a
-worker action preceding that separate receipt as diagnostics rather than a host gate.
+delegation-evidence report retain an unavailable assignment-policy attestation as a
+diagnostic rather than a host gate. The exact assigned worker-SKILL receipt remains
+mandatory, and any worker project action preceding it remains blocking.
 Likewise, a complete public MCP result plus exactly one later same-thread publication
 may explain a missing separate server event. This does not authorize dispatch, infer
 host enforcement, or relax any failed, truncated, private, mutating, duplicate, or
 ambiguous operation.
-When an installed interactive host cannot emit bootstrap attestation, assignment or
-skill receipts, a separate server event, or a process self-exit marker, that absent
+When an installed interactive host cannot emit bootstrap attestation, assignment-policy
+attestation, a separate server event, or a process self-exit marker, that absent
 signal is `not_applicable`/diagnostic rather than a BLOCK. `observational_accept`
 still needs exactly one direct task binding, one terminal native worker, one
 task-bound worker report, exact coordinator artifact-hash reconciliation, complete
@@ -1159,27 +1164,26 @@ non-mutating `read_report` `invalid_arguments` lookup is harmless only when that
 separate valid publication/reconciliation evidence exists. It does not excuse a
 failed write, missing or ambiguous publication, mutation, private target,
 mismatch, replay, or truncation.
+A later final from that same parent-bound worker is a sequential follow-up only
+when every earlier final names a distinct, exactly-one observed worker publication;
+each publication must follow its final and precede the next final, and the terminal
+final still needs the exact artifact reconciliation. A duplicate final, multiple
+worker identities, replay, truncation, or an absent, competing, early, or delayed
+publication remains BLOCK.
 If this installed host omits a public task ID or native-result body, the observer
 uses only one expected child root, one parent-bound native worker/report, and one
 exact non-replayed coordinator artifact reconciliation as opaque root/report
 binding. It never infers an ID: missing, duplicate, replayed, or mismatched root,
-worker, report, or artifact links remain BLOCK. One or more exact-equivalent
-denied-before-dispatch errors from the bounded registered worker `SKILL.md` read are
-diagnostic only after that same full outcome proof. They must share exact
-worker/profile/manifest-bound static-read identity; differing, replayed, private,
-project, mutating, dispatched, truncated, or ambiguous reads remain blocking and
-none credits a skill receipt.
-The installed interactive transport may place that sole exact worker leaf read in
-one literal `bash -lc` envelope. Cortex unwraps and revalidates the payload with
-the same closed static-read grammar; nested shells, extra commands, directories,
-globs, adjacent cache paths, and writes remain forbidden access.
-When the host serializes this read through `functions.exec`, the observer accepts
-only one direct-call form with a safe JavaScript identifier, for example `const
-result = await tools.exec_command(...); text(result);` or an equivalent
-`const output = ...; text(output);` form. The identifier must be bound once and
-forwarded unchanged exactly once. Aliases, property access, extra
-JavaScript/API/tool calls, missing or partial forwarding, and mixed wrappers
-remain fail-closed.
+worker, report, or artifact links remain BLOCK. One or more exact-equivalent failures
+while inspecting a declared skill/reference leaf are diagnostic only after that same
+full outcome proof and a separate successful mandatory worker-SKILL receipt. They must
+share exact worker/profile/manifest-bound read identity; differing, replayed, private,
+project, mutating, dispatched, truncated, or ambiguous reads remain blocking and none
+credits a skill receipt. The model chooses any supported ordinary read-only means.
+When the host transports the read through a wrapper, the observer requires one
+attributable operation and a completely forwarded result. Nested shells, extra
+operations, aliases, partial forwarding, directories, globs, adjacent cache paths,
+and writes remain fail-closed.
 For `current_host_mcp_first` only, the exact unsupported-host labels
 `worker_assignment_policy_unverified` and `mcp_first_bootstrap_unverified` are
 always printed as `unsupported_by_current_host`, `not_applicable` diagnostics. The
@@ -1196,8 +1200,8 @@ Generic `pre_binding_host_action` is never demoted by this outcome partition: it
 lacks strict actor/profile/path proof and can describe an unsafe dispatch. The sole
 coordinator setup exception is an observer-proven manifest-bound, bounded, read-only
 literal `skills/orchestrator/SKILL.md` read carrying the active-skill marker; the
-separate exact-equivalent registered-worker static-SKILL-read predicate can retain
-independently complete, read-only denied records as diagnostics. Neither exception
+separate declaration-bound read predicate can retain independently complete, safe
+read failures as diagnostics only after the mandatory worker-SKILL receipt. Neither exception
 admits directories, globs, another skill, unknown provenance, mutation, dispatch,
 truncation, replay, ambiguity, or private/project targets.
 The current-host audit returns exit 0 only for printed `observational_accept`
@@ -1231,6 +1235,13 @@ Actual Desktop uses the same prepared candidate and a disposable Electron profil
 ./scripts/cortex-desktop-dev stop
 ```
 
+If `start` or `send` fails, the helper prints a stable, value-free diagnostic
+with `operation`, `category`, `reason`, and `recovery` fields. For example,
+`send` can report `category=submission; reason=submission_ambiguous;
+recovery=inspect` or `category=focus; reason=owned_window_not_ready;
+recovery=focus`. It never prints exception text, private paths, commands,
+subprocess output, or logs.
+
 `CORTEX_DESKTOP_BINARY` can select the actual Desktop executable. `send` verifies
 the isolated window PID, preserves the URI-prepared composer focus without clicking
 a guessed coordinate, waits for that exact owned window to stay focused across two
@@ -1238,7 +1249,9 @@ observations after a three-second URI hydration interval within one monotonic
 60-second readiness budget, submits one plain `Return`,
 and records success only after
 exactly one new task receipt appears. It refuses a second acknowledged submission
-while leaving a prompt retryable when no receipt appears. `calls` emits the full run
+and persists an ambiguous submission when a task exists without a unique exact
+prompt receipt, so a later `send` cannot replay Return; a zero-task result remains
+retryable. `calls` emits the full run
 by default and correlates every coordinator and
 worker wrapper, nested host invocation and actual Cortex MCP event while retaining
 only argument/result digests and safe routing metadata. `audit` reads the same
@@ -1280,6 +1293,13 @@ through `cortex-dev` in the exact isolated environment; `--check` and `--dry-run
 are read-only source checks. Observe the interactive composer and candidate receipt
 before submitting an ordinary product workload.
 
+During current-host Desktop qualification, a complete failed read of one exact
+registered skill or declared Markdown reference can remain a retained diagnostic
+only after separate successful assigned-skill and final-outcome evidence. This is
+outcome- and resource-bound rather than command-form-bound; unsafe, mutable,
+private/project, ambiguous, replayed, truncated, or unregistered access still fails
+the audit.
+
 ### Operator maintenance
 
 `$cortex:orchestrator clear 7 days` deletes only this project's tasks and all their
@@ -1295,14 +1315,14 @@ SQLite and task directories together while storage access is stopped.
 
 ### Versioning
 
-This release uses semantic version **1.15.9** per the current release instruction. The manifest
-and MCP server advertise `1.15.9+codex.sha256.<digest-prefix>`, computed from the
+This release uses semantic version **1.16.0**. The manifest
+and MCP server advertise `1.16.0+codex.sha256.<digest-prefix>`, computed from the
 complete installable payload. Regenerate the suffix whenever that payload changes.
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
 
-The current source candidate is `1.15.9+codex.sha256.121a79864903aeee` (payload
-SHA-256 `121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`).
+The current source candidate is `1.16.0+codex.sha256.5084e8b72d4e4ccc` (payload
+SHA-256 `5084e8b72d4e4ccc6523393a4882abe44ce920ba598e718ac58ae72da4c5b61b`).
 After each successful native spawn, the coordinator must use a successful exact
 native `wait_agent` recorded after that spawn until the owner’s terminal
 handoff/report is consumed; qualification rejects a spawned worker without this

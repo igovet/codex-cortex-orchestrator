@@ -2,8 +2,8 @@
 
 ## Qualified source candidate — 2026-09-14
 
-Current source: `1.15.9+codex.sha256.121a79864903aeee` (payload SHA-256
-`121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750`). This
+Current source: `1.16.0+codex.sha256.5084e8b72d4e4ccc` (payload SHA-256
+`5084e8b72d4e4ccc6523393a4882abe44ce920ba598e718ac58ae72da4c5b61b`). This
 terminal-wait and silent-wait repair supersedes the previously qualified source
 summary below. After each successful native spawn, the coordinator must use
 a successful exact native `wait_agent` recorded after that spawn until the

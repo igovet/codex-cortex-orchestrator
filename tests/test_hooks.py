@@ -148,6 +148,8 @@ def test_subagent_bootstrap_delivers_exact_skill_file_and_tool_order(active):
     assert "cortex:worker-backend-dev" in context
     assert "skills/worker-backend-dev/SKILL.md" in context
     assert "Read that complete SKILL.md filesystem file before any Cortex call" in context
+    assert "directly declared Markdown reference leaves" in context
+    assert "never replace or duplicate the initial worker-SKILL receipt" in context
     assert "Never use ALL_TOOLS to discover skills" in context
     assert "Never print filtered tool objects or declarations" in context
     assert context.index("emit names only") < context.index("exact selected tool's `.description`")
@@ -254,7 +256,7 @@ def test_worker_skill_read_pretool_to_result_receipt_allows_exact_leaf_only(acti
     skill.write_text("# Backend worker\n")
     manifest = skill_root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.15.9+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
     handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
     command = f"bash -lc {shlex.quote(f'cat {skill}')}"
     pre = handler.handle(event(root, "PreToolUse", tool_name=tool_name, tool_use_id="skill-read",
@@ -270,6 +272,27 @@ def test_worker_skill_read_pretool_to_result_receipt_allows_exact_leaf_only(acti
     denied = handler.handle(event(root, "PreToolUse", tool_name=tool_name, tool_use_id="skill-directory",
                                   agent_id="child", agent_type="backend_dev",
                                   tool_input={command_field: f"bash -lc {shlex.quote(f'cat {skill.parent}')}"}))
+    assert "permissionDecision" not in denied["hookSpecificOutput"]
+    assert handler.observation["outcome"] == "diagnostic"
+
+
+def test_worker_skill_read_accepts_exact_read_file_leaf_without_shell_syntax(active):
+    _, _, handler, root = active
+    skill_root = root / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "candidate"
+    skill = skill_root / "skills" / "worker-backend-dev" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Backend worker\n")
+    manifest = skill_root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
+    pre = handler.handle(event(root, "PreToolUse", tool_name="read_file", tool_use_id="skill-read",
+                               agent_id="child", agent_type="backend_dev", tool_input={"path":str(skill)}))
+    assert pre == {}
+    assert handler.observation["outcome"] == "observed"
+    denied = handler.handle(event(root, "PreToolUse", tool_name="read_file", tool_use_id="directory",
+                                  agent_id="child", agent_type="backend_dev",
+                                  tool_input={"path":str(skill.parent)}))
     assert "permissionDecision" not in denied["hookSpecificOutput"]
     assert handler.observation["outcome"] == "diagnostic"
 

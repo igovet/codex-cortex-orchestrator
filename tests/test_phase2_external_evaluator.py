@@ -35,8 +35,8 @@ def _native_turn(thread_id: str = "thread-current", control: str = "1" * 64,
 def test_phase2_identity_lock_matches_current_plugin_manifest():
     manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
     expected_version = manifest["version"]
-    expected_payload_sha256 = "467a57b14d5d105cf8f401a5f8d85889e2dc49e7a2bb1ff4dc5a2deda331a18b"
-    assert expected_version == "1.15.9+codex.sha256.467a57b14d5d105c"
+    expected_payload_sha256 = "5084e8b72d4e4ccc6523393a4882abe44ce920ba598e718ac58ae72da4c5b61b"
+    assert expected_version == "1.16.0+codex.sha256.5084e8b72d4e4ccc"
     assert expected_version == phase2_cli_runner.CANDIDATE_VERSION
     assert expected_version == phase2_cli_auditor.CANDIDATE_VERSION
     assert expected_payload_sha256 == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
@@ -59,7 +59,7 @@ def test_phase2_live_harness_trusted_anchors_match_current_source():
     assert {phase2_cli_runner.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
             phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
-                "8338038cb227900019b6ae8b48050df5c27d0ae8884d2f7154b10885a9036633"
+                    "acd1bb0dcb41adaf2a333309feab1750eb2e4d9397cfe575f867f2578a970fdb"
             }
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_auditor.EVIDENCE_COLLECTION
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_adapter.EVIDENCE_CONTRACT
@@ -2872,7 +2872,7 @@ def test_preparer_rejects_stale_embedded_version_even_when_normalized_hash_match
     value["version"] = "1.15.8+codex.sha256.9dfe4c2cf790714c"
     manifest.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
-    assert phase2_cli_runner._payload_digest(plugin, canonical_version="1.15.9") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
+    assert phase2_cli_runner._payload_digest(plugin, canonical_version="1.16.0") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
     with pytest.raises(phase2_cli_runner.PreparationError, match="archived payload version"):
         phase2_cli_runner._validate_payload_identity(
             plugin,
@@ -2891,7 +2891,7 @@ def test_stale_archive_version_fails_audit_and_preflight_with_outer_hash_unchang
     manifest.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
     assert candidate["identity"]["payload_sha256"] == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
-    assert phase2_cli_auditor.payload_digest(manifest.parents[1], "1.15.9") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
+    assert phase2_cli_auditor.payload_digest(manifest.parents[1], "1.16.0") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
     audited = phase2_cli_auditor.audit(record)
     assert audited["status"] == "fail-closed"
     assert any("candidate archived payload version mismatch" in error for error in audited["errors"])
@@ -3145,6 +3145,7 @@ def test_common_observer_separates_evidence_integrity_from_quality_symmetrically
 def test_common_observer_dependency_closure_is_complete_and_sealed(tmp_path):
     source_manifest = phase2_cli_runner._observer_dependency_manifest(ROOT)
     assert "plugins/cortex/profiles.json" in source_manifest
+    assert "plugins/cortex/.codex-plugin/plugin.json" in source_manifest
     assert {key for key in source_manifest if key.startswith("plugins/cortex/skills/")} == {
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "plugins/cortex/skills").rglob("*") if path.is_file()
@@ -3157,7 +3158,8 @@ def test_common_observer_dependency_closure_is_complete_and_sealed(tmp_path):
         and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)
     }
     assert direct_root_operands == {
-        "plugins/cortex/profiles.json", "plugins/cortex/skills", "scripts/cortex-dev",
+        "plugins/cortex/.codex-plugin/plugin.json", "plugins/cortex/profiles.json",
+        "plugins/cortex/skills", "scripts/cortex-dev",
     }
 
     record = _run_prepare(tmp_path)
@@ -3174,14 +3176,17 @@ def test_common_observer_dependency_closure_is_complete_and_sealed(tmp_path):
     assert observer["assigned_worker_profile"]("$cortex:worker-general") == "general"
 
 
-@pytest.mark.parametrize("mutation", ["missing", "tampered", "extra"])
+@pytest.mark.parametrize("mutation", ["missing", "missing_manifest", "tampered", "extra"])
 def test_common_observer_dependency_drift_fails_audit_and_preflight(tmp_path, mutation):
     record = _run_prepare(tmp_path)
     data = json.loads(record.read_text())
     launcher = data["neutral"]["live_launcher"]
     profile = record.parent / "plugins/cortex/profiles.json"
+    plugin_manifest = record.parent / "plugins/cortex/.codex-plugin/plugin.json"
     if mutation == "missing":
         profile.unlink()
+    elif mutation == "missing_manifest":
+        plugin_manifest.unlink()
     elif mutation == "tampered":
         profile.write_bytes(profile.read_bytes() + b"\n")
     else:

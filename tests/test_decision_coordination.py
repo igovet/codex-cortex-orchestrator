@@ -9,6 +9,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVER = runpy.run_path(str(ROOT / 'scripts/cortex-desktop-dev'))
 EVAL = runpy.run_path(str(ROOT / 'scripts/cortex_eval.py'))
+CANDIDATE_VERSION = json.loads((ROOT / 'plugins/cortex/.codex-plugin/plugin.json').read_text())['version']
+
+
+def trusted_cache(base):
+    cache = base / CANDIDATE_VERSION
+    manifest = cache / '.codex-plugin/plugin.json'
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes((ROOT / 'plugins/cortex/.codex-plugin/plugin.json').read_bytes())
+    return cache
 
 
 def row(tool, thread='worker', role='backend_dev', **fields):
@@ -229,6 +238,14 @@ def test_compound_source_reads_are_not_mistaken_for_mutations():
         assert not check('exec_command',json.dumps({'cmd':command})),command
 
 
+def test_coordinator_bounded_eof_read_uses_a_real_literal_path():
+    check=OBSERVER['coordinator_source_read']
+    assert check('exec_command',json.dumps({'cmd':"sed -n '1,$p' source.md"}))
+    # A missing operand or an EOF token is a failed command, not a valid read.
+    assert not check('exec_command',json.dumps({'cmd':"sed -n '1,$p'"}))
+    assert not check('exec_command',json.dumps({'cmd':"sed -n '1,$p' EOF"}))
+
+
 def test_one_coordinator_private_probe_retains_two_policy_labels_on_one_operation(tmp_path):
     command=json.dumps({'cmd':f'ls {tmp_path}/.cortex-dev/.codex/plugins/cache'})
     metadata=OBSERVER['path_policy_metadata']('exec_command',command,'coordinator',str(tmp_path))
@@ -279,11 +296,12 @@ def test_standard_skill_loading_does_not_allow_plugin_exploration(tmp_path,monke
 def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch):
     check=OBSERVER['call_policy_flags']
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    cache=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/v7'
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
     skill=cache/'skills/orchestrator/SKILL.md'
     worker_skill=cache/'skills/worker-general/SKILL.md'
     for path in (skill,worker_skill):
-        path.parent.mkdir(parents=True,exist_ok=True);path.write_text('instructions')
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes((ROOT/'plugins/cortex'/path.relative_to(cache).as_posix()).read_bytes())
 
     def command(path, binding='p', tag='PY'):
         return (f"python3 - <<'{tag}'\nfrom pathlib import Path\n"
@@ -305,10 +323,11 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
     assert 'forbidden_plugin_or_cache_access' in check(
         'exec_command',worker_arguments,'coordinator','/fixture')
     reference=skill.parent/'references/pipeline-publication.md'
-    reference.parent.mkdir();reference.write_text('reference')
+    reference.parent.mkdir()
+    reference.write_bytes((ROOT/'plugins/cortex/skills/orchestrator/references/pipeline-publication.md').read_bytes())
     reference_arguments=json.dumps({'cmd':command(reference,'reference_path','REF')})
     assert OBSERVER['skill_instruction_read']('exec_command',reference_arguments)
-    assert 'forbidden_plugin_or_cache_access' in check(
+    assert 'forbidden_plugin_or_cache_access' not in check(
         'exec_command',reference_arguments,'coordinator','/fixture')
     assert 'forbidden_plugin_or_cache_access' not in check(
         'exec_command',worker_arguments,'general','/fixture')
@@ -330,12 +349,32 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
         'exec_command',json.dumps({'cmd':negatives[1]}),'general','/fixture')
 
 
+def test_read_file_is_an_equivalent_declaration_bound_skill_read(tmp_path,monkeypatch):
+    home=tmp_path/'home'
+    cache=trusted_cache(home/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/worker-general/SKILL.md'
+    reference=skill.parent/'references/report-publication.md'
+    reference.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    reference.write_bytes((ROOT/'plugins/cortex/skills/worker-general/references/report-publication.md').read_bytes())
+    monkeypatch.setattr(Path,'home',lambda:home)
+    read=lambda path:json.dumps({'path':str(path)})
+    assert OBSERVER['worker_skill_read']('read_file',read(skill))
+    assert OBSERVER['worker_skill_profile']('read_file',read(skill))=='general'
+    assert OBSERVER['skill_instruction_read']('read_file',read(reference),worker_only=True)
+    assert not OBSERVER['worker_skill_read']('read_file',read(reference))
+    assert not OBSERVER['skill_instruction_read'](
+        'read_file',json.dumps({'path':str(skill),'offset':1}),worker_only=True)
+    assert not OBSERVER['skill_instruction_read'](
+        'read_file',json.dumps({'path':str(skill.parent)}),worker_only=True)
+
 def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch):
     check=OBSERVER['call_policy_flags']
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    skill=(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
-           /'1.15.6+codex.sha256.fixture/skills/orchestrator/SKILL.md')
-    skill.parent.mkdir(parents=True);skill.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/orchestrator/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT/'plugins/cortex/skills/orchestrator/SKILL.md').read_bytes())
 
     def command(path,flag=''):
         program=f'from pathlib import Path; print(Path("{path}").read_text())'
@@ -531,6 +570,97 @@ def test_desktop_steering_receipts_are_typed_and_task_scoped(tmp_path,monkeypatc
         rollout.write_text(json.dumps(receipt('root',altered)))
         assert OBSERVER['desktop_prompt_receipts']({'thread_id':'root','workdir':'/fixture'},'exact')==set()
     with pytest.raises(RuntimeError): OBSERVER['desktop_prompt_receipts']({'thread_id':'root','workdir':'/other'},'exact')
+
+
+def test_desktop_prompt_receipts_accept_current_native_turn_envelopes(tmp_path,monkeypatch):
+    monkeypatch.setenv('HOME',str(tmp_path))
+    home=tmp_path/'.cortex-dev/.codex';home.mkdir(parents=True)
+    rollout=home/'rollout.jsonl'
+    db=sqlite3.connect(home/'state_5.sqlite')
+    db.execute('CREATE TABLE threads(id TEXT,cwd TEXT,rollout_path TEXT)')
+    db.execute('INSERT INTO threads VALUES (?,?,?)',('root','/fixture',str(rollout)))
+    db.commit();db.close()
+
+    def current(payload):
+        return dict(type='response_item',payload=payload)
+    rollout.write_text('\n'.join(json.dumps(record) for record in [
+        current(dict(type='message',role='user',id='response-message',
+                     content=[dict(type='input_text',text='ex'),dict(type='input_text',text='act')])),
+        current(dict(type='user_message',id='event-message',message='exact\n')),
+        current(dict(type='message',role='assistant',id='not-user',
+                     content=[dict(type='input_text',text='exact')])),
+        current(dict(type='message',role='user',id='wrong-thread',thread_id='other',
+                     content=[dict(type='input_text',text='exact')])),
+    ]))
+    assert OBSERVER['desktop_prompt_receipts']({'thread_id':'root','workdir':'/fixture'},'exact')=={
+        'response-message','event-message',
+    }
+
+    rollout.write_text(json.dumps(current(dict(
+        type='message',role='user',id='changed',content=[dict(type='input_text',text='ex act')]))))
+    assert OBSERVER['desktop_prompt_receipts']({'thread_id':'root','workdir':'/fixture'},'exact')==set()
+
+
+@pytest.mark.parametrize(
+    ('entry','expected'),
+    [
+        (dict(
+            type='event_msg',
+            payload=dict(type='item_completed',thread_id='root',
+                item=dict(type='UserMessage',id='legacy',
+                          content=[dict(type='text',text='exact')])),
+        ), ('exact','legacy')),
+        (dict(
+            type='response_item',
+            payload=dict(type='message',role='user',id='multipart',
+                content=[dict(type='input_text',text='ex'),
+                         dict(type='input_text',text='act')]),
+        ), ('exact','multipart')),
+        (dict(
+            type='event_msg',
+            payload=dict(type='message',role='user',thread_id='root',id='event',
+                content=[dict(type='input_text',text='exact')]),
+        ), ('exact','event')),
+        (dict(
+            type='response_item',
+            payload=dict(type='user_message',id='short',message='exact'),
+        ), ('exact','short')),
+        (dict(
+            type='item',
+            payload=dict(type='message',role='user',id='wrong-envelope',
+                content=[dict(type='input_text',text='exact')]),
+        ), None),
+        (dict(
+            type='response_item',
+            payload=dict(type='message',role='assistant',id='assistant',
+                content=[dict(type='input_text',text='exact')]),
+        ), None),
+        (dict(
+            type='response_item',
+            payload=dict(type='message',role='user',thread_id='other',id='foreign',
+                content=[dict(type='input_text',text='exact')]),
+        ), None),
+        (dict(
+            type='response_item',
+            payload=dict(type='message',role='user',id='malformed',
+                content=[dict(type='input_text',text='ex'),dict(type='input_text')]),
+        ), None),
+        (dict(
+            type='response_item',
+            payload=dict(type='item_completed',thread_id='root',
+                item=dict(type='UserMessage',id='wrong-current-envelope',
+                          content=[dict(type='text',text='exact')])),
+        ), None),
+        (dict(
+            type='event_msg',
+            payload=dict(type='item_completed',thread_id='root',
+                item=dict(type='UserMessage',id='malformed-legacy',
+                          content=[dict(type='text',text='ex'),dict(type='input_text',text='act')])),
+        ), None),
+    ],
+)
+def test_desktop_native_user_turn_decoder_has_strict_envelope_parity(entry,expected):
+    assert OBSERVER['_desktop_prompt_turn'](entry,'root')==expected
 
 
 def test_resume_restores_only_completed_assignment_receipts():
@@ -867,10 +997,12 @@ def test_pipeline_private_exclusion_is_not_a_private_read_but_private_target_is(
 def test_worker_path_policy_distinguishes_approved_load_static_exclusion_and_probe(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
     helper=OBSERVER
-    skill=(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/build'
-           /'skills/worker-explorer/SKILL.md')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/worker-explorer/SKILL.md'
     registry=skill.parents[2]/'agents/explorer.toml'
-    skill.parent.mkdir(parents=True);registry.parent.mkdir();skill.write_text('complete skill');registry.write_text('agent')
+    skill.parent.mkdir(parents=True);registry.parent.mkdir()
+    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-explorer/SKILL.md').read_bytes())
+    registry.write_text('agent')
     approved=json.dumps({'cmd':f"sed -n '1,80p' {skill}"})
     static=json.dumps({'cmd':"rg --files -g '!**/.codex/plugins/**' | sed -n '1,40p'"})
     probe=json.dumps({'cmd':f"cat {registry}"})
@@ -899,8 +1031,10 @@ def test_observer_retains_codebase_memory_and_git_failures_as_worker_diagnostics
 
 def test_observer_allows_narrow_skill_read_and_records_safe_path_provenance(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/build/skills/worker-general/SKILL.md'
-    skill.parent.mkdir(parents=True);skill.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/worker-general/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
     arguments=json.dumps({'cmd':'cat '+str(skill)})
     metadata=OBSERVER['path_policy_metadata']('exec_command',arguments,'general','/tmp/project')
     assert metadata['path_target_class']=='approved_instruction_or_static_mention'

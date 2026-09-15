@@ -24,16 +24,12 @@ not rely on an inherited host default.
   risk. Use `high` (`decision-hard`) for conflicting requirements, difficult
   rollback, data-loss risk or security-boundary decisions. A narrow security audit
   may use Sol `medium`/`high`; implementation returns to Luna/Terra.
-- Exceptional system decisions use `gpt-6-astra` only at `medium`
-  (`decision-exceptional`): verified facts still support competing consequential
-  designs, with a stated reason Sol is insufficient. This is not an automatic
-  escalation after a failed call, timeout or review.
 - `planner`, `architect`, `database_architect` and similar profiles follow the
-  decision's risk, not the role name. Sol/Astra consume bounded evidence gathered
+  decision's risk, not the role name. Sol consumes bounded evidence gathered
   by Luna; they do not replace exploration. A missing fact goes back to its owner.
 - Opt-in `senior_consultant` uses the same decision ladder: Sol `medium` standard
-  or narrow, Sol `high` harder, Astra `medium` exceptional. Consultation stays
-  bounded and advisory; it never changes the coordinator model.
+  or narrow and Sol `high` for harder questions. Consultation stays bounded and
+  advisory; it never changes the coordinator model.
 - Reviews and verifications use the permitted routes without automatic escalation;
   ordinary review uses Terra, while a narrowly scoped verification that does not
   require review judgment may use Luna. Record inspected model/effort when
@@ -43,7 +39,7 @@ not rely on an inherited host default.
   as a Cortex recommendation. If a host cannot honor it, report an evidence gap.
 
 Record the decision, concrete risk/uncertainty and selected model/effort before
-assigning Sol/Astra. Governance changes verification depth, not this ladder.
+assigning Sol. Governance changes verification depth, not this ladder.
 These are selection instructions and diagnostic checks, never runtime gates.
 
 Do not switch an active worker's model merely because it is slow or a host wait
@@ -93,8 +89,7 @@ Each concise assignment states the exact `$cortex:worker-...` skill,
 complete loading before discovery/project work,
 model/effort, policy class (`research`, `exploration`, `analysis`, `ordinary`,
 `complex`, `security-analysis-microtask`, `consultation`, `consultation-narrow`,
-`consultation-hard`, `consultation-deeper`, `decision`, `decision-hard`,
-`decision-exceptional` or `review`), evidence, bounded outcome,
+`consultation-hard`, `decision`, `decision-hard` or `review`), evidence, bounded outcome,
 requirements/acceptance checks, owned files/resources/dependencies, source/report/
 attachment references and handoff. Reviews retain implementation model/effort and
 do not derive a route; include `Policy class: <value>`, review model/effort and

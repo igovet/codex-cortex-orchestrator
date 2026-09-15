@@ -11,6 +11,7 @@ import shlex
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -28,20 +29,22 @@ CONFIG_BACKUP=STATE/'config.toml.before-live-test'
 LIVE_MODEL='gpt-5.6-luna'
 LIVE_COORDINATOR_EFFORT='high'
 LIVE_WORKER_EFFORTS={'medium','high'}
-LIVE_CONSULTANT_MODELS={'gpt-5.6-sol','gpt-6-astra'}
+LIVE_CONSULTANT_MODELS={'gpt-5.6-sol'}
 LIVE_CONSULTANT_EFFORTS={'low','medium','high'}
+TRUSTED_COMMAND_NEUTRAL_READER_PATHS={
+    name: frozenset(Path(prefix)/name for prefix in ('/bin','/usr/bin'))
+    for name in ('head','tail','nl','rg','grep')
+}
 WORKER_MODELS={
     'ordinary': 'gpt-5.6-luna',
     'complex': 'gpt-5.6-terra',
     'security-analysis-microtask': 'gpt-5.6-sol',
     'decision': 'gpt-5.6-sol',
     'decision-hard': 'gpt-5.6-sol',
-    'decision-exceptional': 'gpt-6-astra',
 }
 CONSULTANT_MODELS={'consultation':'gpt-5.6-sol',
                    'consultation-narrow':'gpt-5.6-sol',
-                   'consultation-hard':'gpt-5.6-sol',
-                   'consultation-deeper':'gpt-6-astra'}
+                   'consultation-hard':'gpt-5.6-sol'}
 WORKER_MODEL_CHOICES={
     **{key:{value} for key,value in WORKER_MODELS.items()},
     'research': {'gpt-5.6-luna'},
@@ -55,15 +58,12 @@ WORKER_EFFORTS={
     'gpt-5.6-luna': {'medium','high','xhigh','max'},
     'gpt-5.6-terra': {'medium','high'},
     'gpt-5.6-sol': {'medium','high'},
-    'gpt-6-astra': {'medium'},
 }
 CONSULTANT_EFFORTS={'consultation': {'medium'},
                      'consultation-narrow': {'medium'},
                      'consultation-hard': {'high'},
-                     'consultation-deeper': {'medium'},
                      'decision': {'medium'},
-                     'decision-hard': {'high'},
-                     'decision-exceptional': {'medium'}}
+                     'decision-hard': {'high'}}
 ADVISORY_POLICY_FLAGS={
     'unsafe_cortex_draft_template_literal','insufficient_diagnostic_output_budget',
     'worker_project_tool_before_cortex_bootstrap','worker_report_catalogue_in_fresh_thread',
@@ -88,8 +88,9 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'advertised coordinator SKILL.md or public plugin declaration (.mcp.json or '
     '.codex-plugin/plugin.json), with a fixed literal file, bounded reader, and '
     'complete receipt: never a directory, glob, runtime/state file, registry, or '
-    'mutation. Both roles may read their exact advertised SKILL.md and its declared '
-    'instruction references with bounded literal reads and complete receipts. '
+    'mutation. Each role may inspect its exact advertised SKILL.md first and its directly declared '
+    'Markdown reference leaves afterward by ordinary read-only means selected by the model, '
+    'with complete receipts. '
     'Discover deferred tools by exact name or namespace only; for Cortex use '
     'text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__"))) immediately '
     'before the first Cortex call, and use the returned complete advertised schemas '
@@ -100,15 +101,16 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'advertised assigned worker-SKILL read or native attachment receipt and live '
     'tool schemas. Each opaque worker route must retain one attributable complete '
     'worker-skill receipt before any worker project action; a coordinator read never '
-    'satisfies it. From the first worker action, workers must not probe those paths. '
+    'satisfies it. Workers must not probe adjacent, unlinked, registry, runtime, state, '
+    'directory, glob, symlink, private, or project paths through this exception. '
     'When the launcher declares current-host MCP-first bootstrap, the child coordinator '
     'must make direct public mcp__cortex__create_task its first qualifying operation '
     'and wait for its complete native receipt before any project-target action; no '
     'functions.exec, nested shell, terminal, file, patch, or private probe may substitute. '
-    'Use one bounded command per wrapper with complete exit/result receipt; nested '
-    'success never excuses truncation. For coordinator source inspection use a single literal '
-    'cat, sed -n, or rg command; do not combine commands with separators, pipes, '
-    'redirection, or banner printing. A wait timeout alone is not a reason to '
+    'Use one bounded operation per wrapper with a complete result receipt; nested '
+    'success never excuses truncation. Resource reads must remain declaration-bound, '
+    'read-only, literal, and attributable; no wrapper may add another operation, expansion, '
+    'redirection, or output decoration. A wait timeout alone is not a reason to '
     'message an active worker; continue waiting silently. For this live test, this '
     'constraint overrides any Cortex recommendation to use a stronger or heavier model. Preserve all other host, '
     'project, skill, and user instructions.'
@@ -821,9 +823,9 @@ def delivered_request_digests(state,text):
 
 POLICY_CLASS_VALUES={
     'research','exploration','analysis','ordinary','complex',
-    'decision','decision-hard','decision-exceptional',
+    'decision','decision-hard',
     'security-analysis-microtask','security-implementation','review',
-    'consultation','consultation-narrow','consultation-hard','consultation-deeper',
+    'consultation','consultation-narrow','consultation-hard',
 }
 NATIVE_WORKER_RESULT_SCHEMA='cortex-native-worker-result-v1'
 NATIVE_WORKER_RESULT_FIELDS=frozenset({
@@ -1123,7 +1125,151 @@ def python_skill_read_paths(command):
     return [literal_path]
 
 
-def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False):
+def command_neutral_skill_read_paths(command):
+    """Extract one leaf from a positively modelled, read-only command.
+
+    Command spelling is not a prompt or skill contract: the model may choose
+    any supported ordinary reader.  The observer nevertheless needs a positive
+    semantic basis before it grants the declaration-bound exception.  Unknown
+    executables, interpreters, editors, and options therefore fail closed rather
+    than being admitted by a finite blacklist.  The actual terminal outcome and
+    all manifest/source-byte checks remain authoritative.
+    """
+    if not isinstance(command,str) or not command.strip():
+        return None
+    if _shell_command_has_ambiguous_syntax(command):
+        return []
+    parts=shell_command_parts(json.dumps({'cmd':command}))
+    if not parts or any(token in {'&&','||',';','|','&','\\n'} for token in parts):
+        return []
+    if len(parts)<2:
+        return []
+
+    executable=parts[0]
+    trusted_paths=TRUSTED_COMMAND_NEUTRAL_READER_PATHS.get(executable)
+    if trusted_paths is None or '/' in executable:
+        return []
+    resolved=shutil.which(executable)
+    if not resolved:
+        return []
+    try:
+        resolved_path=Path(resolved).resolve(strict=True)
+    except OSError:
+        return []
+    # Bind the positive grammar to the canonical system binary, not merely its
+    # basename.  This rejects both explicit path-qualified lookalikes and PATH
+    # shadowing by an unknown or mutating executable.
+    if resolved_path not in {path.resolve() for path in trusted_paths}:
+        return []
+
+    def literal_marker_paths(tokens):
+        """Return exactly one absolute marker operand, preserving spaces."""
+        marker_tokens=[]
+        for index,token in enumerate(tokens,1):
+            classes=_path_policy_marker_classes(token)
+            if classes:
+                # shell_command_parts has already removed only literal shell
+                # quoting.  Requiring an absolute token and rejecting shell
+                # metacharacters keeps spaces in quoted paths valid while
+                # refusing marker-bearing patterns and option values.
+                if (not token.startswith('/')
+                        or any(char in token for char in '*?[]{}$`|;&<>\\')):
+                    return None
+                marker_tokens.append((index,Path(token)))
+            elif token.startswith('/'):
+                # A second absolute operand could be another file read. Keep
+                # this exception bound to exactly one declared leaf.
+                return None
+            elif token.startswith('-') and '=' in token and '/' in token:
+                # An option embedding a filesystem operand is not an opaque
+                # reader flag.
+                return None
+        return marker_tokens if len(marker_tokens)==1 else None
+
+    args=parts[1:]
+    path=None
+
+    # These direct readers have a closed argument grammar.  In particular,
+    # follow-mode, output options, and arbitrary reader flags are not inferred
+    # to be safe merely because the executable name looks familiar.
+    if executable in {'head','tail'}:
+        if len(args)==1:
+            marker=literal_marker_paths(args)
+            path=marker[0][1] if marker else None
+        elif len(args)==2 and re.fullmatch(r'-[0-9]+',args[0]):
+            marker=literal_marker_paths(args[1:])
+            path=marker[0][1] if marker else None
+        elif (len(args)==2 and re.fullmatch(r'--(?:lines|bytes)=-?[0-9]+',args[0])):
+            marker=literal_marker_paths(args[1:])
+            path=marker[0][1] if marker else None
+        elif len(args)==3 and args[0] in {'-n','--lines','-c','--bytes'} \
+                and re.fullmatch(r'-?[0-9]+',args[1]):
+            marker=literal_marker_paths(args[2:])
+            path=marker[0][1] if marker else None
+        else:
+            return []
+    elif executable=='nl':
+        if len(args)==1:
+            marker=literal_marker_paths(args)
+        elif len(args)==2 and args[0] in {'-ba','-b','--body-numbering'}:
+            if args[0] in {'-b','--body-numbering'} and args[1] in {'a','t','n','p'}:
+                return []
+            marker=literal_marker_paths(args[1:])
+        else:
+            return []
+        path=marker[0][1] if marker else None
+    elif executable in {'rg','grep'}:
+        # Search tools are admitted only with a positive read-only flag model.
+        # Preprocessors, file-fed patterns, and unknown options are excluded.
+        flags={
+            '-a','-c','-F','-H','-h','-i','-L','-l','-n','-o','-r','-S','-T',
+            '-v','-w','-x','--binary-files','--count','--fixed-strings',
+            '--hidden','--ignore-case','--invert-match','--line-number',
+            '--line-regexp','--max-count','--no-filename','--only-matching',
+            '--text','--word-regexp','--with-filename',
+        }
+        valued={'-e','--regexp','-g','--glob','--iglob','--max-count','--type','-t'}
+        i=0
+        while i<len(args):
+            token=args[i]
+            if token=='--':
+                i+=1
+                break
+            if token.startswith('-') and token!='-':
+                option=token.split('=',1)[0]
+                if option in valued:
+                    if '=' not in token:
+                        if i+1>=len(args):return []
+                        i+=1
+                    i+=1
+                    continue
+                if token in flags or option in flags:
+                    i+=1
+                    continue
+                return []
+            break
+        if i>=len(args):
+            return []
+        # The existing classifier distinguishes a search pattern from actual
+        # file operands.  The positive flag model above prevents rg --pre and
+        # similar execution hooks from borrowing this read-only exception.
+        indexes=_rg_grep_marker_operand_indexes(parts)
+        if indexes is None:
+            return []
+        marker=literal_marker_paths(args)
+        if marker is None or marker[0][0] not in {index for index in indexes}:
+            return []
+        path=marker[0][1]
+    else:
+        # No blacklist fallback: an executable without a complete positive
+        # ordinary-read model is not evidence of a non-mutating operation.
+        return []
+
+    return [path] if path is not None else []
+
+
+def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False,
+                           require_existing=True):
     """Validate exact advertised skill or public tool-definition reads.
 
     Coordinator bootstrap may read only a released SKILL/reference document or
@@ -1132,12 +1278,41 @@ def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False):
     cache; it deliberately does not admit directories, globs, registries,
     database/state files, runtime code, or arbitrary cache content.
     """
-    expected=Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex'
+    expected_roots=(
+        Path.home()/'.cortex-dev/.codex/plugins/cache/cortex/cortex',
+        Path.home()/'.codex/plugins/cache/cortex/cortex',
+    )
+
+    def active_cache_manifest(root, version):
+        """Require the cache leaf to belong to the active released payload."""
+        manifest=root/version/'.codex-plugin/plugin.json'
+        trusted=ROOT/'plugins/cortex/.codex-plugin/plugin.json'
+        if (not manifest.is_file() or manifest.is_symlink()
+                or not trusted.is_file() or trusted.is_symlink()):
+            return False
+        try:
+            value=json.loads(manifest.read_text(encoding='utf-8'))
+        except (OSError,ValueError):
+            return False
+        return (isinstance(value,dict) and value.get('name')=='cortex'
+                and value.get('version')==version
+                and manifest.read_bytes()==trusted.read_bytes())
+
     advertised=False
     for path in read_paths:
-        try:relative=path.relative_to(expected)
-        except ValueError:return False
+        expected=None
+        relative=None
+        for candidate in expected_roots:
+            try:
+                relative=path.relative_to(candidate)
+            except ValueError:
+                continue
+            expected=candidate
+            break
+        if expected is None:return False
         if '..' in relative.parts or len(relative.parts)<2:return False
+        version=relative.parts[0]
+        if not active_cache_manifest(expected,version):return False
         released=Path(*relative.parts[1:])
         declaration=released in {Path('.mcp.json'),Path('.codex-plugin/plugin.json')}
         if declaration:
@@ -1146,29 +1321,44 @@ def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False):
         else:
             if len(relative.parts)<4 or relative.parts[1]!='skills':return False
             skill_name=relative.parts[2];resource=Path(*relative.parts[3:])
-            if worker_only and (not skill_name.startswith('worker-') or resource!=Path('SKILL.md')):return False
+            if worker_only and not skill_name.startswith('worker-'):return False
             if coordinator_only:
                 if skill_name not in {'orchestrator','tool-discipline','content-safety',
                                       'coordinator-communication','context-compaction'}:return False
-                if resource!=Path('SKILL.md'):
-                    entry=ROOT/'plugins/cortex/skills'/skill_name/'SKILL.md'
-                    if (len(resource.parts)!=2 or resource.parts[0]!='references'
-                            or resource.as_posix() not in re.findall(r'\]\((references/[^)]+)\)',entry.read_text())):
-                        return False
-            if resource!=Path('SKILL.md') and not (resource.parts[0]=='references' and resource.suffix=='.md'):return False
+            if resource!=Path('SKILL.md'):
+                entry=ROOT/'plugins/cortex/skills'/skill_name/'SKILL.md'
+                if (len(resource.parts)!=2 or resource.parts[0]!='references'
+                        or not re.fullmatch(r'[A-Za-z0-9_-]+\.md',resource.name)
+                        or resource.as_posix() not in re.findall(
+                            r'\]\((references/[A-Za-z0-9_-]+\.md)\)',entry.read_text())):
+                    return False
             source=ROOT/'plugins/cortex/skills'/skill_name/resource
-        if not source.is_file() or not path.is_file():return False
-        if coordinator_only and not declaration and (resource!=Path('SKILL.md') or skill_name!='orchestrator'):
-            if path.is_symlink() or path.read_bytes()!=source.read_bytes():return False
+        if not source.is_file() or path.is_symlink():return False
+        if require_existing and not path.is_file():return False
+        if path.exists() and not path.is_file():return False
+        if path.is_file() and path.read_bytes()!=source.read_bytes():return False
         try:path.resolve().relative_to(expected.resolve())
         except ValueError:return False
         advertised=True
     return advertised
 
 
+def declared_skill_paths(read_paths,worker_only=False,coordinator_only=False):
+    """Validate declaration identity without requiring a successful read."""
+    return advertised_skill_paths(
+        read_paths,worker_only,coordinator_only,require_existing=False)
+
+
 def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=False,
-                           _allow_bounded_wrapper=True):
+                           _allow_bounded_wrapper=True, _require_existing=True):
     # Recognize a targeted standard skill read, never installation exploration.
+    if tool=='read_file':
+        try:value=json.loads(arguments) if isinstance(arguments,str) else arguments
+        except (TypeError,ValueError):return False
+        if (not isinstance(value,dict) or set(value)!={'path'}
+                or not isinstance(value.get('path'),str)):return False
+        return advertised_skill_paths([Path(value['path'])],worker_only,coordinator_only,
+                                      require_existing=_require_existing)
     if tool!='exec_command':return False
     command=shell_command_text(arguments)
     if command is None:return False
@@ -1179,10 +1369,11 @@ def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=Fal
     if wrapped is not None:
         return skill_instruction_read(
             tool,json.dumps({'cmd':wrapped}),worker_only,coordinator_only,
-            _allow_bounded_wrapper=False)
+            _allow_bounded_wrapper=False,_require_existing=_require_existing)
     python_paths=python_skill_read_paths(command)
     if python_paths is not None:
-        return advertised_skill_paths(python_paths,worker_only,coordinator_only)
+        return advertised_skill_paths(python_paths,worker_only,coordinator_only,
+                                      require_existing=_require_existing)
     parts=shell_command_parts(arguments)
     if not parts:return False
 
@@ -1204,8 +1395,11 @@ def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=Fal
 
     # Only a linear `&&` sequence is accepted. Pipes, redirections, command
     # substitutions, background jobs and any other shell syntax are rejected.
-    if any(token not in {'&&'} and any(char in token for char in '$`><|&();') for token in parts):
+    eof_sed=(command.count('$')==1
+             and re.search(r"(?:^|\s)sed\s+-n\s+'1,\$p'\s+",command) is not None)
+    if any(token not in {'&&','1,$p'} and any(char in token for char in '$`><|&();') for token in parts):
         return False
+    if any('$' in token for token in parts) and not eof_sed:return False
     if any(token in {'|','||','>','>>','<','<<','&','&;'} for token in parts):return False
     segments=[];current=[]
     for token in parts:
@@ -1232,10 +1426,30 @@ def skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=Fal
         if len(segment)==2 and command_name=='cat':path=Path(segment[1])
         elif len(segment)==3 and segment[:2]==['wc','-l']:path=Path(segment[2])
         elif (len(segment)==4 and segment[:2]==['sed','-n']
-              and re.fullmatch(r'\d+,\d+p',segment[2])):path=Path(segment[3])
-        else:return False
+              and (re.fullmatch(r'\d+,\d+p',segment[2]) or segment[2]=='1,$p')):path=Path(segment[3])
+        else:
+            # Command-neutral fallback: recognize exactly one literal declared
+            # leaf without making the reader executable or quoting style part
+            # of the trust decision. Existing compound/bounded forms are
+            # handled above unchanged.
+            neutral_paths=command_neutral_skill_read_paths(command)
+            if neutral_paths:
+                return advertised_skill_paths(
+                    neutral_paths,worker_only,coordinator_only,
+                    require_existing=_require_existing)
+            return False
         read_paths.append(path)
-    return advertised_skill_paths(read_paths,worker_only,coordinator_only)
+    return advertised_skill_paths(read_paths,worker_only,coordinator_only,
+                                 require_existing=_require_existing)
+
+
+def declared_skill_instruction_read(tool,arguments,worker_only=False,coordinator_only=False,
+                                    _allow_bounded_wrapper=True):
+    """Recognize a bounded declared leaf even when its read fails."""
+    return skill_instruction_read(
+        tool,arguments,worker_only,coordinator_only,
+        _allow_bounded_wrapper=_allow_bounded_wrapper,
+        _require_existing=False)
 
 
 def active_coordinator_skill_read(tool,arguments):
@@ -1545,7 +1759,7 @@ def path_policy_static_mention(tool,arguments):
     return bool(_path_policy_marker_classes(command))
 
 
-def plugin_cache_access_is_valid(tool,arguments,workdir):
+def plugin_cache_access_is_valid(tool,arguments,workdir,*,worker_only=False,coordinator_only=False):
     """Validate each literal plugin/cache read leaf in a mixed shell command.
 
     A whole command can contain an approved skill read followed by ordinary
@@ -1561,6 +1775,8 @@ def plugin_cache_access_is_valid(tool,arguments,workdir):
     validated_marker=False
     segments=[];current=[]
     for token in parts:
+        if token in {'||','>','>>','<','<<','&','&;'}:
+            return False
         if token in {'&&',';','\\n','|'}:
             if not current:return False
             segments.append(current);current=[]
@@ -1568,6 +1784,26 @@ def plugin_cache_access_is_valid(tool,arguments,workdir):
     if not current:return False
     segments.append(current)
     for segment in segments:
+        # Do not let an approved leaf in one segment hide a mutation or nested
+        # execution in another segment. Safe mixed discovery remains supported,
+        # but every extra operation must pass this independent safety screen.
+        executable=Path(segment[0]).name if segment else ''
+        if executable in {
+                'bash','dash','fish','ksh','sh','tcsh','zsh','env','xargs',
+                'chmod','chgrp','chown','cp','dd','install','ln','mkdir','mktemp',
+                'mv','patch','rm','rmdir','tee','touch','truncate',
+                'node','perl','php','python','python2','python3','ruby',
+                'find','locate','ls','stat','tree'}:
+            return False
+        if any(token in {
+                '-i','--in-place','--output','--output-file','--outfile','--write',
+                '--append','--delete','--exec','--expression'}
+                or token.startswith(('--output=','--output-file=','--outfile=',
+                                     '--write=','--append=','--delete=','--exec=',
+                                     '--expression='))
+                or re.search(r'(?i)(?<![A-Za-z])(write|writeln|in[- ]?place|append|truncate|system|exec|touch|unlink|delete)(?![A-Za-z])',token)
+                for token in segment[1:]):
+            return False
         # Static labels can mention a path without opening it.
         segment_has_private_cache=any(any(marker in token for marker in markers)
                                       or private_cortex_cache_mentioned(token)
@@ -1579,7 +1815,9 @@ def plugin_cache_access_is_valid(tool,arguments,workdir):
             validated_marker |= segment_has_private_cache
             continue
         if segment_has_private_cache:
-            if not skill_instruction_read('exec_command',json.dumps({'cmd':shlex.join(segment)})):
+            if not declared_skill_instruction_read(
+                    'exec_command',json.dumps({'cmd':shlex.join(segment)}),
+                    worker_only=worker_only,coordinator_only=coordinator_only):
                 return False
             validated_marker=True
     return validated_marker
@@ -1618,14 +1856,18 @@ def path_policy_metadata(tool,arguments,role,workdir):
             'path_access_kind':'ordinary_tooling',
             'path_policy_decision':'diagnostic_only',
         }
+    coordinator=role in {'coordinator','runtime'}
     instruction_read=skill_instruction_read(
-        tool,arguments,coordinator_only=role in {'coordinator','runtime'})
-    valid=plugin_cache_access_is_valid(tool,arguments,workdir)
-    if instruction_read or valid:
+        tool,arguments,worker_only=not coordinator,coordinator_only=coordinator)
+    declared_read=declared_skill_instruction_read(
+        tool,arguments,worker_only=not coordinator,coordinator_only=coordinator)
+    valid=plugin_cache_access_is_valid(
+        tool,arguments,workdir,worker_only=not coordinator,coordinator_only=coordinator)
+    if instruction_read or declared_read or valid:
         return {**safe,
             'path_policy_provenance':'observer_literal_marker',
             'path_target_class':'approved_instruction_or_static_mention',
-            'path_access_kind':'approved_instruction_read' if instruction_read else 'static_mention',
+            'path_access_kind':'approved_instruction_read' if instruction_read or declared_read else 'static_mention',
             'path_policy_decision':'allowed',
         }
     # A marker-bearing command that is not one of the narrowly approved skill
@@ -1641,17 +1883,34 @@ def path_policy_metadata(tool,arguments,role,workdir):
 
 
 def worker_skill_read(tool,arguments):
-    return skill_instruction_read(tool,arguments,worker_only=True)
+    """Recognize only the exact worker SKILL leaf used for its initial receipt."""
+    if not declared_skill_instruction_read(tool,arguments,worker_only=True):return False
+    if tool=='read_file':
+        try:value=json.loads(arguments) if isinstance(arguments,str) else arguments
+        except (TypeError,ValueError):return False
+        path=value.get('path') if isinstance(value,dict) else None
+        return isinstance(path,str) and Path(path).name=='SKILL.md'
+    command=shell_command_text(arguments)
+    if not isinstance(command,str):return False
+    command=bounded_static_read_wrapper(command) or command
+    paths=re.findall(
+        r'(/[A-Za-z0-9_./+@=-]+/skills/worker-[a-z][a-z-]*/(?:SKILL\.md|references/[A-Za-z0-9_-]+\.md))'
+        r'(?![A-Za-z0-9_.-])',command)
+    return bool(paths) and all(Path(path).name=='SKILL.md' for path in paths)
 
 
 def worker_skill_profile(tool, arguments):
     """Return the one advertised worker profile read by this exact command."""
     if not worker_skill_read(tool, arguments):
         return None
-    command = shell_command_text(arguments)
-    if not isinstance(command, str):
-        return None
-    command = bounded_static_read_wrapper(command) or command
+    if tool=='read_file':
+        try:value=json.loads(arguments) if isinstance(arguments,str) else arguments
+        except (TypeError,ValueError):return None
+        command=value.get('path') if isinstance(value,dict) else None
+    else:
+        command = shell_command_text(arguments)
+        if isinstance(command,str):command = bounded_static_read_wrapper(command) or command
+    if not isinstance(command, str):return None
     profiles = {
         match.replace('-', '_')
         for match in re.findall(r'(?:^|/)skills/worker-([a-z][a-z-]*)/SKILL\.md(?:$|[\s"\'])', command)
@@ -2028,6 +2287,11 @@ def current_host_observational_qualification(rows,state,classification,bootstrap
                 'host_enforcement_state':'unverified',
                 'reason':outcome_reason if outcome_reason not in {None,'not_current_host_route'}
                 else 'observational_evidence_incomplete'}
+    if any(isinstance(row,dict) and row.get('classification')=='product_quality_outcome'
+           for row in classification.get('quality_findings',[])):
+        return {'status':'BLOCK','qualification_contract':'observational_accept',
+                'host_enforcement_state':'unverified',
+                'reason':'product_quality_outcome'}
     if outcome is not None:
         return {'status':'observational_accept','qualification_contract':'observational_accept',
                 'host_enforcement_state':'unverified','assignment_enforcement_state':'unverified',
@@ -2374,7 +2638,10 @@ def coordinator_source_read(tool,arguments):
         r'(.+?);\s*([A-Za-z_][A-Za-z0-9_]*)=\$\?;\s*(.+);\s*exit \$\2',command)
     if status_envelope and status_envelope[2] not in {'HOME','PATH','CODEX_HOME','SHELL','IFS','ENV','BASH_ENV'}:
         command=status_envelope[1]+'; '+status_envelope[3]
-    if re.search(r'[`$\r]',command):return False
+    # The only permitted shell metacharacter is the literal sed EOF address;
+    # it still requires one concrete path operand and is parsed as one command.
+    eof_sed = re.fullmatch(r"sed\s+-n\s+'1,\$p'\s+[^\s]+", command) is not None
+    if re.search(r'[`\r]',command) or ('$' in command and not eof_sed):return False
     try:
         lexer=shlex.shlex(command,posix=True,punctuation_chars=';&|<>\n')
         lexer.whitespace=' \t'
@@ -2419,7 +2686,9 @@ def _coordinator_read_tokens(tokens):
         return len(tokens)>=2 and not any(token.startswith('-') and token!='--' for token in tokens[1:])
     if tokens[0]=='sed':
         return (len(tokens)>=4 and tokens[1]=='-n'
-                and re.fullmatch(r'[0-9]+(?:,[0-9]+)?[pl]',tokens[2]) is not None
+                and tokens[-1] != 'EOF'
+                and (re.fullmatch(r'[0-9]+(?:,[0-9]+)?[pl]',tokens[2]) is not None
+                     or tokens[2]=='1,$p')
                 and not any(token.startswith('-') for token in tokens[3:]))
     if tokens[0]=='rg' and any(token=='--pre' or token.startswith('--pre=') for token in tokens):return False
     return tokens[0] in {'head','tail','rg','grep','wc','stat'}
@@ -2435,10 +2704,11 @@ def observed_session_ids(raw):
 def call_policy_flags(tool,arguments,role,workdir):
     flags=[];normalized=arguments.replace('\\\\','/')
     coordinator=role in {'coordinator','runtime'}
-    instruction_read=(skill_instruction_read(tool,arguments,coordinator_only=True)
-                      if coordinator else skill_instruction_read(tool,arguments))
+    instruction_read=skill_instruction_read(
+        tool,arguments,worker_only=not coordinator,coordinator_only=coordinator)
     if (coordinator and not instruction_read
-            and skill_instruction_read(tool,arguments)):
+            and declared_skill_instruction_read(tool,arguments)
+            and not declared_skill_instruction_read(tool,arguments,coordinator_only=True)):
         flags.append('forbidden_plugin_or_cache_access')
     if role=='senior_consultant':
         # The consultant is intentionally report-only. Its native host still
@@ -2815,22 +3085,16 @@ def observed_tool_calls(state):
                 item=payload.get('item') if payload.get('type')=='item_completed' else None
                 is_selected_root=(thread['id']==state.get('thread_id')
                                   or (not state.get('thread_id') and not edges.get(thread['id'])))
-                delivered=None
-                if (is_selected_root and payload.get('type')=='message'
-                        and payload.get('role')=='user'):
-                    delivered='\n'.join(part.get('text','') for part in payload.get('content',[])
-                                        if isinstance(part,dict))
-                elif (is_selected_root and entry.get('type')=='event_msg'
-                        and isinstance(item,dict) and item.get('type')=='UserMessage'
-                        and payload.get('thread_id')==thread['id']):
-                    delivered='\n'.join(part.get('text','') for part in item.get('content',[])
-                                        if isinstance(part,dict))
+                # Keep audit request provenance on the same strict native-turn
+                # decoder used by the submission helper.  In particular, the
+                # current response_item/message envelope concatenates text
+                # parts exactly; inserting separators here would turn a valid
+                # multipart prompt into coordinator_original_request_changed.
+                parsed_turn=_desktop_prompt_turn(entry,thread['id']) if is_selected_root else None
+                delivered=parsed_turn[0] if parsed_turn is not None else None
                 if delivered is not None and state.get('desktop_editor_source_sha256'):
                     request_digests.update(delivered_request_digests(state,delivered))
-                if (entry.get('type')=='event_msg' and isinstance(item,dict)
-                        and item.get('type')=='UserMessage'
-                        and payload.get('thread_id')==thread['id']
-                        and not edges.get(thread['id'])):
+                if parsed_turn is not None and is_selected_root:
                     calls.append(dict(timestamp=entry.get('timestamp'),thread_id=thread['id'],
                                       parent_thread_id=None,role='coordinator',tool='native_user_input',
                                       outcome='success',argument_digest=None))
@@ -2980,13 +3244,17 @@ def observed_tool_calls(state):
                             intent=command_intent_digest(nested_arguments)
                             if intent:row['intent_digest']=intent
                         row.update(path_policy_metadata(name,nested_arguments,common['role'],state['workdir']))
-                        instruction_read=skill_instruction_read(name,nested_arguments)
+                        instruction_read=skill_instruction_read(
+                            name,nested_arguments,worker_only=common['role'] not in {'coordinator','runtime'})
+                        declared_read=declared_skill_instruction_read(
+                            name,nested_arguments,worker_only=common['role'] not in {'coordinator','runtime'})
                         coordinator_instruction_read=(
                             common['role'] in {'coordinator','runtime'}
                             and skill_instruction_read(name,nested_arguments,coordinator_only=True))
                         flags=call_policy_flags(name,arguments if name=='apply_patch' else nested_arguments,common['role'],state['workdir'])
-                        if instruction_read:
+                        if instruction_read or declared_read:
                             row['skill_instruction_read']=True
+                            row['declared_skill_read']=True
                             # Keep the non-secret registered leaf/profile marker
                             # even when the host denies the read before dispatch.
                             # This is needed to reconcile an exact worker read;
@@ -3012,7 +3280,14 @@ def observed_tool_calls(state):
                             row.update(browser_call_metadata(arguments))
                             row['browser_mutations']=browser_mutation_count(arguments)
                         flags=call_policy_flags(row['tool'],arguments,common['role'],state['workdir'])
-                        if skill_instruction_read(row['tool'],arguments):row['skill_instruction_read']=True
+                        if (skill_instruction_read(
+                                row['tool'],arguments,
+                                worker_only=common['role'] not in {'coordinator','runtime'})
+                                or declared_skill_instruction_read(
+                                    row['tool'],arguments,
+                                    worker_only=common['role'] not in {'coordinator','runtime'})):
+                            row['skill_instruction_read']=True
+                            row['declared_skill_read']=True
                         if (common['role']=='coordinator'
                                 and active_coordinator_skill_read(row['tool'],arguments)):
                             row['active_coordinator_skill_read']=True
@@ -3609,13 +3884,22 @@ def desktop_current_host_partition(rows, state, host_failures, policy_violations
                 and row.get('project_target_access') is not True
                 and row.get('truncated') is not True and row.get('replayed') is not True):
             diagnostic(row,'historical_artifact_check_superseded_by_exact_final_hash');continue
+        if observational_worker_skill_read_failure_diagnostic(
+                rows,row,state,proven_outcome=outcome):
+            diagnostic(row,'failed_safe_declared_resource_read');continue
         retained_host.append(row)
     retained_policy=[]
     for row in policy_violations:
         name=row.get('violation')
-        if name in {'worker_assignment_policy_unverified','worker_skill_load_failed',
-                    'worker_project_action_before_skill_receipt'}:
-            diagnostic(row,'unsupported_current_host_worker_receipt');continue
+        if name=='worker_assignment_policy_unverified':
+            diagnostic(row,'unsupported_current_host_assignment_policy');continue
+        if name=='worker_skill_load_failed' and any(
+                observational_worker_skill_read_failure_diagnostic(
+                    rows,item,state,proven_outcome=outcome)
+                and item.get('thread_id')==row.get('thread_id')
+                and item.get('result_digest')==row.get('result_digest')
+                for item in rows):
+            diagnostic(row,'failed_safe_declared_resource_read');continue
         retained_policy.append(row)
     return retained_host,retained_policy,diagnostics,outcome,None
 
@@ -3823,15 +4107,35 @@ def current_host_outcome_receipt(rows, state):
              and row.get('replayed') is not True and row.get('truncated') is not True]
     if len(creates)!=1:return None,'outcome_create_task_missing_or_ambiguous'
     create=creates[0]
+    create_index=next(index for index,item in enumerate(rows) if item is create)
     root=create.get('thread_id');task=create.get('task_id')
     if (not isinstance(root,str) or create.get('parent_thread_id') is not None or root!=expected
             or (task is not None and (not isinstance(task,str) or not task))):
         return None,'outcome_create_task_binding_mismatch'
-    workers=[row for row in rows if row.get('tool')=='native_agent_result'
-             and row.get('outcome')=='success' and row.get('parent_thread_id')==root
-             and row.get('truncated') is not True and row.get('replayed') is not True]
-    if len(workers)!=1:return None,'outcome_native_worker_missing_or_ambiguous'
-    worker=workers[0];worker_thread=worker.get('thread_id');report_id=worker.get('report_id')
+    # Replay-marked native finals are evidence of a second delivery, even when
+    # a valid final is also present.  Do not filter them out before the
+    # cardinality checks: an otherwise complete lifecycle must remain
+    # ambiguous rather than accepting a replayed worker result.
+    replayed_worker_finals=[row for row in rows
+                            if row.get('tool')=='native_agent_result'
+                            and row.get('parent_thread_id')==root
+                            and (row.get('replayed') is True or row.get('replay_marker') is True)]
+    if replayed_worker_finals:
+        return None,'outcome_native_worker_missing_or_ambiguous'
+    worker_rows=[(index,row) for index,row in enumerate(rows)
+                 if row.get('tool')=='native_agent_result'
+                 and row.get('outcome')=='success' and row.get('parent_thread_id')==root
+                 and row.get('truncated') is not True and row.get('replayed') is not True
+                 and row.get('replay_marker') is not True]
+    workers=[row for _,row in worker_rows]
+    # A native worker can receive a genuine follow-up after publishing an
+    # earlier report.  That emits another final-result event for the same
+    # worker/parent edge; it is a sequential continuation, not a second
+    # worker.  Multiple worker identities remain ambiguous.
+    worker_threads={row.get('thread_id') for row in workers if isinstance(row.get('thread_id'),str)}
+    if not workers or len(worker_threads)!=1 or len(worker_threads)!=len({row.get('thread_id') for row in workers}):
+        return None,'outcome_native_worker_missing_or_ambiguous'
+    worker=workers[-1];worker_thread=worker.get('thread_id');report_id=worker.get('report_id')
     # Native current-host result metadata can retain the authoritative plural
     # form.  Accept it only when it carries exactly the one reported ID; never
     # let the singleton convenience field hide a duplicate or competing report.
@@ -3840,6 +4144,21 @@ def current_host_outcome_receipt(rows, state):
         report_id=report_ids[0]
     elif report_ids is not None and report_ids != [report_id]:
         return None,'outcome_native_worker_binding_mismatch'
+    # Every superseded final must itself name one distinct, observed worker
+    # report.  This prevents a duplicate final event from being silently
+    # accepted merely because it shares a worker thread with the terminal one.
+    prior_report_ids=[]
+    for _,prior in worker_rows[:-1]:
+        prior_id=prior.get('report_id');prior_ids=prior.get('report_ids')
+        if prior_id is None and isinstance(prior_ids,list) and len(prior_ids)==1:
+            prior_id=prior_ids[0]
+        elif prior_ids is not None and prior_ids != [prior_id]:
+            return None,'outcome_native_worker_binding_mismatch'
+        if not isinstance(prior_id,str) or re.fullmatch(r'r_[0-9a-f]{12}',prior_id) is None:
+            return None,'outcome_native_worker_missing_or_ambiguous'
+        prior_report_ids.append(prior_id)
+    if len(set(prior_report_ids))!=len(prior_report_ids) or report_id in prior_report_ids:
+        return None,'outcome_native_worker_missing_or_ambiguous'
     body=worker.get('native_worker_result')
     opaque_current_host_result=(
         body is None and task is None and isinstance(worker.get('agent_path'),str)
@@ -3864,13 +4183,51 @@ def current_host_outcome_receipt(rows, state):
                                    and re.fullmatch(r'[0-9a-f]{64}',item['sha256'])})
         if len(expected_artifacts)!=len(artifacts):
             return None,'outcome_artifact_reconciliation_missing'
-    publications=[row for row in rows if row.get('tool')=='mcp__cortex__write_report'
-                  and row.get('thread_id')==worker_thread
-                  and row.get('outcome')=='success' and row.get('host_receipt_outcome')=='success'
-                  and row.get('host_receipt_observed') is True and row.get('replayed') is not True
-                  and row.get('truncated') is not True
-                  and isinstance(row.get('report_id'),str)
-                  and re.fullmatch(r'r_[0-9a-f]{12}',row['report_id'])]
+    # A replay-marked worker publication is likewise retained as a hard
+    # ambiguity.  This check must run before the publication eligibility filter
+    # so a duplicate cannot disappear beside the valid publication.
+    replayed_publications=[row for row in rows
+                           if row.get('tool')=='mcp__cortex__write_report'
+                           and row.get('thread_id')==worker_thread
+                           and (row.get('replayed') is True or row.get('replay_marker') is True)]
+    if replayed_publications:
+        return None,'outcome_worker_report_missing_or_ambiguous'
+    # Every successful publication from the bound worker belongs to one
+    # observed native final in this lifecycle.  Validate cardinality before
+    # narrowing to the terminal report ID; otherwise a distinct extra report
+    # can be silently discarded by the terminal-ID filter below.
+    successful_worker_publications=[row for row in rows
+                                    if row.get('tool')=='mcp__cortex__write_report'
+                                    and row.get('thread_id')==worker_thread
+                                    and row.get('outcome')=='success']
+    if len(successful_worker_publications)!=len(worker_rows):
+        return None,'outcome_worker_report_missing_or_ambiguous'
+    publication_rows=[(index,row) for index,row in enumerate(rows)
+                      if row.get('tool')=='mcp__cortex__write_report'
+                      and row.get('thread_id')==worker_thread
+                      and row.get('outcome')=='success' and row.get('host_receipt_outcome')=='success'
+                      and row.get('host_receipt_observed') is True and row.get('replayed') is not True
+                      and row.get('replay_marker') is not True and row.get('truncated') is not True
+                      and isinstance(row.get('report_id'),str)
+                      and re.fullmatch(r'r_[0-9a-f]{12}',row['report_id'])]
+    publications=[row for _,row in publication_rows]
+    if report_id is None:
+        terminal_start=(worker_rows[-2][0] if len(worker_rows)>1 else create_index)
+        terminal_publications=[item['report_id'] for index,item in publication_rows
+                               if terminal_start < index < worker_rows[-1][0]]
+        if len(terminal_publications)!=1:
+            return None,'outcome_worker_report_missing_or_ambiguous'
+        report_id=terminal_publications[0]
+    final_report_ids=[*prior_report_ids,report_id]
+    if any(not isinstance(item,str) or re.fullmatch(r'r_[0-9a-f]{12}',item) is None
+           for item in final_report_ids):
+        return None,'outcome_worker_report_missing_or_ambiguous'
+    for position,((final_index,_),final_report_id) in enumerate(zip(worker_rows,final_report_ids)):
+        preceding_final_index=(worker_rows[position-1][0]
+                               if position else create_index)
+        matching=[index for index,item in publication_rows if item['report_id']==final_report_id]
+        if len(matching)!=1 or not preceding_final_index < matching[0] < final_index:
+            return None,'outcome_worker_report_missing_or_ambiguous'
     if report_id is not None:
         publications=[row for row in publications if row['report_id']==report_id]
     if len(publications)!=1:return None,'outcome_worker_report_missing_or_ambiguous'
@@ -3942,18 +4299,43 @@ def observational_read_report_failure_diagnostic(rows, row, state=None):
     return len(matching)==1
 
 
-def observational_worker_skill_read_failure_diagnostic(rows, row, state):
-    """Recognize equivalent denied worker-skill reads after complete outcome proof.
+def observational_worker_skill_read_failure_diagnostic(rows, row, state, proven_outcome=None):
+    """Recognize equivalent safe declared-read failures after outcome proof.
 
-    Current Codex can record a single denied, bounded registered-worker SKILL.md
-    read through more than one host-call record.  That does not create evidence
-    or authorize a route: every record must be side-effect-free and have the
-    same attributable worker, profile, literal operation/path identity, and
-    bounded result.  A differing or unsafe related record remains a hard host
-    failure instead of being hidden by this post-observation diagnostic.
+    A failed inspection of a registered public skill/reference leaf is diagnostic
+    only after a separate complete exact assigned-SKILL receipt exists. It never
+    creates that receipt or excuses a worker project action before the receipt.
+    Every failed record must remain side-effect-free and share one attributable
+    worker, profile, literal operation/path identity, and complete bounded result.
     """
-    outcome,_=current_host_outcome_receipt(rows,state)
+    outcome=proven_outcome
+    if outcome is None:
+        outcome,_=current_host_outcome_receipt(rows,state)
     if outcome is None or not isinstance(row,dict):return False
+
+    # A terminal failure is demoted only by affirmative safety evidence.  Do
+    # not turn an omitted, future, or replay-marked field into a safe result by
+    # using a deny-list predicate such as ``is not True``.
+    def exact_safe_observation(item):
+        return isinstance(item,dict) and all(
+            item.get(marker) is False for marker in (
+                'replayed','replay_marker','truncated','private_target_access',
+                'project_target_access','mutation_observed'))
+
+    expected_profile=outcome.get('worker_profile')
+    receipts=[item for item in rows if (
+        isinstance(item,dict)
+        and item.get('thread_id')==outcome.get('worker_thread_id')
+        and item.get('parent_thread_id')==outcome.get('thread_id')
+        and item.get('worker_skill_complete') is True
+        and isinstance(item.get('worker_skill_profile'),str)
+        and (expected_profile is None or item.get('worker_skill_profile')==expected_profile)
+        and item.get('worker_skill_assignment_receipt')=='complete_exact_assigned'
+        and item.get('outcome') in {'success','covered_by_command_execution'}
+        and item.get('wrapper_outcome')=='success'
+        and exact_safe_observation(item))]
+    if len(receipts)!=1:return False
+    expected_profile=receipts[0]['worker_skill_profile']
 
     def related(item):
         return (
@@ -3961,29 +4343,114 @@ def observational_worker_skill_read_failure_diagnostic(rows, row, state):
             and item.get('thread_id')==outcome.get('worker_thread_id')
             and item.get('parent_thread_id')==outcome.get('thread_id')
             and item.get('worker_skill_receipt_required') is True
-            and item.get('skill_instruction_read') is True)
+            and item.get('skill_instruction_read') is True
+            # A nested tool row is changed to ``covered_by_command_execution``
+            # once the host supplies the authoritative terminal receipt.  Keep
+            # its declaration-bound safety metadata eligible for the same
+            # completed failure classification.
+            and item.get('outcome') in {'error','covered_by_command_execution'})
 
-    def matches(item):
+    def safe_declared_read(item):
         return (
-            related(item)
-            and item.get('tool')=='exec_command' and item.get('outcome')=='error'
-            # The native child role is the closed registered-profile identity
-            # when the current host omits a separate assignment hint.  An
-            # optional observed profile may only repeat that identity; it may
-            # never select a different worker profile.
-            and item.get('worker_skill_profile') in {None,item.get('role')}
+            isinstance(item,dict)
+            and item.get('tool') in {'exec_command','read_file'}
+            # Bind each failed row to the terminal worker's exact registered
+            # profile. Same-thread activity from another profile is not the
+            # declared read whose independently successful receipt was proven.
+            and item.get('role')==expected_profile
+            and item.get('worker_skill_profile') in {None,expected_profile}
             and item.get('path_policy_provenance')=='observer_literal_marker'
             and item.get('path_target_class')=='approved_instruction_or_static_mention'
             and item.get('path_access_kind')=='approved_instruction_read'
             and item.get('path_policy_decision')=='allowed'
             and isinstance(item.get('result_digest'),str)
             and re.fullmatch(r'[0-9a-f]{12}',item['result_digest']) is not None
-            and item.get('replayed') is not True and item.get('truncated') is not True
-            and item.get('private_target_access') is not True
-            and item.get('project_target_access') is not True
-            and item.get('mutation_observed') is not True
-            and item.get('execution_status') in {None,'denied_before_dispatch'}
-            and item.get('exit_code') is None)
+            and exact_safe_observation(item)
+            # A diagnostic requires an explicit, supported completed wrapper
+            # result.  Absent, failed, incomplete, or future/unknown wrapper
+            # states cannot prove that the declared read completed safely.
+            and item.get('wrapper_outcome')=='success'
+        )
+
+    def matches(item):
+        return (
+            related(item)
+            and safe_declared_read(item)
+            # A direct failed read has its own complete execution receipt.  It
+            # cannot inherit completion from a terminal command record: the
+            # only supported direct state is one executed, non-zero result.
+            and item.get('execution_status')=='executed'
+            and isinstance(item.get('exit_code'),int)
+            and not isinstance(item.get('exit_code'),bool)
+            and item.get('exit_code')!=0)
+
+    def command_execution_matches(item):
+        """Bind one failed native command receipt to its safe nested read.
+
+        Desktop records a shell tool invocation and its authoritative
+        ``CommandExecution`` exit separately.  The latter has the failure
+        status but intentionally carries no raw command/path details.  It is a
+        diagnostic only when exactly one same-worker, same-intent nested read
+        already supplies the declaration-bound read identity and safety facts.
+        """
+        if not (
+                isinstance(item,dict)
+                and item.get('tool')=='command_execution'
+                and item.get('outcome')=='error'
+                and item.get('thread_id')==outcome.get('worker_thread_id')
+                and item.get('parent_thread_id')==outcome.get('thread_id')
+                and item.get('role')==expected_profile
+                and isinstance(item.get('intent_digest'),str)
+                and exact_safe_observation(item)
+                # The terminal receipt participates in the same completed
+                # wrapper proof as its nested declaration-bound source.
+                and item.get('wrapper_outcome')=='success'
+                and isinstance(item.get('exit_code'),int)
+                and not isinstance(item.get('exit_code'),bool)
+                and item.get('exit_code')!=0):
+            return False
+        # Cardinality must cover every same-worker, same-intent terminal
+        # receipt, not only terminal rows that already look safe.  Otherwise a
+        # duplicate unsafe terminal could be silently ignored while its safe
+        # sibling is demoted to a diagnostic.
+        terminal_rows=[terminal for terminal in rows if (
+            isinstance(terminal,dict)
+            and terminal.get('thread_id')==item.get('thread_id')
+            and terminal.get('parent_thread_id')==item.get('parent_thread_id')
+            and terminal.get('role')==expected_profile
+            and terminal.get('tool')=='command_execution'
+            and terminal.get('intent_digest')==item.get('intent_digest'))]
+        if not any(terminal is item for terminal in terminal_rows):
+            terminal_rows.append(item)
+        if len(terminal_rows)!=1:
+            return False
+
+        # Keep competing nested reads in the correlation set before applying
+        # their safety predicate.  A missing marker, dispatch, incomplete
+        # wrapper, or unsafe observation is still relevant evidence and must
+        # prevent the terminal from hiding the competing row.
+        sources=[source for source in rows if (
+            isinstance(source,dict)
+            and source.get('thread_id')==item.get('thread_id')
+            and source.get('parent_thread_id')==item.get('parent_thread_id')
+            and source.get('role')==expected_profile
+            and source.get('tool')=='exec_command'
+            and source.get('intent_digest')==item.get('intent_digest'))]
+        if len(sources)!=1:
+            return False
+        source=sources[0]
+        return (
+            source.get('outcome')=='covered_by_command_execution'
+            # The nested receipt supplies the only read-result identity.  It
+            # must therefore carry the one supported completed execution
+            # state; incomplete, absent, and unknown states cannot establish
+            # an equivalent safe declared-read for the terminal failure.
+            and source.get('execution_status')=='executed'
+            # The terminal receipt has no declaration-read metadata of its
+            # own.  Its nested source must therefore retain both exact
+            # declaration markers as well as the path-safety facts.
+            and related(source)
+            and safe_declared_read(source))
 
     def identity(item):
         return tuple(item.get(key) for key in (
@@ -3992,43 +4459,17 @@ def observational_worker_skill_read_failure_diagnostic(rows, row, state):
             'path_access_kind','path_policy_decision','path_argument_digest',
             'path_workdir_digest','path_command_intent_digest','argument_digest',
             'wrapper_argument_digest','intent_digest','result_digest',
+            'execution_status','exit_code','error_code',
         ))
 
+    if command_execution_matches(row):return True
     if not matches(row):return False
     related_rows=[item for item in rows if related(item)]
-    return bool(related_rows) and all(matches(item) and identity(item)==identity(row)
-                                      for item in related_rows)
-
-
-def observational_worker_receipt_gap_diagnostic(rows, violation, state):
-    """Retain only safe current-host worker-receipt gaps as diagnostics.
-
-    A missing separate skill receipt is not a licence for a worker action.  It
-    is diagnostic only after the independently complete result/report/artifact
-    chain exists *and* a separate exact denied instruction-read group proves
-    the capability gap.  Explicit unsafe access is never normalized here.
-    """
-    if not isinstance(violation,dict):return False
-    if violation.get('violation') not in {
-            'worker_skill_load_failed','worker_project_action_before_skill_receipt'}:
-        return False
-    outcome,_=current_host_outcome_receipt(rows,state)
-    if outcome is None:return False
-    if (violation.get('thread_id')!=outcome.get('worker_thread_id')
-            or violation.get('parent_thread_id') not in {None,outcome.get('thread_id')}
-            or violation.get('role') not in {None,'worker',outcome.get('worker_profile')}):
-        return False
-    if any(violation.get(key) is True for key in (
-            'mutation_observed','private_target_access','project_target_access',
-            'directory_enumeration','catalogue_mixed','actor_attribution_ambiguous',
-            'replayed','replay_marker','truncated')):
-        return False
-    if violation.get('path_policy_decision')=='unauthorized_access':return False
-    if violation.get('execution_status') in {'executed','dispatched'}:return False
-    # The group helper rejects different worker/profile/path/operation/result
-    # identities, incomplete observations, and any unsafe attempted read.
-    return any(observational_worker_skill_read_failure_diagnostic(rows,row,state)
-               for row in rows)
+    # Direct diagnostics have no terminal-to-nested correlation exception. A
+    # second, incomplete, unknown, or unsafe declared-read record is ambiguous
+    # evidence and must remain blocking even when it shares every identity bit.
+    return (len(related_rows)==1 and matches(related_rows[0])
+            and identity(related_rows[0])==identity(row))
 
 
 def observational_policy_partition(rows, state, violations):
@@ -4038,7 +4479,8 @@ def observational_policy_partition(rows, state, violations):
     action, changes the emitted policy findings, or turns an asserted native
     result into host enforcement.  In the bounded MCP-first route only, a
     complete correlated ``cortex-native-worker-result-v1`` can explain why the
-    current host did not expose a separate assignment/skill receipt.  A public
+    current host did not expose a separate assignment-policy attestation. The
+    exact assigned worker-SKILL receipt remains mandatory. A public
     Cortex result can likewise explain a missing server event only when a later
     same-thread, complete publication result binds the observation.  Everything
     malformed, replayed, failed, truncated, private, or otherwise unbound stays
@@ -4098,15 +4540,19 @@ def observational_policy_partition(rows, state, violations):
             name in {'worker_final_without_report_id'}))
         harmless_lookup=(name=='mcp_tool_error_observed'
                          and observational_read_report_failure_diagnostic(rows,violation,state))
-        worker_receipt_gap=observational_worker_receipt_gap_diagnostic(rows,violation,state)
-        if unsupported_by_current_host or event_gap or outcome_gap or harmless_lookup or worker_receipt_gap:
+        safe_declared_read_failure=(name=='worker_skill_load_failed' and any(
+            observational_worker_skill_read_failure_diagnostic(rows,item,state)
+            and item.get('thread_id')==violation.get('thread_id')
+            and item.get('result_digest')==violation.get('result_digest')
+            for item in rows))
+        if unsupported_by_current_host or event_gap or outcome_gap or harmless_lookup or safe_declared_read_failure:
             diagnostics.append({**violation, 'observational_diagnostic': True,
                                 'host_enforcement_state': 'unverified',
                                 **({'not_applicable':True,
                                     'unsupported_by_current_host':True}
                                    if unsupported_by_current_host else {}),
-                                **({'diagnostic_reason':'missing_current_host_worker_skill_receipt'}
-                                   if worker_receipt_gap else {}),
+                                **({'diagnostic_reason':'failed_safe_declared_resource_read'}
+                                   if safe_declared_read_failure else {}),
                                 **({'outcome_receipt':outcome} if outcome is not None else {})})
         else:
             blocking.append(violation)
@@ -4558,6 +5004,12 @@ def activate_desktop_window(xdotool,window,pid,state=None,state_file=None):
             if state is not None and state_file is not None:
                 state['desktop_activation']=activation;write_state(state_file,state)
             raise
+        active=subprocess.run([xdotool,'getactivewindow'],capture_output=True,text=True)
+        if active.returncode!=0 or active.stdout.strip()!=str(window):
+            activation['active_window']='mismatch'
+            if state is not None and state_file is not None:
+                state['desktop_activation']=activation;write_state(state_file,state)
+            raise RuntimeError('window activation did not make the owned Desktop window active')
     elif warning != DESKTOP_PROPERTY_WARNING:
         activation={'method':'windowactivate','returncode':result.returncode,
                     'error':DESKTOP_PROPERTY_WARNING if DESKTOP_PROPERTY_WARNING in warning else 'activation_failed'}
@@ -4674,24 +5126,106 @@ def submit_prepared_desktop_prompt(state,state_file):
     actual supported transport deliberately small: activate the exact owned
     window, send plain Return once, then require exactly one durable new thread.
     """
+    if state.get('desktop_submission_status')=='ambiguous':
+        raise RuntimeError('Desktop submission is ambiguous; inspect receipts before any further input')
     xdotool,window=wait_prepared_desktop_readiness(state,state_file)
     before=desktop_thread_ids(state['workdir'],state['started_at'])
+    # The baseline lookup can take long enough for another window to steal
+    # focus. Re-establish the same owned active window immediately before the
+    # sole plain Return; ``activate_desktop_window`` verifies both ownership
+    # and active-window identity on this final boundary.
+    activate_desktop_window(xdotool,window,state['pid'],state,state_file)
     submitted_at=time.time()
-    subprocess.run([xdotool,'key','--window',window,'Return'],check=True)
-    created=set()
+    # Readiness has already proved that the owned Desktop window is active.
+    # Send the one plain Return through that active focus chain so its prepared
+    # URI composer child receives it; targeting the top-level window can bypass
+    # the focused child and leave no durable task receipt.
+    subprocess.run([xdotool,'key','Return'],check=True)
+    created=set();prompt_receipts=set()
     for _ in range(60):
         created=desktop_thread_ids(state['workdir'],state['started_at'])-before
-        if created:break
+        if len(created)>1:
+            state.update(desktop_submission_status='ambiguous',
+                         desktop_submission_task_ids=sorted(created),
+                         desktop_submission_reason='task_receipt_count_mismatch',
+                         desktop_submission_at=submitted_at)
+            write_state(state_file,state)
+            break
+        if len(created)==1:
+            candidate_state={**state,'thread_id':next(iter(created))}
+            try:
+                prompt_receipts=desktop_prompt_receipts(candidate_state,state['prepared_prompt'])
+            except RuntimeError:
+                state.update(desktop_submission_status='ambiguous',
+                             desktop_submission_task_ids=sorted(created),
+                             desktop_submission_reason='prompt_receipt_missing',
+                             desktop_submission_at=submitted_at)
+                write_state(state_file,state)
+                raise
+            if len(prompt_receipts)==1:break
+            if (state.get('desktop_submission_status')!='ambiguous'
+                    or state.get('desktop_submission_task_ids')!=sorted(created)):
+                state.update(desktop_submission_status='ambiguous',
+                             desktop_submission_task_ids=sorted(created),
+                             desktop_submission_reason='prompt_receipt_missing',
+                             desktop_submission_at=submitted_at)
+                write_state(state_file,state)
         time.sleep(.25)
     if len(created)!=1:
-        raise RuntimeError(f'Desktop submission produced {len(created)} new task receipts; prompt remains retryable')
+        raise RuntimeError(f'Desktop submission produced {len(created)} new task receipts; inspect receipts before any further input')
+    if len(prompt_receipts)!=1:
+        raise RuntimeError('Desktop submission has no unique exact prepared-prompt receipt; inspect receipts before any further input')
     state['prompt_sent']=True
     state['desktop_window']=window
     state['thread_id']=created.pop()
+    state['desktop_submission_status']='success'
+    state['desktop_submission_task_ids']=[state['thread_id']]
     state['desktop_transport_receipt']='success'
     state.setdefault('first_submission_at',submitted_at)
     write_state(state_file,state)
     return state['desktop_window']
+
+
+def _desktop_prompt_turn(entry,thread_id):
+    """Return one exact native user-turn text/id from a bound Desktop rollout."""
+    if not isinstance(entry,dict):return None
+    payload=entry.get('payload')
+    if not isinstance(payload,dict):return None
+    # Preserve the legacy event envelope used by older Desktop rollouts.
+    if entry.get('type')=='event_msg' and payload.get('type')=='item_completed':
+        if payload.get('thread_id')!=thread_id:return None
+        item=payload.get('item')
+        if not isinstance(item,dict) or item.get('type')!='UserMessage':return None
+        message_id=item.get('id')
+        if not isinstance(message_id,str):return None
+        content=item.get('content')
+        if not isinstance(content,list):return None
+        parts=[]
+        for part in content:
+            if (not isinstance(part,dict) or part.get('type')!='text'
+                    or not isinstance(part.get('text'),str)):
+                return None
+            parts.append(part['text'])
+        return '\n'.join(parts),message_id
+    # These are the same current native-turn payload forms accepted by the
+    # audit parser. The rollout path is already bound to this exact task; when
+    # a host includes an additional thread identity, it must agree as well.
+    if entry.get('type') not in {'response_item','event_msg'}:return None
+    if payload.get('thread_id') is not None and payload.get('thread_id')!=thread_id:return None
+    if payload.get('type')=='message' and payload.get('role')=='user':
+        content=payload.get('content')
+        message_id=payload.get('id')
+        if not isinstance(content,list) or not isinstance(message_id,str):return None
+        parts=[]
+        for part in content:
+            if not isinstance(part,dict) or not isinstance(part.get('text'),str):return None
+            parts.append(part['text'])
+        return ''.join(parts),message_id
+    if payload.get('type')=='user_message' and isinstance(payload.get('message'),str):
+        message_id=payload.get('id')
+        if not isinstance(message_id,str):return None
+        return payload['message'],message_id
+    return None
 
 
 def desktop_prompt_receipts(state,prompt):
@@ -4704,20 +5238,21 @@ def desktop_prompt_receipts(state,prompt):
     finally:connection.close()
     if not row:raise RuntimeError('retained Desktop task is unavailable')
     ids=set()
-    for line in Path(row[0]).open(encoding='utf-8'):
-        try:entry=json.loads(line)
-        except ValueError:continue
-        payload=entry.get('payload',{})
-        if not isinstance(payload,dict) or payload.get('type')!='item_completed':continue
-        item=payload.get('item')
-        if (entry.get('type')!='event_msg' or payload.get('thread_id')!=state['thread_id']
-                or not isinstance(item,dict) or item.get('type')!='UserMessage'):continue
-        text='\n'.join(p['text'] for p in item.get('content',[])
-                       if isinstance(p,dict) and p.get('type')=='text' and isinstance(p.get('text'),str))
-        # The real Desktop editor appends one paragraph newline. Accept that
-        # observed serialization only; changed characters or extra whitespace
-        # still invalidate the literal-delivery receipt.
-        if text in {prompt,prompt+'\n'} and isinstance(item.get('id'),str):ids.add(item['id'])
+    try:
+        stream=Path(row[0]).open(encoding='utf-8')
+    except OSError:
+        return ids
+    with stream:
+        for line in stream:
+            try:entry=json.loads(line)
+            except ValueError:continue
+            parsed=_desktop_prompt_turn(entry,state['thread_id'])
+            if parsed is None:continue
+            text,message_id=parsed
+            # The real Desktop editor appends one paragraph newline. Accept that
+            # observed serialization only; changed characters or extra whitespace
+            # still invalidate the literal-delivery receipt.
+            if text in {prompt,prompt+'\n'}:ids.add(message_id)
     return ids
 
 
@@ -4757,11 +5292,14 @@ def steer_desktop(state,state_file,prompt_file,composer_x,composer_y):
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='action',required=True)
     s=sub.add_parser('start');s.add_argument('--workdir',type=Path,required=True);s.add_argument('--prompt-file',type=Path)
+    s.add_argument('--rubber-duck-opt-in',action='store_true',help='explicitly allow only mcp-rubber-duck')
     s.add_argument('--expected-result-sha256')
     s.add_argument('--expected-result-path',default='RESULT.md')
     s=sub.add_parser('steer');s.add_argument('--prompt-file',type=Path,required=True);s.add_argument('--composer-x',type=int,required=True);s.add_argument('--composer-y',type=int,required=True)
     sub.add_parser('status');sub.add_parser('send');e=sub.add_parser('events');e.add_argument('--limit',type=int);h=sub.add_parser('hooks');h.add_argument('--limit',type=int);c=sub.add_parser('calls');c.add_argument('--limit',type=int);sub.add_parser('usage');sub.add_parser('audit');sub.add_parser('stop')
-    args=p.parse_args();private();state_file=STATE/'session.json'
+    args=p.parse_args();
+    if getattr(args,'rubber_duck_opt_in',False): os.environ['CORTEX_RUBBER_DUCK_OPT_IN']='1'
+    private();state_file=STATE/'session.json'
     if args.action=='start':
         if state_file.exists():
             old=json.loads(state_file.read_text())
@@ -4798,6 +5336,7 @@ def main():
                 raise
         finally:os.close(fd)
         state=dict(pid=child.pid,start=identity(child.pid),started_at=time.time(),started_monotonic=time.monotonic(),trial_started_at=time.time(),profile=str(profile),events=str(events),store=str(store),workdir=str(workdir),prompt_supplied=prompt is not None,isolated_config=str(isolated_config))
+        if prompt is not None:state['prepared_prompt']=prompt
         if args.expected_result_sha256 is not None:
             state.update(qualification_route=DESKTOP_CURRENT_HOST_ROUTE,
                          desktop_expected_artifact={'path':args.expected_result_path,'sha256':args.expected_result_sha256})
@@ -4816,6 +5355,8 @@ def main():
         elif args.action=='send':
             if not alive:raise RuntimeError('isolated Desktop process is not active')
             if not state.get('prompt_supplied'):raise RuntimeError('start with --prompt-file before send')
+            if state.get('desktop_submission_status')=='ambiguous':
+                raise RuntimeError('Desktop submission is ambiguous; inspect receipts before any further input')
             if state.get('prompt_sent'):raise RuntimeError('prepared Desktop prompt was already sent')
             submit_prepared_desktop_prompt(state,state_file)
             print('Submitted the prepared prompt to the exact isolated Desktop window and observed one new task receipt; pid='+str(state['pid']))
@@ -4887,7 +5428,61 @@ def main():
             (STATE/'desktop.log').unlink(missing_ok=True);state_file.unlink()
             print('Stopped only the isolated Desktop process and removed its disposable artifacts.')
 
+_PUBLIC_DESKTOP_ACTIONS={'start','send','status','steer','events','hooks','usage','calls','audit','stop'}
+
+
+def public_desktop_failure(action,error):
+    """Classify a helper failure without exposing exception text or private data.
+
+    The returned vocabulary is intentionally small and stable.  It gives the
+    operator enough information to choose cleanup, retry, or focus recovery,
+    while never serializing paths, commands, subprocess output, or logs.
+    """
+    action=action if action in _PUBLIC_DESKTOP_ACTIONS else 'unknown'
+    detail=str(error).lower()
+    if action=='start':
+        if 'already active' in detail:
+            return {'operation':'start','category':'state','reason':'already_active','recovery':'inspect'}
+        if any(marker in detail for marker in ('workdir must','prompt file','expected result')):
+            return {'operation':'start','category':'input','reason':'invalid_input','recovery':'fix_input'}
+        if isinstance(error,subprocess.CalledProcessError) or 'prepare' in detail:
+            return {'operation':'start','category':'preparation','reason':'candidate_preparation_failed','recovery':'cleanup_retry'}
+        if any(marker in detail for marker in ('executable unavailable','desktop executable')):
+            return {'operation':'start','category':'launch','reason':'executable_unavailable','recovery':'fix_environment'}
+        if any(marker in detail for marker in ('config','dependency directory','network')):
+            return {'operation':'start','category':'environment','reason':'isolated_environment_unavailable','recovery':'cleanup_retry'}
+        return {'operation':'start','category':'launch','reason':'desktop_launch_failed','recovery':'cleanup_retry'}
+    if action=='send':
+        if isinstance(error,FileNotFoundError) or 'session.json' in detail:
+            return {'operation':'send','category':'state','reason':'session_unavailable','recovery':'cleanup'}
+        if 'not active' in detail:
+            return {'operation':'send','category':'state','reason':'desktop_not_active','recovery':'cleanup'}
+        if 'start with --prompt-file' in detail:
+            return {'operation':'send','category':'input','reason':'prompt_not_prepared','recovery':'restart'}
+        if 'already sent' in detail:
+            return {'operation':'send','category':'state','reason':'already_submitted','recovery':'inspect'}
+        if 'produced ' in detail and 'new task receipts' in detail:
+            if re.search(r'produced\s+[2-9][0-9]*\s+new task receipts',detail):
+                return {'operation':'send','category':'submission','reason':'submission_ambiguous','recovery':'inspect'}
+            return {'operation':'send','category':'submission','reason':'task_receipt_count_mismatch','recovery':'retry'}
+        if 'no unique exact prepared-prompt receipt' in detail:
+            return {'operation':'send','category':'submission','reason':'submission_ambiguous','recovery':'inspect'}
+        if 'submission is ambiguous' in detail:
+            return {'operation':'send','category':'submission','reason':'submission_ambiguous','recovery':'inspect'}
+        if any(marker in detail for marker in ('activation','focus','active window','ownership')):
+            return {'operation':'send','category':'focus','reason':'owned_window_not_ready','recovery':'focus'}
+        return {'operation':'send','category':'transport','reason':'desktop_send_failed','recovery':'inspect'}
+    return {'operation':action,'category':'operation','reason':'desktop_operation_failed','recovery':'inspect'}
+
+
+def public_desktop_failure_message(action,error):
+    failure=public_desktop_failure(action,error)
+    return ('Desktop test operation failed; operation={operation}; category={category}; '
+            'reason={reason}; recovery={recovery}.').format(**failure)
+
+
 if __name__=='__main__':
     try:main()
-    except Exception:
-        raise SystemExit('Desktop test operation failed; private logs were not displayed.') from None
+    except Exception as error:
+        action=next((value for value in sys.argv[1:] if value in _PUBLIC_DESKTOP_ACTIONS),'unknown')
+        raise SystemExit(public_desktop_failure_message(action,error)) from None

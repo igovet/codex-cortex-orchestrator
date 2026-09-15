@@ -30,6 +30,14 @@ selectable and keeps the lane a silent no-op.
 
 ## Bounded consultation
 
+The implementation recognizes only the live, identity-verified qualified host
+name `mcp__rubber_duck__ask_duck` (a bare `ask_duck` never qualifies). At
+consequential, contradictory-evidence, and repeated-failure transitions the
+coordinator records `consider_advisory_lane` as `consult` or `skip(reason)`.
+Calls are optional, bounded, and deduplicated by a privacy-safe packet hash;
+`prompt` is the only required field, while provider/model/temperature/images
+remain optional. Absence, errors, and timeouts are quiet diagnostics.
+
 If the exact capability is exposed and the coordinator chooses to consult it,
 there is one bounded call with one compact packet: the question and decision
 boundary, desired outcome, constraints, verified artifact/report versions,
