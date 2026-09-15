@@ -26,7 +26,7 @@
   or leaves impact unresolved with acceptance withheld until synchronization or sufficient
   no-impact evidence exists.
 - Keep explicit retention cleanup as a host-side command with project isolation.
-- Preserve semantic version 1.15.9 for this release; update the payload hash after
+- Preserve semantic version 1.16.0 for this release; update the payload hash after
   every installable payload edit.
 - Bind tasks to host MCP thread metadata after real CLI/Desktop observation; no model-authored task selector or latest-task fallback.
 

@@ -33,9 +33,9 @@ primitive: hooks remain unable to resume a stopped host turn.
 
 ## Stable release status
 
-The current 1.16.0 source candidate is `1.16.0+codex.sha256.5084e8b72d4e4ccc`
+The current 1.16.0 source candidate is `1.16.0+codex.sha256.5445b95361d15a5e`
 (payload SHA-256
-`5084e8b72d4e4ccc6523393a4882abe44ce920ba598e718ac58ae72da4c5b61b`).
+`5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35`).
 The final CLI/Desktop qualification (`r_648c4f40dcf9`) applies only to the
 superseded `e4f332d43bf38024` payload, not to this changed candidate. Its package,
 sync, full-suite, and real-host qualification remain required, and no efficacy,

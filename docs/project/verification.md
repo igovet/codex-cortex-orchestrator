@@ -1,6 +1,17 @@
 # Verification
 
-## Decision routing and isolated project qualification — 2026-09-13
+## Current 1.16.0 offline gate — 2026-09-15
+
+Current source candidate: `1.16.0+codex.sha256.5445b95361d15a5e` (payload SHA-256
+`5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35`). The offline
+gate report `r_e40cceaba46c` records package validation, source-only sync, focused
+checks, 221 evaluator tests and 1051 source tests passing. This is offline evidence
+only; no live CLI or Desktop qualification is claimed here. The user-approved
+Desktop observation remains diagnostic `submission_ambiguous` evidence, not a clean
+audit or release acceptance. Stable installation, commit, push and promotion are
+separate delivery actions and are not claimed by this record.
+
+## Historical 1.15.9 qualification — 2026-09-13
 
 The approved product matrix uses Luna medium/high for discovery and ordinary work,
 Terra medium/high for complex implementation/review, Sol medium/high for consequential
@@ -47,7 +58,7 @@ intentionally remains Luna-only. Unavailable host enforcement stays `unverified`
 This result qualifies source; it does not claim commit, push or stable deployment.
 The following dated results are historical and do not supersede this result.
 
-## Discovery ownership follow-up — 2026-09-13
+## Historical discovery ownership follow-up — 2026-09-13
 
 Live workloads that produce only research/proof notes do not recursively launch
 release qualification. The outer change owner retains mandatory CLI-before-Desktop
@@ -68,7 +79,7 @@ The incomplete attempt was stopped with sealed pre-stop evidence
 Desktop was not started under CLI-first policy. Preferred graph routing and
 CLI/Desktop acceptance remain unverified; no runtime gate was added or relaxed.
 
-## Current source qualification — 2026-09-13
+## Historical source qualification — 2026-09-13
 
 Payload `1.15.9+codex.sha256.5fc202ee9d2fc515` passed package validation,
 source-only sync and 991 tests with isolated dependencies (no skips; eight
@@ -85,9 +96,9 @@ retained failures](incident-outcomes.md#current-verification-boundary-2026-09-13
 The sections below preserve earlier qualification history; their former
 "current" and "latest" labels do not supersede the dated result above.
 
-## Stable release payload — 1.15.9
+## Historical stable release payload — 1.15.9
 
-The current Cortex semantic version is `1.15.9`, with source payload
+At that historical snapshot, the Cortex semantic version was `1.15.9`, with source payload
 `1.15.9+codex.sha256.07c3aeae551a990e` as declared by the plugin manifest and
 resolved by the package validator. Final consecutive real CLI and Desktop
 qualification (`r_648c4f40dcf9`) applies only to superseded payload
@@ -232,7 +243,7 @@ complete result receipt: a nested success never repairs truncation. An idle
 composer requires the adapter-owned immutable evidence bundle; ordinary cleanup
 and a mutable post-stop probe are not terminal proof.
 
-## Current 1.15.9 stable release status
+## Historical 1.15.9 stable release status
 
 | Gate or evidence | Status | Exact retained evidence |
 | --- | --- | --- |
@@ -1077,12 +1088,12 @@ skill attachment or exact advertised worker-skill-read evidence must be attribut
 to an opaque route. After that approved load, direct plugin/cache/candidate/registry
 operands remain forbidden; quoted static exclusions are not reads. Keep command
 wrappers bounded and reject any truncation even if covered child commands exited zero.
-When the installed host transports this read through `functions.exec`, the observer
-requires exactly one direct `tools.exec_command` call bound once to a safe
-JavaScript identifier and complete literal `text(<that-same-identifier>);`
-forwarding (for example, `const result = await ...; text(result);`). Aliases,
-property access, extra JavaScript/API/tool calls, partial forwarding, and mixed
-wrappers remain invalid.
+Any supported ordinary read-only means selected by the model may transport this
+resource read, provided it remains one attributable operation with a complete result
+receipt. A bounded wrapper may contain only that one literal read; it must not add
+operations, expansion, shell control, nested shells, aliases, redirection, output
+decoration, private or project targets, or mutation. The observer rejects truncation,
+ambiguity, replay, or a mismatched resource even when a nested command exits zero.
 Encrypted assignment content remains opaque. See [host compatibility](host-compatibility.md).
 A standalone wrapper text item `exit_status=N`
 is an explicit command receipt; stdout containing that string is not sufficient.
