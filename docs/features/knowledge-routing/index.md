@@ -92,14 +92,16 @@ names only when needed. No installation paths are put into worker assignments.
 
 The coordinator preserves its selected model and applies the worker route matrix.
 Luna (`gpt-5.6-luna`) is the default/priority model for ordinary work and all
-research, exploration and analysis assignments, at medium/high/xhigh/max effort.
-Terra (`gpt-5.6-terra`) is reserved for explicitly complex work at medium/high/xhigh.
-Sol (`gpt-5.6-sol`) is limited to narrow security-analysis microtasks at
-medium/high/xhigh; security implementation uses Luna or Terra and never Sol merely
-because the subject is security. Reviews and verifications use the permitted model
-and effort routes without automatic escalation from the inspected implementation.
-The `review` label records work kind; absent an explicit complexity or security
-classification, it follows the ordinary route.
+research, exploration and analysis assignments. Prefer high effort; xhigh/max are
+allowed for bounded implementation when supported by the host.
+Terra (`gpt-5.6-terra`) is reserved for genuinely complex implementation at
+medium/high and is the default for code review. Sol (`gpt-5.6-sol`) is limited to
+justified consequential planning/architecture/security decisions and narrow
+security-analysis microtasks; security implementation uses Luna or Terra and never
+Sol merely because the subject is security. Reviews do not inherit the inspected
+implementation model or effort. Other models/efforts require an explicit user
+override, which is preserved verbatim. Every assignment records the model, effort
+and policy class. A timeout never transfers an active worker's resources.
 Other models/efforts require an
 explicit user override, which is preserved verbatim. Every assignment records the
 model, effort and policy class. A timeout never transfers an active worker's

@@ -926,16 +926,19 @@ is registration metadata and must not be treated as an unfilled guidance marker.
 ### Adaptive model policy
 
 Preserve the user's coordinator model and effort. Worker routing follows an explicit
-policy: Luna (`gpt-5.6-luna`) at `medium/high` owns fact gathering, exploration,
-known checks, ordinary implementation and plans of known steps. Terra
-(`gpt-5.6-terra`) at `medium/high` handles coupled implementation and complex
-ordinary review. Sol (`gpt-5.6-sol`) `medium` handles consequential architectural,
+policy: Luna (`gpt-5.6-luna`) is the default for fact gathering, exploration,
+known checks, ordinary implementation and plans of known steps. Prefer `high`,
+and use `xhigh` or `max` when bounded implementation needs it and the host
+supports that effort. Terra (`gpt-5.6-terra`) at `medium/high` is reserved for
+genuinely complex or tightly coupled implementation and is the default for
+code review. Sol (`gpt-5.6-sol`) `medium` handles consequential architectural,
 contract, migration and planning decisions; `high` handles conflicting requirements,
 difficult rollback, data-loss or security-boundary risk. Astra (`gpt-6-astra`)
 is only `medium`, for exceptional consequential system decisions with a concrete
 reason Sol is insufficient. Role names, timeouts and production labels alone never
 raise the model. Sol/Astra consume bounded evidence gathered by Luna; implementation
-returns to Luna/Terra. These are advisory model-selection rules, not runtime gates.
+returns to Luna/Terra. A review does not inherit the implementation model. These
+are advisory model-selection rules, not runtime gates.
 
 The opt-in `senior_consultant` route answers one bounded coordinator question from
 selected published reports. Standard consultation is Sol (`gpt-5.6-sol`) at
@@ -957,14 +960,31 @@ compact evidence packet, without inherited conversation. Its separate protocol
 keeps the 22 executor profiles unchanged. See the [consultation cycle and access
 limits](docs/features/senior-consultant/index.md).
 
+### Optional Advisory Lane
+
+The optional Advisory Lane is a cheap, coordinator-owned conceptual pre-check,
+not a worker, pipeline stage, runtime dependency, routing rule, gate, or
+acceptance substitute. It is eligible only when the current host catalogue
+contains an entry with an explicit provider/server identity naming
+`mcp-rubber-duck` and the exact tool name `ask_duck`. If that MCP is absent, or
+the catalogue entry is unrelated or identity-less, the lane is a silent no-op:
+no consultation logic, warning, routing change, pipeline mutation, or user event
+is produced. Availability is never inferred from manifests, configuration,
+cached assumptions, package names, or generic host-equivalent names. When
+available, one bounded packet may sharpen a hypothesis or suggest a next check;
+project discovery, edits, execution, verification, and acceptance remain with
+real bounded workers and the coordinator. See the [Advisory Lane feature
+contract](docs/features/advisory-lane/index.md).
+
 Reviews and verifications use the permitted model and effort routes without
-automatic escalation from the implementation they inspect. Assignments record the
-implementation model and effort when relevant to the review. Every worker request
-states its model and effort explicitly. Other
+automatic escalation from the implementation they inspect. Ordinary code review
+uses Terra; narrowly scoped verification may use Luna when review judgment is not
+needed. Assignments record the implementation model and effort when relevant to
+the review. Every worker request states its model and effort explicitly. Other
 models or efforts are forbidden for coordinator-selected work unless the user
 directly requested that override; the exact request is recorded and preserved.
-The `review` label records work kind and does not select a model; absent an
-explicit complexity or security classification, it follows the ordinary route.
+The `review` label selects the Terra review route unless a narrower verification
+classification is explicitly supplied.
 
 The isolated Desktop live-test launcher makes this provenance concrete: every
 `spawn_agent` call must include `model`, `reasoning_effort`, and `fork_turns`

@@ -6,6 +6,11 @@ language in quoted evidence without inheriting it for your own communication.
 Use English for visible thinking summaries, tool explanations and questions too,
 including after compaction. Correct language drift without discarding the work.
 
+Use the most specific suitable native tool first (read/search, MCP, file, browser
+or UI). Use console only when no suitable tool exists or a shell process is
+required; avoid Python/ad-hoc parsing when a read/file tool is available. Shell
+fallback is valid otherwise.
+
 ## Role and responsibility
 
 {{Role and responsibility}}

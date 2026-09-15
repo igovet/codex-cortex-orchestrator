@@ -56,8 +56,9 @@ forbidden. See
 Current isolated live qualification uses Luna/high for every coordinator and Luna
 at medium/high for native workers. Product routing is stricter and explicit: Luna
 is the default/priority worker model for ordinary, research, exploration and
-fact gathering; Terra is reserved for complex implementation/review. Both use
-medium/high. Consequential decisions use Sol medium, difficult risk trade-offs
+fact gathering, preferring high and allowing xhigh/max for bounded implementation
+when supported; Terra is reserved for complex implementation and is the default
+for code review. Consequential decisions use Sol medium, difficult risk trade-offs
 Sol high, exceptional system decisions Astra medium only. Security implementation
 returns to Luna/Terra; source exploration stays Luna. Reviews and
 verifications use the permitted model and effort routes without automatic

@@ -48,10 +48,11 @@ WORKER_MODEL_CHOICES={
     'exploration': {'gpt-5.6-luna'},
     'analysis': {'gpt-5.6-luna'},
     'security-implementation': {'gpt-5.6-luna','gpt-5.6-terra'},
+    'review': {'gpt-5.6-terra'},
     **{key:{value} for key,value in CONSULTANT_MODELS.items()},
 }
 WORKER_EFFORTS={
-    'gpt-5.6-luna': {'medium','high'},
+    'gpt-5.6-luna': {'medium','high','xhigh','max'},
     'gpt-5.6-terra': {'medium','high'},
     'gpt-5.6-sol': {'medium','high'},
     'gpt-6-astra': {'medium'},
@@ -90,7 +91,9 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'mutation. Both roles may read their exact advertised SKILL.md and its declared '
     'instruction references with bounded literal reads and complete receipts. '
     'Discover deferred tools by exact name or namespace only; for Cortex use '
-    'text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__"))). '
+    'text(ALL_TOOLS.filter(x => x.name.startsWith("mcp__cortex__"))) immediately '
+    'before the first Cortex call, and use the returned complete advertised schemas '
+    'to construct it. '
     'Broad description searches can truncate. Public catalogue reads cannot mix '
     'paths, content extraction, mutations or nested tool calls. '
     'Use only the exact '
@@ -140,13 +143,9 @@ def worker_model_policy(model,effort,task_class='ordinary',explicit_user_overrid
         'microtask':'security-analysis-microtask',
     }
     task_class=aliases.get(task_class,task_class)
-    # Review is evidence provenance, not a model route. A review must carry
-    # the ordinary/complex/security classification that determines its model;
-    # the legacy label remains accepted as the ordinary default for bounded
-    # audit compatibility and never derives a stronger route from the inspected
-    # implementation.
-    if task_class=='review':
-        task_class='ordinary'
+    # Review is an explicit route: Terra is the default review model. A narrowly
+    # scoped verification can use its own policy class, but review must not
+    # inherit the implementation model or effort.
     choices=WORKER_MODEL_CHOICES.get(task_class)
     errors=[]
     if choices is None:
@@ -1764,7 +1763,14 @@ def _observational_pre_task_setup(row):
              or (row.get('outcome')=='covered_by_nested'
                  and row.get('bounded_metadata_observed') is True))
         and (row.get('host_receipt_observed') is True
-             or row.get('bounded_metadata_observed') is True)
+             or row.get('bounded_metadata_observed') is True
+             # The current observer may represent the one bounded read as a
+             # nested exec_command covered by its command_execution receipt.
+             # That receipt is complete and exact even though no duplicate
+             # host_receipt_observed flag is serialized on the nested row.
+             or (row.get('outcome')=='covered_by_command_execution'
+                 and row.get('covered_execution_count')==1
+                 and row.get('result_digest') is not None))
     )
     catalogue=(
         row.get('role')=='coordinator'
@@ -1916,6 +1922,21 @@ def mcp_first_bootstrap_receipt(rows,state):
             continue
         if qualifying is None and _observational_pre_task_setup(row):
             continue
+        # A custom functions.exec transport is recorded before its sole
+        # nested exec_command.  When that nested row is the exact approved
+        # bounded setup read, the outer covered wrapper is transport metadata,
+        # not an independent pre-binding host action.
+        if (qualifying is None and tool=='functions.exec'
+                and row.get('outcome')=='covered_by_nested'
+                and index + 1 < len(relevant)):
+            nested=relevant[index + 1][1]
+            if (nested.get('nested') is True
+                    and nested.get('wrapper_argument_digest')==row.get('argument_digest')
+                    and (row.get('bounded_metadata_observed') is True
+                         or (nested.get('outcome')=='covered_by_command_execution'
+                             and nested.get('covered_execution_count')==1))
+                    and _observational_pre_task_setup(nested)):
+                continue
         if qualifying is not None:
             # The first other action begins the post-binding segment.  A second
             # direct create receipt before that boundary is ambiguous evidence,

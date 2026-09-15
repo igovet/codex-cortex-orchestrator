@@ -46,6 +46,12 @@
   follow-ups create new immutable reports; independent verification uses fresh context.
 - Keep graph-first discovery concrete in every generated worker profile. Codebase
   Memory availability never becomes a server gate or permission to widen scope.
+- Keep the optional Advisory Lane coordinator-owned and catalogue-only. It may
+  activate only for an explicit live `mcp-rubber-duck` provider/server identity
+  paired with the exact `ask_duck` tool; absent, unrelated, or identity-less
+  entries are silent no-ops. It has no runtime dependency, profile, stage, bridge,
+  routing, gate, or acceptance authority, and never replaces worker evidence or
+  coordinator decisions.
 - Evaluate outcome quality and resource cost separately from protocol conformance
   when an evaluation is authorized. The user cancelled the Phase 2 outcome/efficiency
   comparison for 1.15.9; it is non-blocking and non-scoring, and no efficacy claim

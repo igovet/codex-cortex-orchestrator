@@ -9,13 +9,16 @@ Apply this mandatory worker-model policy to every subagent assignment. Put model
 and effort in the native request and repeat them in the assignment/pipeline; do
 not rely on an inherited host default.
 
-- Fact gathering, exploration, source/log reading and known checks use
-  `gpt-5.6-luna` at `medium` or `high`, including in security-related projects.
-  Ordinary implementation, documentation and plans of already-known steps also
-  use Luna. Do not create a planner just to restate a small task.
-- Coupled implementation or nontrivial ordinary review uses `gpt-5.6-terra` at
-  `medium` or `high`. State the concrete complexity; not every multi-file edit
-  warrants Terra.
+- Fact gathering, exploration, source/log reading, known checks, documentation,
+  ordinary implementation and plans of already-known steps use
+  `gpt-5.6-luna`. Prefer `high`; use `xhigh` or `max` when the bounded work needs
+  more reasoning and the current host supports that effort. Do not create a
+  planner just to restate a small task.
+- Only genuinely complex or tightly coupled implementation uses
+  `gpt-5.6-terra`, normally at `medium` or `high`; state the concrete complexity
+  and do not treat file count alone as sufficient. Code review uses Terra at
+  `medium` or `high` by default, with the reason recorded; it is not an
+  automatic escalation of the implementation model.
 - Consequential decisions use `gpt-5.6-sol` at `medium` (`decision`): architectural
   boundaries, public contracts, migration strategy or a plan with substantial
   risk. Use `high` (`decision-hard`) for conflicting requirements, difficult
@@ -31,10 +34,10 @@ not rely on an inherited host default.
 - Opt-in `senior_consultant` uses the same decision ladder: Sol `medium` standard
   or narrow, Sol `high` harder, Astra `medium` exceptional. Consultation stays
   bounded and advisory; it never changes the coordinator model.
-- Reviews and verifications use permitted routes without automatic escalation;
-  record inspected model/effort when relevant. `review` is a label, not a route;
-  use ordinary unless complexity or security evidence warrants another
-  classification.
+- Reviews and verifications use the permitted routes without automatic escalation;
+  ordinary review uses Terra, while a narrowly scoped verification that does not
+  require review judgment may use Luna. Record inspected model/effort when
+  relevant; never infer a review route from the implementation model alone.
 - Other models or efforts are outside this coordinator-selected policy.
   Preserve an explicit user-requested model/effort verbatim; do not reinterpret it
   as a Cortex recommendation. If a host cannot honor it, report an evidence gap.

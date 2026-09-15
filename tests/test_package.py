@@ -132,7 +132,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
             'Quality criteria',
             'Recovery',
         } <= headings
-        assert len(instructions) < 12_000
+        assert len(instructions) < 12_500
         assert 'page of at most\n4,000 characters' in instructions
         assert 'not a total context limit' in instructions
         assert 'references/report-publication.md' in instructions
@@ -180,6 +180,12 @@ def test_source_check_is_read_only():
 
 def test_desktop_helper_can_submit_one_literal_prompt_file():
     source=(ROOT/'scripts/cortex-desktop-dev').read_text()
+    live_source=(ROOT/'scripts/cortex-live-smoke').read_text()
+    for bootstrap in (source, live_source):
+        assert 'text(ALL_TOOLS.filter(x =>' in bootstrap
+        assert 'immediately ' in bootstrap
+        assert 'first Cortex ' in bootstrap
+        assert 'returned complete advertised schemas' in bootstrap
     assert "add_argument('--prompt-file',type=Path)" in source
     assert "add_argument('--data-dir',type=Path)" not in source
     assert "codex://threads/new?" in source
@@ -243,7 +249,9 @@ def test_desktop_helper_can_submit_one_literal_prompt_file():
     # a bounded completion branch while retaining a compact source budget.
     assert len(orchestrator) < 7700
     routing = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
-    assert '`gpt-5.6-luna` at `medium` or `high`' in routing
+    assert '`gpt-5.6-luna`' in routing
+    assert 'Prefer `high`' in routing
+    assert 'Code review uses Terra' in routing
     assert 'implementation returns to Luna/Terra' in routing
     assert 'non-code artifacts' in (PLUGIN/'agent-sources/worker-protocol.md').read_text()
 
@@ -750,6 +758,11 @@ def test_worker_safety_and_post_wait_rules_are_payload_guidance():
         assert rule in worker
     assert 'Checks `PYTHONDONTWRITEBYTECODE=1`' in worker
     assert 'Before any project action' in worker
+    assert 'most specific suitable native tool' in worker
+    assert 'avoid Python/ad-hoc parsing' in worker
+    consultant = (PLUGIN/'agent-sources/consultant-protocol.md').read_text()
+    assert 'most specific suitable native tool' in consultant
+    assert 'fallback is valid otherwise' in consultant
     assert 'a coordinator read never satisfies that' in worker
     assert 'one bounded command per wrapper' in worker
     assert "native final names exactly one ID: this worker's own current" in worker

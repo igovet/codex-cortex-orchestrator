@@ -143,8 +143,10 @@ response language.
 
 The coordinator must state a worker's model, effort and policy class explicitly.
 Luna (`gpt-5.6-luna`) is the default and priority route for ordinary work and all
-fact gathering and exploration assignments, at medium/high effort.
-Terra (`gpt-5.6-terra`) handles explicitly complex implementation/review at medium/high.
+fact gathering and exploration assignments. Prefer high effort, with xhigh/max
+allowed for bounded implementation when the host supports them.
+Terra (`gpt-5.6-terra`) handles genuinely complex implementation and is the
+default code-review route at medium/high; complexity must be stated.
 Sol (`gpt-5.6-sol`) handles consequential decisions at medium and difficult,
 conflicting or high-risk decisions at high; narrow security analysis may use
 medium/high. It is never an implementation route merely because a change is
@@ -153,8 +155,9 @@ verifications follow the permitted model and effort routes without automatic
 escalation from the inspected implementation. Explicit user-requested
 model/effort overrides are preserved and recorded; coordinator-selected other models
 or efforts are diagnostic policy deviations, never runtime prohibitions.
-The `review` label records work kind and does not select a model; absent an
-explicit complexity or security classification, it follows the ordinary route.
+The `review` label selects Terra by default; a narrowly scoped verification may
+use Luna only when review judgment is not needed. It never inherits the inspected
+implementation model or effort.
 
 The opt-in `senior_consultant` uses Sol medium for a standard or narrow question
 and Sol high for a harder question. Astra (`gpt-6-astra`) only at medium is
@@ -191,6 +194,19 @@ missing evidence, but the consultant may not contact other agents.
 The server also rejects worker attempts to create coordinator-owned `pipeline`
 drafts before allocating a file or delivery receipt; ordinary worker report drafts
 remain permitted.
+
+The optional Advisory Lane has an intentionally strict capability boundary. It
+may be considered only when the live host catalogue contains an explicit
+provider/server identity naming `mcp-rubber-duck` together with the exact
+`ask_duck` tool. An absent, unrelated, or identity-less entry is a silent no-op;
+the policy does not infer availability from manifests, configuration, package
+names, cached assumptions, or generic host-equivalent names. The lane has no
+runtime bridge or dependency, does not add a profile or stage, and cannot route,
+mutate, verify, or accept work. Its output is advisory context only, while
+permissions, project ownership, worker evidence, and coordinator acceptance
+remain unchanged. This repository does not claim that the MCP is installed or
+that any provider produces useful advice.
+
 When native assignment bodies are encrypted in host records, the audit reports
 `worker_assignment_policy_unverified` unless the exact native name
 `senior_consultant`, explicit Sol medium and no conversation inheritance prove
