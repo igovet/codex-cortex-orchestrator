@@ -18,7 +18,7 @@ opening decision briefs help select relevant material. Workers receive a bounded
 assignment and selected predecessor references; they do not routinely read every
 report. Worker access to immutable reports is by exact acknowledged ID through
 bounded `mcp__cortex__read_report` pages only. They never shell or probe private
-`.codex/cortex/` task-cache paths; missing or insufficient evidence is recorded as
+`.cortex/` task-cache paths; missing or insufficient evidence is recorded as
 a gap. After context loss, either role can retrieve the required source pages.
 
 The coordinator records and restores the user's response language independently
@@ -146,9 +146,18 @@ identity. Publication streams the complete UTF-8 file into the task directory,
 flushes and atomically renames it, commits metadata, and removes the draft. An
 exact retry returns its existing delivery receipt. An error before commit retains
 the draft; recovery is scoped to the affected task. Report bodies remain real
-Markdown under `.codex/cortex/<task>/`, with no application-wide body-size cap.
-Their metadata is in the same project's `.codex/cortex/cortex.sqlite3`; a different
+Markdown under `.cortex/<task>/`, with no application-wide body-size cap.
+Their metadata is in the same project's `.cortex/cortex.sqlite3`; a different
 project has a separate store and does not contend for this database.
+
+If a project still has recognized content under the legacy
+`.codex/cortex` tree, the runtime transfers only components absent from
+`.cortex` before opening the project store, after validating private identities and
+locking both roots. Conflicts,
+unsafe identities, and ambiguous partial states fail closed; the legacy tree is
+never used as a continuing read or write fallback. Each rename is atomic, but the
+multi-entry transfer has no global transaction, so interruption can leave a partial
+state that later fails closed.
 
 Native source capture uses the explicitly validated current Codex thread and
 project. Identical text in distinct native messages remains distinct. Attachment

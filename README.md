@@ -156,8 +156,9 @@ Use a specific existing repository or worktree, for example `/workspace/my-servi
 The host supplies its absolute canonical directory. Each task stores that exact
 project boundary; do not use a broad system or home directory as the project.
 
-Task documents and the private SQLite metadata index are both project-local:
-`.codex/cortex/<task>/` and `.codex/cortex/cortex.sqlite3`. The active Codex
+Task documents and the private SQLite metadata index are both project-local below
+`.cortex`: `.cortex/<task>/` and `.cortex/cortex.sqlite3`. This same root also
+contains `draft-reports` and `pipeline-drafts`. The active Codex
 home's `state_5.sqlite` locates native source records and validates the thread's
 canonical project; it is not the Cortex store. Task/report association is checked on every
 read. Keep the project's SQLite file and task directories together for offline
@@ -608,13 +609,13 @@ The live observer records Codebase Memory calls as ordinary worker tooling. A
 successful or failed external provider call, Git/rg diagnostic, or other
 non-Cortex command is not an orchestration violation by tool name or exit status.
 Workers have a separate private-Cortex boundary: they never shell, search or
-probe `.codex/cortex/` task-cache paths. Assignment-relevant immutable reports
+probe `.cortex/` task-cache paths. Assignment-relevant immutable reports
 are selected by exact acknowledged ID and read only through bounded
 `mcp__cortex__read_report` pages (at most 4,000 characters, continuing only with
 the returned cursor). Missing or insufficient evidence is reported as a gap; it
 is never filled by scanning the private cache. The observer keeps this cache
 hard stop fail-closed. For a literal `rg`/`grep` command, a quoted search
-pattern or glob containing `.codex/cortex/` is a static mention, while a path
+pattern or glob containing `.cortex/` is a static mention, while a path
 operand, direct reader, or shell-ambiguous form remains an unauthorized hard
 stop; unquoted filename globs (`*`, `?`, `[]`) and brace expansion (`{}`) are
 ambiguous, while quoted literals remain static. Path-policy findings retain only safe provenance and target classes; only
@@ -780,10 +781,10 @@ The seven MCP operations remain `create_task`, `set_governance`, `create_draft`,
 schemas contain argument, provenance, binding, change-query and retry contracts.
 Host thread metadata resolves the task; the model never guesses task identifiers.
 Each canonical project has its own SQLite store at
-`.codex/cortex/cortex.sqlite3`; projects never share a Cortex database. SQLite
+`.cortex/cortex.sqlite3`; projects never share a Cortex database. SQLite
 holds metadata and relationships, while report bodies live under project
-`.codex/cortex/<task>/`. Editable drafts live under `.cortex/` because Codex protects
-ordinary writes to project `.codex/`. Requests for one project serialize through
+`.cortex/<task>/`. The same owner-private root contains immutable task Markdown,
+the pipeline, reports, `draft-reports`, and `pipeline-drafts`. Requests for one project serialize through
 that project's store while unrelated projects use independent stores.
 
 The server streams full UTF-8 drafts, verifies original file identity, atomically
@@ -811,6 +812,16 @@ that JavaScript global before Cortex receives the call.
 Pipeline recovery and retention stay inside the affected task, so a corrupted
 neighbour does not block another archive. Validated file identities and page offsets
 avoid repeated full reads of unchanged reports; changed files are revalidated.
+
+When recognized legacy content exists at `<project>/.codex/cortex`, the runtime
+performs a one-way transfer into missing `.cortex` database/report components before
+opening the project store. It validates
+owner-private identities, locks both roots, preflights conflicts, and atomically
+renames each database family member or `t_<12 hex>` task tree. Conflicts, unsafe
+identities, and ambiguous partial states fail closed without overwriting either
+copy; the legacy path is never a continuing fallback and successful moves are not
+duplicated. The multi-entry transfer is not globally atomic, so interruption can
+leave a partial state that subsequent attempts reject.
 
 Storage format 11 requires the separate offline 10→11 migration and a backup with
 access stopped. Migration changes metadata only and leaves Markdown bytes intact.
@@ -1601,12 +1612,12 @@ before any composer/receipt inspection, state write, paste, or Enter. A resumed
 session observes and continues its existing task without replaying that request.
 
 Each new CLI smoke run uses the exact project-local store at
-`PATH/.codex/cortex/cortex.sqlite3`. A `--resume-last` run reuses that same
+`PATH/.cortex/cortex.sqlite3`. A `--resume-last` run reuses that same
 canonical project store and rejects a missing or mismatched store. `stop` keeps the
 project store for resume and removes only the session and observation streams.
 For a new evaluation cell, add `--evaluation-fresh-store`: the opt-in Linux-only
 CLI guard requires a supported architecture/syscall and same-filesystem staging,
-builds the complete owner-private `.codex/cortex` hierarchy in an external
+builds the complete owner-private `.cortex` hierarchy in an external
 same-filesystem stage, and installs it once as the project `.codex` destination
 with no-replace semantics. Unsupported, unavailable, raced, or otherwise
 unproven conditions fail closed before canonical project mutation; uncertain

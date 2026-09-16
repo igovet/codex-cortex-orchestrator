@@ -99,7 +99,7 @@ def _post_commit_launch_failure(receipt, operation, error):
         run_id = 'unavailable'
     return PostCommitLaunchFailure(
         'post_commit_launch_failure: fresh-store commit accepted; '
-        f'{operation} failed (receipt={run_id}); canonical .codex is preserved; '
+        f'{operation} failed (receipt={run_id}); canonical .cortex is preserved; '
         'no evaluation acceptance follows; use a new disposable workdir for the '
         'next attempt'
     )
@@ -200,7 +200,7 @@ def _phase2_control_failure_path():
 
 
 def _phase2_workdir_failure_path(workdir):
-    store=Path(workdir)/'.codex/cortex/cortex.sqlite3'
+    store=Path(workdir)/'.cortex/cortex.sqlite3'
     digest=hashlib.sha256(f'{workdir}\0{store}'.encode('utf-8')).hexdigest()
     return STATE/f'phase2-workdir-failure-{digest}.json'
 
@@ -213,7 +213,7 @@ def _phase2_control_transaction_path():
 
 
 def _phase2_workdir_transaction_path(workdir):
-    store=Path(workdir)/'.codex/cortex/cortex.sqlite3'
+    store=Path(workdir)/'.cortex/cortex.sqlite3'
     digest=hashlib.sha256(f'{workdir}\0{store}'.encode('utf-8')).hexdigest()
     return STATE/f'phase2-workdir-transaction-{digest}.json'
 
@@ -365,7 +365,7 @@ def _refuse_failed_phase2_launch(workdir):
 
 def _prepare_launch_transaction(workdir):
     """Durably journal both reuse identities before the atomic project commit."""
-    store=Path(workdir)/'.codex/cortex/cortex.sqlite3'
+    store=Path(workdir)/'.cortex/cortex.sqlite3'
     path_digest=hashlib.sha256(f'{workdir}\0{store}'.encode('utf-8')).hexdigest()
     record={
         'schema_version':LAUNCH_TRANSACTION_SCHEMA,
@@ -381,7 +381,7 @@ def _prepare_launch_transaction(workdir):
     # either write fails, the earlier prepared receipt remains fail-closed.
     for path in paths:_atomic_private_json(path,record)
     return {'record':record,'state_paths':paths,
-            'marker':Path(workdir)/'.codex/cortex/phase2-launch-transaction.json'}
+            'marker':Path(workdir)/'.cortex/phase2-launch-transaction.json'}
 
 
 def _update_launch_transaction(transaction, status, *, best_effort=False):
@@ -422,7 +422,7 @@ def _record_post_commit_failure(workdir, receipt, transaction, stage, error, ses
     control_path=_phase2_control_failure_path()
     paths=[control_path or STATE/f"phase2-launch-failure-{receipt['run_id']}.json",
            _phase2_workdir_failure_path(workdir),
-           Path(workdir)/'.codex/cortex/phase2-launch-failure.json']
+           Path(workdir)/'.cortex/phase2-launch-failure.json']
     for path in dict.fromkeys(paths):
         try:_atomic_private_json(path,failure)
         except OSError:persistence_failures+=1
@@ -693,7 +693,7 @@ def project_store(workdir):
     project=Path(workdir)
     if not project.is_absolute() or not project.is_dir() or project.resolve(strict=True)!=project:
         raise RuntimeError('workdir must be an absolute existing canonical project directory')
-    return project/'.codex/cortex/cortex.sqlite3'
+    return project/'.cortex/cortex.sqlite3'
 
 
 def evaluation_storage_directory(workdir):
@@ -707,8 +707,6 @@ def evaluation_storage_directory(workdir):
     """
     store=project_store(workdir)
     directory=store.parent
-    if not _validate_private_directory(directory.parent,'parent'):
-        raise RuntimeError('evaluation fresh-store parent is unavailable')
     if not _validate_private_directory(directory,'directory'):
         raise RuntimeError('evaluation fresh-store directory is unavailable')
     _absent_path(store,'target')
@@ -852,7 +850,7 @@ def prepare_evaluation_fresh_store(workdir, pre_commit_checks=None):
     if (not project.is_absolute() or not project.is_dir()
             or project.resolve(strict=True) != project):
         raise RuntimeError('evaluation fresh-store workdir must be canonical')
-    store = project/'.codex/cortex/cortex.sqlite3'
+    store = project/'.cortex/cortex.sqlite3'
     try:
         canonical_store = store.resolve(strict=False)
     except OSError as exc:
@@ -864,10 +862,8 @@ def prepare_evaluation_fresh_store(workdir, pre_commit_checks=None):
     _absent_path(store, 'target')
     # Complete all rejection-prone checks before creating project state.
     candidate_digest = _candidate_digest()
-    codex_path = project/'.codex'
-    codex_exists = _validate_private_directory(codex_path, 'parent')
-    cortex_path = codex_path/'cortex'
-    cortex_exists = _validate_private_directory(cortex_path, 'directory') if codex_exists else False
+    cortex_path = project/'.cortex'
+    cortex_exists = _validate_private_directory(cortex_path, 'directory')
     if cortex_exists:
         failure_marker=cortex_path/'phase2-launch-failure.json'
         try:failure_marker.lstat()
@@ -882,8 +878,6 @@ def prepare_evaluation_fresh_store(workdir, pre_commit_checks=None):
     if cortex_exists:
         parent_creation = 'already-present-private-parents'
     else:
-        if codex_exists:
-            raise RuntimeError('evaluation fresh-store parent already exists without a private cortex directory')
         try:
             project_device = os.stat(project).st_dev
             stage_root = Path(tempfile.gettempdir())
@@ -891,13 +885,10 @@ def prepare_evaluation_fresh_store(workdir, pre_commit_checks=None):
                 raise RuntimeError('evaluation fresh-store staging filesystem differs')
             stage = Path(tempfile.mkdtemp(prefix='.cortex-evaluation-', dir=stage_root))
             os.chmod(stage, 0o700)
-            staged_target = stage/'cortex'
-            staged_target.mkdir(mode=0o700)
-            os.chmod(staged_target, 0o700)
             if transaction is not None:
-                _atomic_private_json(staged_target/'phase2-launch-transaction.json',
+                _atomic_private_json(stage/'phase2-launch-transaction.json',
                                      {**transaction['record'],'status':'committing'})
-            install_target = codex_path
+            install_target = cortex_path
             _linux_noreplace(stage, install_target)
         except BaseException:
             # Never remove by pathname after a failed race.  The stage is
@@ -910,8 +901,8 @@ def prepare_evaluation_fresh_store(workdir, pre_commit_checks=None):
         run_id=(transaction['record']['transaction_id'] if transaction is not None
                 else uuid.uuid4().hex),
         host_class='cli',
-        project_relative_store='.codex/cortex/cortex.sqlite3',
-        project_relative_path='.codex/cortex/cortex.sqlite3',
+        project_relative_store='.cortex/cortex.sqlite3',
+        project_relative_path='.cortex/cortex.sqlite3',
         canonical_path_digest=path_digest,
         path_digest=path_digest,
         existed_before=False,
@@ -1638,7 +1629,7 @@ def start(args):
             'state_paths':[path for path in (_phase2_control_transaction_path(),
                                              _phase2_workdir_transaction_path(workdir))
                            if path is not None],
-            'marker':workdir/'.codex/cortex/phase2-launch-transaction.json',
+            'marker':workdir/'.cortex/phase2-launch-transaction.json',
         }
     try:
         if launch_transaction is not None:

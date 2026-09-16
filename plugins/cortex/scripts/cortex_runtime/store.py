@@ -183,12 +183,12 @@ def project_draft_directory(project_root,kind="report"):
 
 
 def project_task_directory(project_root):
-    """Create the MCP-owned published-document root below project .codex."""
+    """Create the MCP-owned published-document root below project .cortex."""
     project=Path(project_root)
     if not project.is_absolute() or not project.is_dir() or str(project.resolve())!=str(project):
         raise StoreError("invalid_project","project_root",str(project_root),"absolute existing canonical directory")
     current=project
-    for part in (".codex","cortex"):
+    for part in (".cortex",):
         current/=part
         try: current.mkdir(mode=0o700)
         except FileExistsError: pass

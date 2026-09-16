@@ -153,7 +153,7 @@ def test_split_preserves_all_selected_metadata_and_never_copies_markdown(tmp_pat
 
     result = split_project(source_dir, first, backup, access_stopped=True)
 
-    destination = first / ".codex" / "cortex" / "cortex.sqlite3"
+    destination = first / ".cortex" / "cortex.sqlite3"
     assert result == dict(project_root=str(first), destination=str(destination), backup=str(backup),
                           tasks=1, schema_version=11, application_id=APPLICATION_ID,
                           markdown_copied=False, source_modified=False)
@@ -189,7 +189,7 @@ def test_split_requires_acknowledgement_and_refuses_existing_outputs(tmp_path):
     backup = tmp_path / "backup.sqlite3"
     with pytest.raises(StoreError, match="split_requires_stopped_access"):
         split_project(source_dir, project, backup)
-    destination = project / ".codex" / "cortex" / "cortex.sqlite3"
+    destination = project / ".cortex" / "cortex.sqlite3"
     destination.write_bytes(b"existing destination"); destination.chmod(0o600)
     with pytest.raises(StoreError, match="split_destination_exists"):
         split_project(source_dir, project, backup, access_stopped=True)
@@ -207,7 +207,7 @@ def test_split_accepts_legacy_format11_without_new_project_index(tmp_path):
     with store.connection() as db:
         db.execute("DROP INDEX tasks_by_project")
     split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
-    destination = project / ".codex" / "cortex" / "cortex.sqlite3"
+    destination = project / ".cortex" / "cortex.sqlite3"
     with sqlite3.connect(destination) as db:
         assert db.execute("SELECT id FROM tasks").fetchall() == [(task,)]
         assert db.execute(
@@ -222,7 +222,7 @@ def test_split_exports_every_task_for_the_exact_project(tmp_path):
     second, _ = _create(store, project, "second")
     other = tmp_path / "other"; other.mkdir(); foreign, _ = _create(store, other, "foreign")
     result = split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
-    with sqlite3.connect(project / ".codex" / "cortex" / "cortex.sqlite3") as db:
+    with sqlite3.connect(project / ".cortex" / "cortex.sqlite3") as db:
         assert result["tasks"] == 2
         assert {row[0] for row in db.execute("SELECT id FROM tasks")} == {first, second}
         assert db.execute("SELECT 1 FROM tasks WHERE id=?", (foreign,)).fetchone() is None
@@ -242,7 +242,7 @@ def test_split_fails_closed_on_unknown_format11_tables_or_columns(tmp_path, alte
     with pytest.raises(StoreError, match="unsupported_storage"):
         split_project(source_dir, project, backup, access_stopped=True)
     assert not backup.exists()
-    assert not (project / ".codex" / "cortex" / "cortex.sqlite3").exists()
+    assert not (project / ".cortex" / "cortex.sqlite3").exists()
 
 
 def test_split_rejects_cross_project_logical_relation(tmp_path):
@@ -285,7 +285,7 @@ def test_split_holds_source_sqlite_and_destination_access_locks_through_publicat
                 contender.execute("BEGIN EXCLUSIVE")
         finally:
             contender.close()
-        lock_fd = os.open(project / ".codex" / "cortex" / ".access.lock", os.O_RDWR)
+        lock_fd = os.open(project / ".cortex" / ".access.lock", os.O_RDWR)
         try:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -308,7 +308,7 @@ def test_split_cleans_private_outputs_when_publication_fails(tmp_path, monkeypat
     monkeypatch.setattr(module, "_publish", lambda *_: (_ for _ in ()).throw(OSError("private")))
     with pytest.raises(StoreError, match="split_failed"):
         split_project(source_dir, project, backup, access_stopped=True)
-    destination_dir = project / ".codex" / "cortex"
+    destination_dir = project / ".cortex"
     # A complete verified backup remains useful after a later publication
     # failure. Only the incomplete destination temporary is discarded.
     assert backup.is_file() and stat_mode(backup) == 0o600

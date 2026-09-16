@@ -19,7 +19,7 @@ environment allowlist, model/effort contract, and timeout values. It then:
   disposable directories, overlaying only the supplied current candidate payload;
 - verifies the complete candidate and baseline payload digests and the exact
   stamped version embedded in each archived plugin manifest;
-- creates private `.codex/cortex` parents while requiring the SQLite store to be
+- creates private `.cortex` parents while requiring the SQLite store to be
   absent;
 - seals one common external live harness for both archived arms without changing
   either archived product tree; and
@@ -160,11 +160,11 @@ reuse guard. Any created session is stopped only by its returned tmux session ID
 A failed or incomplete transaction requires a new control and new disposable
 workdir; no `begin-cell` or send is authorized.
 
-The harness also supplies the exact fresh `<workdir>/.codex/cortex` directory as
+The harness also supplies the exact fresh `<workdir>/.cortex` directory as
 `CORTEX_DATA_DIR` to both launchers after removing any ambient value. This is a
 sealed compatibility input for the format-10 baseline, which predates native
 project-store resolution; the format-11 candidate independently resolves the same
-directory from validated thread/project state and ignores the variable. The
+`.cortex` directory from validated thread/project state and ignores the variable. The
 database remains absent until the selected runtime handles `create_task`. Invalid,
 redirected, non-private, or already populated project-store layouts fail closed.
 

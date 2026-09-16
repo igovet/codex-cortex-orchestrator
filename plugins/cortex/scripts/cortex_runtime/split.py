@@ -429,7 +429,7 @@ def split_project(source_directory, project_root, backup, *, access_stopped=Fals
     project_root = _canonical_directory(project_root, "invalid_project")
     source = source_directory / "cortex.sqlite3"; regular(source)
     destination_directory = _canonical_directory(
-        project_root / ".codex" / "cortex", "unsafe_destination", private=True
+        project_root / ".cortex", "unsafe_destination", private=True
     )
     destination = destination_directory / "cortex.sqlite3"
     backup = _fresh_path(backup, "split_backup_exists")

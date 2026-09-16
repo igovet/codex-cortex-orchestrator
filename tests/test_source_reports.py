@@ -55,7 +55,7 @@ def test_server_created_draft_contains_same_short_id_and_template(publication):
     assert draft['sha256']==hashlib.sha256(path.read_bytes()).hexdigest()
     assert '## Proposed work graph' in draft['markdown']
     assert path.parent==project/'.cortex/draft-reports'
-    assert not (project/'.codex/cortex/draft-reports').exists()
+    assert not (project/'.codex'/'cortex'/'draft-reports').exists()
     assert path.stat().st_mode&0o777==0o600
 
 
@@ -103,7 +103,7 @@ def test_report_over_16_mb_streams_verbatim_and_removes_project_draft(publicatio
     result=publish(store,base,draft)
     assert not source.exists() and result['size_bytes']==len(complete)
     assert result['sha256']==hashlib.sha256(complete).hexdigest()
-    target=project/'.codex/cortex'/task/(result['report_id']+'.md')
+    target=project/'.cortex'/task/(result['report_id']+'.md')
     assert target.read_bytes()==complete
     assert read_all(Store(store.directory),task,result['report_id']).encode()==complete
     with store.connection() as db:
@@ -121,7 +121,7 @@ def test_pipeline_edition_larger_than_mcp_request_limit_is_file_backed(publicati
     result=call_store(store,'write_report',args)
     assert not source.exists() and result['size_bytes']==len(complete)
     assert result['sha256']==hashlib.sha256(complete).hexdigest()
-    assert (project/'.codex/cortex'/task/'pipeline.md').read_bytes()==complete
+    assert (project/'.cortex'/task/'pipeline.md').read_bytes()==complete
     assert call_store(Store(store.directory),'write_report',args)==result|dict(replayed=True)
 
 
@@ -210,7 +210,7 @@ def test_failure_after_atomic_publish_rolls_back_task_file_and_keeps_draft(publi
     assert source.read_text().endswith('complete evidence')
     with store.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM reports WHERE task_id=? AND kind='report'",(task,)).fetchone()[0]==1
-    assert len(list((project/'.codex/cortex'/task).glob('r_*.md')))==1
+    assert len(list((project/'.cortex'/task).glob('r_*.md')))==1
 
 
 def test_copy_and_rename_stay_inside_destination_filesystem(publication,monkeypatch):
@@ -221,7 +221,7 @@ def test_copy_and_rename_stay_inside_destination_filesystem(publication,monkeypa
         calls.append((Path(old),Path(new))); return original(old,new)
     monkeypatch.setattr('cortex_runtime.store.os.replace',observe)
     result=publish(store,base,draft)
-    report_dir=project/'.codex/cortex'/task
+    report_dir=project/'.cortex'/task
     assert calls and all(old.parent==new.parent==report_dir for old,new in calls)
     assert (report_dir/(result['report_id']+'.md')).read_bytes()==complete
 
@@ -257,7 +257,7 @@ def test_crash_before_pipeline_commit_restores_backup(publication):
     process=multiprocessing.get_context('fork').Process(target=crash)
     process.start(); process.join(10)
     assert process.exitcode==73
-    target=project/'.codex/cortex'/task/'pipeline.md'
+    target=project/'.cortex'/task/'pipeline.md'
     assert target.read_bytes().startswith(new)
     restarted=Store(store.directory)
     call_store(restarted,'list_reports',dict(task_id=task))
@@ -274,7 +274,7 @@ def test_directory_sync_failure_after_pipeline_rename_rolls_back(publication,mon
     first,_,old=make_draft(store,task,'pipeline','Committed edition','first')
     publish(store,base,first,'first')
     second,source,new=make_draft(store,task,'pipeline','Next edition','second')
-    target=project/'.codex/cortex'/task/'pipeline.md'
+    target=project/'.cortex'/task/'pipeline.md'
     original=runtime.sync_directory
     failed=False
     def fail_once(path):

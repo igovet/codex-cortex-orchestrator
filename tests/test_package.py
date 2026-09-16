@@ -958,7 +958,7 @@ def test_live_helpers_derive_only_the_canonical_project_store(tmp_path):
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
     desktop=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'),run_name='observer')
     project=tmp_path.resolve(strict=True)
-    expected=project/'.codex/cortex/cortex.sqlite3'
+    expected=project/'.cortex/cortex.sqlite3'
     assert cli['project_store'](project)==expected
     assert desktop['project_store'](project)==expected
     assert not expected.exists()
@@ -978,12 +978,11 @@ def test_live_helpers_remove_ambient_external_store_override_from_child_environm
     assert 'CORTEX_DATA_DIR' not in env
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
     project=tmp_path/'project';project.mkdir()
-    (project/'.codex/cortex').mkdir(parents=True,mode=0o700)
-    (project/'.codex').chmod(0o700)
+    (project/'.cortex').mkdir(parents=True,mode=0o700)
     command=cli['launch_command'](tmp_path/'events',False,'gpt-5.6-luna','high',
                                   False,False,False,project.resolve())
     assignments=[part for part in command if part.startswith('CORTEX_DATA_DIR=')]
-    assert assignments == ['CORTEX_DATA_DIR='+str(project.resolve()/'.codex/cortex')]
+    assert assignments == ['CORTEX_DATA_DIR='+str(project.resolve()/'.cortex')]
     assert str(tmp_path/'external') not in command
 
 
@@ -991,18 +990,17 @@ def test_cli_evaluation_storage_directory_fails_closed_for_invalid_layouts(tmp_p
     import runpy
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
     project=tmp_path/'project';project.mkdir()
-    with pytest.raises(RuntimeError,match='parent is unavailable'):
+    with pytest.raises(RuntimeError,match='directory is unavailable'):
         cli['evaluation_storage_directory'](project.resolve())
     outside=tmp_path/'outside';outside.mkdir(mode=0o700)
-    (project/'.codex').symlink_to(outside,target_is_directory=True)
+    (project/'.cortex').symlink_to(outside,target_is_directory=True)
     with pytest.raises(RuntimeError,match='private directory'):
         cli['evaluation_storage_directory'](project.resolve())
-    (project/'.codex').unlink();(project/'.codex/cortex').mkdir(parents=True,mode=0o700)
-    (project/'.codex').chmod(0o755)
+    (project/'.cortex').unlink();(project/'.cortex').mkdir(mode=0o755)
     with pytest.raises(RuntimeError,match='owner-private'):
         cli['evaluation_storage_directory'](project.resolve())
-    (project/'.codex').chmod(0o700)
-    store=project/'.codex/cortex/cortex.sqlite3';store.write_bytes(b'occupied');store.chmod(0o600)
+    (project/'.cortex').chmod(0o700)
+    store=project/'.cortex/cortex.sqlite3';store.write_bytes(b'occupied');store.chmod(0o600)
     with pytest.raises(RuntimeError,match='target already exists'):
         cli['evaluation_storage_directory'](project.resolve())
 
@@ -1011,7 +1009,7 @@ def test_cli_smoke_resume_requires_same_existing_project_store_and_rejects_legac
     import runpy
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='transport')
     project=tmp_path.resolve(strict=True)
-    store=project/'.codex/cortex/cortex.sqlite3'
+    store=project/'.cortex/cortex.sqlite3'
     store.parent.mkdir(parents=True,mode=0o700)
     store.write_bytes(b'SQLite format 3\0');store.chmod(0o600)
     retained={'workdir':str(project),'store':str(store)}
@@ -1047,12 +1045,11 @@ def test_cli_evaluation_fresh_store_creates_private_parents_and_redacted_provena
     project.mkdir()
     receipt = cli['prepare_evaluation_fresh_store'](project)
     assert receipt['host_class'] == 'cli'
-    assert receipt['project_relative_store'] == '.codex/cortex/cortex.sqlite3'
+    assert receipt['project_relative_store'] == '.cortex/cortex.sqlite3'
     assert receipt['existed_before'] is False
     assert receipt['candidate_digest'] == hashlib.sha256(b'candidate').hexdigest()
-    assert not (project/'.codex/cortex/cortex.sqlite3').exists()
-    assert (project/'.codex').stat().st_mode & 0o077 == 0
-    assert (project/'.codex/cortex').stat().st_mode & 0o077 == 0
+    assert not (project/'.cortex/cortex.sqlite3').exists()
+    assert (project/'.cortex').stat().st_mode & 0o077 == 0
     events = tmp_path/'events'; events.mkdir(mode=0o700)
     cli['_write_evaluation_provenance'](events, receipt)
     rendered = next(events.glob('*.jsonl')).read_text()
@@ -1081,14 +1078,14 @@ def test_cli_evaluation_fresh_store_candidate_rejection_leaves_parents_absent(
     with pytest.raises(RuntimeError, match='candidate identity'):
         cli['prepare_evaluation_fresh_store'](project)
     assert not (project/'.codex').exists()
-    assert not (project/'.codex/cortex').exists()
+    assert not (project/'.cortex').exists()
 
 
 @pytest.mark.parametrize('kind', ['file', 'directory', 'symlink'])
 def test_cli_evaluation_fresh_store_rejects_existing_target_without_mutation(tmp_path, kind):
     import runpy
     project = (tmp_path/'project').resolve(); project.mkdir()
-    store = project/'.codex/cortex/cortex.sqlite3'; store.parent.mkdir(parents=True, mode=0o700)
+    store = project/'.cortex/cortex.sqlite3'; store.parent.mkdir(parents=True, mode=0o700)
     if kind == 'file': store.write_bytes(b'keep-me'); store.chmod(0o600)
     elif kind == 'directory': store.mkdir(mode=0o700)
     else: store.symlink_to(tmp_path/'missing-store')
@@ -1106,12 +1103,11 @@ def test_cli_evaluation_fresh_store_rejects_escape_and_nonprivate_parent(tmp_pat
     cli = runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'), run_name='transport')
     project = (tmp_path/'project').resolve(); project.mkdir()
     outside = tmp_path/'outside'; outside.mkdir(mode=0o700)
-    (project/'.codex').symlink_to(outside, target_is_directory=True)
+    (project/'.cortex').symlink_to(outside, target_is_directory=True)
     with pytest.raises(RuntimeError, match='escapes workdir'):
         cli['prepare_evaluation_fresh_store'](project)
-    (project/'.codex').unlink()
-    (project/'.codex').mkdir(mode=0o755)
-    (project/'.codex').chmod(0o755)
+    (project/'.cortex').unlink()
+    (project/'.cortex').mkdir(mode=0o755)
     with pytest.raises(RuntimeError, match='owner-private'):
         cli['prepare_evaluation_fresh_store'](project)
 
@@ -1198,7 +1194,7 @@ def test_cli_start_fresh_store_rejects_before_git_or_launch_mutation(tmp_path, m
     from types import SimpleNamespace
 
     project = (tmp_path/'project').resolve(); project.mkdir()
-    store = project/'.codex/cortex/cortex.sqlite3'; store.parent.mkdir(parents=True, mode=0o700)
+    store = project/'.cortex/cortex.sqlite3'; store.parent.mkdir(parents=True, mode=0o700)
     store.write_bytes(b'keep-me'); store.chmod(0o600)
     before = (store.read_bytes(), store.is_file(), store.is_symlink())
 
@@ -1396,11 +1392,11 @@ def test_cli_start_postcommit_failure_marks_store_unusable_consumes_control_and_
         cli['start'](args)
     message = str(caught.value)
     assert 'fresh-store commit accepted' in message
-    assert 'canonical .codex is preserved' in message
+    assert 'canonical .cortex is preserved' in message
     assert 'new disposable workdir' in message
-    assert (project/'.codex').is_dir()
-    assert not (project/'.codex/cortex/cortex.sqlite3').exists()
-    marker = json.loads((project/'.codex/cortex/phase2-launch-failure.json').read_text())
+    assert (project/'.cortex').is_dir()
+    assert not (project/'.cortex/cortex.sqlite3').exists()
+    marker = json.loads((project/'.cortex/phase2-launch-failure.json').read_text())
     control_receipt = json.loads((tmp_path/'cli-state'/f"phase2-control-failure-{'b' * 64}.json").read_text())
     assert marker == control_receipt
     assert marker['schema_version'] == 'phase2-cli-post-commit-launch-failure-v1'
@@ -1479,9 +1475,9 @@ def test_cli_start_normal_fresh_launch_uses_owned_session_identity(tmp_path, mon
     assert all(call[call.index('-t') + 1] == '%7'
                for call in calls if call[0] in {'pipe-pane', 'send-keys'})
     assert not any('cortex-markdown-smoke:0.0' in call for call in calls)
-    assert not (project/'.codex/cortex/phase2-launch-failure.json').exists()
+    assert not (project/'.cortex/phase2-launch-failure.json').exists()
     if fresh_store:
-        marker = json.loads((project/'.codex/cortex/phase2-launch-transaction.json').read_text())
+        marker = json.loads((project/'.cortex/phase2-launch-transaction.json').read_text())
         assert marker['status'] == 'launched'
     next_workdir = (tmp_path/'next-workdir').resolve(); next_workdir.mkdir()
     globals_['_refuse_failed_phase2_launch'](next_workdir)
@@ -1537,7 +1533,7 @@ def test_cli_postcommit_receipt_io_failure_remains_typed_and_refuses_control_and
 
     with pytest.raises(cli['PostCommitLaunchFailure'], match='post_commit_launch_failure'):
         cli['start'](args)
-    assert (project/'.codex/cortex/phase2-launch-transaction.json').is_file()
+    assert (project/'.cortex/phase2-launch-transaction.json').is_file()
     assert any(call[0] == 'new-session' and call[-2:] == ('/bin/sleep', '30')
                for call in tmux_calls)
     assert not any(call[0] == 'new-session' and call[-1] == '/bin/bash'
@@ -1577,7 +1573,7 @@ def test_cli_launch_transaction_crash_windows_are_fail_closed(tmp_path, monkeypa
         return transaction
     receipt = cli['prepare_evaluation_fresh_store'](after, prepared)
     assert receipt['run_id'] == transaction['record']['transaction_id']
-    marker = json.loads((after/'.codex/cortex/phase2-launch-transaction.json').read_text())
+    marker = json.loads((after/'.cortex/phase2-launch-transaction.json').read_text())
     assert marker['status'] == 'committing'
     with pytest.raises(RuntimeError, match='incomplete prior launch transaction'):
         globals_['_refuse_failed_phase2_launch'](tmp_path/'another')
@@ -1586,7 +1582,7 @@ def test_cli_launch_transaction_crash_windows_are_fail_closed(tmp_path, monkeypa
 def test_live_helper_stops_preserve_the_project_store(monkeypatch,tmp_path):
     import runpy
     project=tmp_path/'project';project.mkdir()
-    store=project/'.codex/cortex/cortex.sqlite3'
+    store=project/'.cortex/cortex.sqlite3'
     store.parent.mkdir(parents=True,mode=0o700)
     store.write_bytes(b'project database');store.chmod(0o600)
 
@@ -1671,16 +1667,16 @@ def test_desktop_call_outcome_classifies_mcp_errors_and_truncation():
     flags=helper['call_policy_flags']
     assert flags(
         'apply_patch',
-        'await tools.apply_patch(String.raw`*** Update File: /tmp/project/.cortex/draft.md`)',
+        'await tools.apply_patch(String.raw`*** Update File: /tmp/project/.cortex/draft-reports/draft.md`)',
         'planner','/tmp/project',
     )==[]
     assert flags(
         'apply_patch',
-        'await tools.apply_patch("*** Update File: /tmp/project/.cortex/draft.md\\n+Use `code`")',
+        'await tools.apply_patch("*** Update File: /tmp/project/.cortex/draft-reports/draft.md\\n+Use `code`")',
         'planner','/tmp/project',
     )==[]
     assert 'forbidden_cortex_draft_deletion' in flags(
-        'apply_patch','*** Delete File: /tmp/project/.cortex/draft.md','planner','/tmp/project'
+        'apply_patch','*** Delete File: /tmp/project/.cortex/draft-reports/draft.md','planner','/tmp/project'
     )
     history=helper['tool_error_history']([
         {'timestamp':'1','thread_id':'w','role':'planner','tool':'mcp__cortex__create_draft',

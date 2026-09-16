@@ -3,8 +3,15 @@
 - Keep exactly seven public storage operations and model-owned coordination.
 - Allocate typed drafts in the server, bind their short IDs to native caller threads,
   and publish only by ID; keep the same ID in the filename and Markdown marker.
-- Put editable drafts below project `.cortex`; reserve `.codex/cortex` for final
-  task files written by the MCP server because Codex protects project `.codex`.
+- Put the complete project-local Cortex store below `.cortex`, including the
+  database, immutable task files, pipeline, reports, `draft-reports`, and
+  `pipeline-drafts`; retain `<project>/.codex/cortex` only as a one-way migration
+  source and never as a continuing fallback.
+- Transfer recognized legacy database/report components only when destination
+  components are absent. Validate identities and lock both roots; conflicts or
+  unsafe/ambiguous state fail closed without overwriting either copy. Renames are
+  atomic per component, but a multi-entry transfer is not globally atomic and an
+  interruption can leave a partial state that then fails closed.
 - Keep one actual pipeline file, prepend editions, and preserve older text below.
 - Store bodies in project task files, only metadata and durable intents in SQLite.
 - Delegate the main technical work while allowing coordinator short answers, necessary

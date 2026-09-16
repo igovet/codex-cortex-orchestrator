@@ -43,7 +43,7 @@ configuration, and both payload identity fields.
 
 For a new CLI Phase 2 evaluation cell, add `--evaluation-fresh-store` to the
 start command. It canonicalizes the project, creates only owner-private
-`.codex/cortex` parent directories, rejects any existing/redirected/non-private
+`.cortex` parent directories, rejects any existing/redirected/non-private
 `cortex.sqlite3`, and leaves the database absent for normal runtime
 initialization. It emits only a privacy-safe launcher receipt (opaque run ID,
 project-relative store path and digests); it never deletes, truncates, migrates,

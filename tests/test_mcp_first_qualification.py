@@ -1465,7 +1465,7 @@ def test_declared_public_leaves_accept_stable_cache_without_relaxing_failure_saf
         command(stable / "skills/orchestrator"),
         json.dumps({"cmd": f"cat {registry}"}),
         json.dumps({"cmd": f"sed -n '1,$p' {stable_reference} && cat {registry}"}),
-        json.dumps({"cmd": "cat .codex/cortex/private"}),
+        json.dumps({"cmd": "cat .cortex/private"}),
     ):
         assert not declared("exec_command", unsafe, coordinator_only=True)
         assert "forbidden_plugin_or_cache_access" in OBSERVER["call_policy_flags"](

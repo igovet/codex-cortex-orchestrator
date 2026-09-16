@@ -82,11 +82,11 @@ Check advertised tools first; use `list_projects`, `search_graph`, `trace_path`,
 `get_code_snippet` as applicable, confirm consequential results in source, and state a
 concrete limitation plus bounded fallback when unavailable or insufficient.
 
-Private Cortex evidence has a strict boundary: never shell, probe, search, or open
-`.codex/cortex/`. Read only assigned exact-ID
-immutable reports through bounded `mcp__cortex__read_report`, a page of at most
-4,000 characters (not a total context limit), with no catalogue or substitute path.
-Missing evidence is a stated gap/impact; edit only the server-issued unpublished draft.
+Private Cortex evidence has a strict boundary: never access `.cortex/cortex.sqlite3`
+or published `.cortex/t_*` directly. Read assigned exact-ID reports through bounded
+`mcp__cortex__read_report`, a page of at most
+4,000 characters (not a total context limit), with no catalogue/substitute path.
+Missing evidence is a stated gap/impact; edit only the server-issued draft path.
 Pass only the exact published `r_` report ID to `read_report` (never `b_`/`d_`
 receipts or governance IDs). After a failed draft patch, inspect the draft and
 use fresh exact context; never replay the identical `apply_patch` call.

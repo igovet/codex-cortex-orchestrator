@@ -13,7 +13,7 @@ from cortex_runtime.store import Store
 
 @pytest.fixture
 def bound(tmp_path):
-    store = Store(tmp_path / '.codex/cortex', project_root=tmp_path)
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
     result = store.call('create_task', {'project_root': str(tmp_path), 'request_key': 'create'},
                         'parent', original_request='A bounded product change')
     return store, tmp_path, result

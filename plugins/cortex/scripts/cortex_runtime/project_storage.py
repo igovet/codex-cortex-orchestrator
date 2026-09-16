@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from contextlib import closing
+import fcntl
 import os
 from pathlib import Path
+import re
 import sqlite3
+import stat
 import uuid
 
 from .contracts import StoreError
@@ -25,7 +28,98 @@ def canonical_project(value):
 
 def project_store_directory(project_root):
     """Compute the only supported location; neither create nor search directories."""
-    return Path(canonical_project(project_root)) / ".codex" / "cortex"
+    return Path(canonical_project(project_root)) / ".cortex"
+
+
+def _private_existing_directory(path, error="unsafe_storage"):
+    """Validate one existing owner-private directory without following links."""
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077):
+        raise StoreError(error)
+    return path
+
+
+def _private_tree(path):
+    """Validate an opaque published-task tree before an atomic directory move."""
+    for root, directories, files in os.walk(path, topdown=True, followlinks=False):
+        root_info = Path(root).lstat()
+        if (stat.S_ISLNK(root_info.st_mode) or root_info.st_uid != os.getuid()
+                or stat.S_IMODE(root_info.st_mode) & 0o077):
+            raise StoreError("unsafe_storage")
+        for name in directories + files:
+            info = (Path(root) / name).lstat()
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+                raise StoreError("unsafe_storage")
+            if stat.S_ISDIR(info.st_mode):
+                if stat.S_IMODE(info.st_mode) & 0o077:
+                    raise StoreError("unsafe_storage")
+            elif (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                  or stat.S_IMODE(info.st_mode) & 0o077):
+                raise StoreError("unsafe_storage")
+
+
+def migrate_legacy_project_storage(project_root):
+    """Move recognized legacy project storage once; never read it as a fallback."""
+    project = Path(canonical_project(project_root))
+    source = project / ".codex" / "cortex"
+    if _private_existing_directory(source) is None:
+        return False
+    from .store import private_directory, regular, sync_directory
+    database_names = (
+        "cortex.sqlite3", "cortex.sqlite3-wal", "cortex.sqlite3-shm",
+        "cortex.sqlite3-journal",
+    )
+    source_database = [source / name for name in database_names
+                       if (source / name).exists() or (source / name).is_symlink()]
+    source_tasks = sorted(path for path in source.iterdir()
+                          if re.fullmatch(r"t_[0-9a-f]{12}", path.name))
+    if not source_database and not source_tasks:
+        return False
+    destination = private_directory(project / ".cortex")
+    source_lock_path = source / ".access.lock"
+    destination_lock_path = destination / ".access.lock"
+    source_lock = os.open(source_lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    destination_lock = os.open(destination_lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    moved = False
+    try:
+        regular(source_lock_path); regular(destination_lock_path)
+        try:
+            fcntl.flock(source_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(destination_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            raise StoreError("storage_busy") from None
+        destination_database = [destination / name for name in database_names
+                                if (destination / name).exists() or (destination / name).is_symlink()]
+        for path in source_database:
+            regular(path)
+        for path in destination_database:
+            regular(path)
+        for path in source_tasks:
+            if not path.is_dir() or path.is_symlink():
+                raise StoreError("unsafe_storage")
+            _private_tree(path)
+        conflicts = destination_database if source_database else []
+        conflicts += [destination / path.name for path in source_tasks
+                      if (destination / path.name).exists() or (destination / path.name).is_symlink()]
+        if conflicts:
+            raise StoreError("legacy_storage_conflict")
+        for path in source_database:
+            os.replace(path, destination / path.name)
+            moved = True
+        for path in source_tasks:
+            os.replace(path, destination / path.name)
+            moved = True
+        if moved:
+            sync_directory(source); sync_directory(destination)
+        return moved
+    finally:
+        os.close(destination_lock)
+        os.close(source_lock)
 
 
 def native_project(thread_id, parent_thread_id=None, *, check_parent=True):

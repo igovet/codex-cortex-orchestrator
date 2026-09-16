@@ -14,7 +14,8 @@ import shlex
 from pathlib import Path
 
 
-PRIVATE_ROOT_PARTS = (".codex", "cortex")
+PRIVATE_ROOT_PARTS = (".cortex",)
+EDITABLE_DRAFT_DIRECTORIES = frozenset({"draft-reports", "pipeline-drafts"})
 SHELL_TOOLS = frozenset({"Bash", "exec_command", "write_stdin", "terminal"})
 FILE_TOOLS = frozenset({"read_file", "write_file"})
 BOUNDARY_TOOLS = SHELL_TOOLS | FILE_TOOLS | frozenset({"apply_patch"})
@@ -48,7 +49,7 @@ OPERATION_CAPABILITIES = {
     "apply_patch": CAPABILITY_TASK_WRITE,
 }
 WORKER_CAPABILITIES = frozenset({CAPABILITY_EXECUTE, CAPABILITY_OBSERVE, CAPABILITY_TASK_WRITE})
-PRIVATE_MARKER = re.compile(r"(?<![A-Za-z0-9_.-])\.codex[\\/]cortex(?=$|[\\/\\s\"'`;|&<>()])")
+PRIVATE_MARKER = re.compile(r"(?<![A-Za-z0-9_.-])\.cortex(?=$|[\\/\\s\"'`;|&<>()])")
 PRIVATE_HOST_MARKER = re.compile(
     r"(?:[\\/]\.codex[\\/]plugins[\\/]|[\\/]plugins[\\/]cache[\\/]|"
     r"[\\/]\.cortex-dev[\\/]candidates[\\/]|[\\/]\.codex[\\/]agents[\\/]|"
@@ -204,7 +205,7 @@ def _private_root(project_root: str) -> Path:
 
 
 def _under_private(value: str, *, cwd: str, project_root: str) -> bool:
-    """Check lexical and resolved forms without opening or retaining a file."""
+    """Check immutable/metadata paths while leaving registered draft roots editable."""
     if not isinstance(value, str) or not value or "\x00" in value:
         return False
     root = _private_root(project_root)
@@ -217,7 +218,12 @@ def _under_private(value: str, *, cwd: str, project_root: str) -> bool:
         resolved = candidate.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return bool(PRIVATE_MARKER.search(value.replace("\\", "/")))
-    return resolved == root or root in resolved.parents
+    if resolved == root:
+        return True
+    if root not in resolved.parents:
+        return False
+    relative = resolved.relative_to(root)
+    return not relative.parts or relative.parts[0] not in EDITABLE_DRAFT_DIRECTORIES
 
 
 def _tokens(command: str):
@@ -288,13 +294,15 @@ def _command_hits_private(command: str, *, cwd: str, project_root: str) -> bool:
         return True
     if tokens[0] in {"echo", "printf"}:
         return False
-    if _static_search_pattern(tokens, ".codex/cortex", cwd=cwd, project_root=project_root):
+    if _static_search_pattern(tokens, ".cortex", cwd=cwd, project_root=project_root):
         # A marker used as the search pattern is harmless when all path
         # operands remain outside the private root.
         return False
-    # Any remaining marker-bearing command is a direct reader/probe or opaque
-    # code. Deny before dispatch rather than trying to evaluate the shell.
-    return True
+    # Direct access to a registered-draft subtree remains available for the
+    # existing exact-owner checks; every metadata or published-task path is
+    # denied before dispatch.
+    return any(_under_private(token, cwd=cwd, project_root=project_root)
+               for token in tokens if token not in CONTROL and not token.startswith("-"))
 
 
 def _patch_paths(command: str):

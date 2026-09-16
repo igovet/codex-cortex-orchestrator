@@ -36,7 +36,7 @@ def tool(name, description, properties, required, read=False):
     properties.setdefault("redact_values",dict(type="array",maxItems=32,uniqueItems=True,
         items=string("Exact credential value only; never requirements, restrictions or ordinary prose.",16_000),
         description="Optional literal credentials to redact in newly captured native user messages. Omit otherwise; all other text is preserved."))
-    description += " Coordinator operations attempt pending native source capture and return explicit completeness; unavailable new sources do not deny archived reads. An accepted mutation delivery replay skips capture, preserves the current binding state rather than reapplying historical state, and leaves pending source for the next fresh coordinator operation. Each result includes the host-verified binding receipt and source revision. Workers never capture another thread input."
+    description += " Before opening a project store, the runtime performs a one-way fail-closed transfer of any recognized legacy <project_root>/.codex/cortex database and published task tree into <project_root>/.cortex when the corresponding destination content is absent. Conflicts or unsafe storage fail without compatibility reads, duplicate writes, or fallback routing. Coordinator operations attempt pending native source capture and return explicit completeness; unavailable new sources do not deny archived reads. An accepted mutation delivery replay skips capture, preserves the current binding state rather than reapplying historical state, and leaves pending source for the next fresh coordinator operation. Each result includes the host-verified binding receipt and source revision. Workers never capture another thread input."
     return dict(name=name, title=name.replace("_", " ").capitalize(), description=description,
                 inputSchema=dict(type="object", properties=properties, required=required,
                                  additionalProperties=False),
@@ -49,8 +49,8 @@ TOOLS = [
          "Create one durable task for the current coordinator thread using host MCP metadata. "
          "The server stores the canonical project root, creates and makes owner-writable "
          "<project_root>/.cortex/draft-reports and <project_root>/.cortex/pipeline-drafts directories, and saves the original request as an "
-         "immutable Markdown report in <project_root>/.codex/cortex/<task>. SQLite metadata "
-         "lives only in <project_root>/.codex/cortex/cortex.sqlite3, selected from the validated native thread/parent project. No global database or environment path fallback is used. "
+         "immutable Markdown report in <project_root>/.cortex/<task>. SQLite metadata "
+         "lives only in <project_root>/.cortex/cortex.sqlite3, selected from the validated native thread/parent project. No global database or environment path fallback is used. "
          "Reads the current native turn\'s typed UserMessage receipt from the current CODEX_HOME host state, scoped to the exact host thread and canonical project. The model does not copy or supply the original task text. Fails closed if that source is unavailable; never substitute a summary. Returns its immutable report reference and source digest. Child threads inherit their registered "
          "parent task and cannot create tasks. Never pass task or thread IDs.", {
              "state": string("Explicitly selected operating state; default cortex when creating an explicitly requested Cortex task. normal suspends automatic capture and hints.",6,enum=["cortex","normal"]),
@@ -113,7 +113,7 @@ TOOLS = [
          "completely in English with native file tools, then send its short draft_id and all required publication metadata. The "
          "draft must belong to this exact native thread and remain at its server-issued path. The server "
          "streams the complete file without a report-size limit, validates UTF-8, hashes and "
-         "atomically publishes it under <project_root>/.codex/cortex/<task>/<report>.md, "
+         "atomically publishes it under <project_root>/.cortex/<task>/<report>.md, "
          "commits metadata, then deletes the source draft. Never put Markdown bodies or shell interpolation in this MCP request; native file tools carry draft content. Metadata arrays use the advertised item schemas (for artifacts, each item has exactly `reference` and `version`). A pipeline draft's bytes are "
          "prepended to the task's single pipeline.md and earlier editions "
          "remain below. Open authored reports with a decision brief that fits within the first 4000 Unicode characters including marker and title: conclusion, decisive observations, checked/open requirements, contradictions, limits, disconfirming evidence and next action. This is Markdown guidance, not server semantic validation. Publication ends this assignment; a later explicit native follow-up may produce another immutable report from the same thread. Before publication, stop every command session opened for this "

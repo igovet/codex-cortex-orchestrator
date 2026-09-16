@@ -693,7 +693,7 @@ def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tm
         f"sed -n '1,240p' {skill} > /tmp/skill-copy",
         f"find {skill.parents[3]} -name SKILL.md",
         f"cat {skill.parents[2]}/agents/general.toml && sed -n '1,240p' {skill}",
-        f"sed -n '1,240p' {skill} && sed -n '1,120p' .codex/cortex/t_1/pipeline.md",
+        f"sed -n '1,240p' {skill} && sed -n '1,120p' .cortex/t_1/pipeline.md",
         f"sed -n '1,240p' {skill} && cat solution.py",
         f"sed -n '1,240p' {skill} && touch {tmp_path/'changed'}",
         f"printf '%s\\n' \"$(pwd)\" && sed -n '1,240p' {skill}",
@@ -719,7 +719,7 @@ def test_skill_read_accepts_newline_reference_batches_but_rejects_mixed_or_quote
         OBSERVER['call_policy_flags']('exec_command',arguments,'general','/fixture'))
 
     mixed=(f"sed -n '1,240p' {skill}\n"
-           "cat .codex/cortex/t_1/pipeline.md")
+           "cat .cortex/t_1/pipeline.md")
     mixed_arguments=json.dumps({'cmd':mixed})
     assert not check('exec_command',mixed_arguments)
     assert 'forbidden_plugin_or_cache_access' in set(
@@ -760,7 +760,7 @@ def test_mixed_skill_read_and_project_discovery_has_scoped_cache_policy(tmp_path
     for command in (
         f"sed -n '1,240p' {skill} && cat {skill.parents[2]}/agents/general.toml",
         f"sed -n '1,240p' {skill}; cat {skill.parents[2]}/agents/general.toml",
-        f"sed -n '1,240p' {skill} && cat .codex/cortex/t_1/pipeline.md",
+        f"sed -n '1,240p' {skill} && cat .cortex/t_1/pipeline.md",
         f"sed -n '1,240p' {skill} && python3 -c \"open('{skill}').read()\"",
         f"sed -n '1,240p' {skill} && printf '%s' \"$(cat '{skill}')\"",
         f"sed -n '1,240p' {skill} && {skill.parents[2]}/scripts/cortex.py",

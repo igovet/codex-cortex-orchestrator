@@ -893,14 +893,14 @@ must never overwrite the sealed pre-stop calls or events files. Source revisions
 are monotonic only within the same task/thread: a fresh child begins its own local
 sequence and is never numerically compared with its coordinator parent. CLI smoke
 runs derive the store from the canonical workdir at
-`PATH/.codex/cortex/cortex.sqlite3`. Resume with the same workdir and
+`PATH/.cortex/cortex.sqlite3`. Resume with the same workdir and
 `--resume-last`; it reuses that exact project-local store and rejects a missing or
 mismatched store. `stop` preserves the store for resume and removes only the
 session and observation streams. Confirm the existing task, selective report
 recovery and no replacement task creation.
 For a new evaluation start, pass `--evaluation-fresh-store`. This explicit Linux-only
 CLI guard requires a supported architecture/syscall mapping and same-filesystem
-staging, builds the complete owner-private `.codex/cortex` hierarchy in an external
+staging, builds the complete owner-private `.cortex` hierarchy in an external
 same-filesystem stage, and installs it once as the project `.codex` destination with
 no-replace semantics. Unsupported, unavailable, raced, or otherwise unproven
 conditions fail closed before canonical project mutation; uncertain loser stages
@@ -1215,6 +1215,7 @@ map to these unit regressions:
 | Scenario | Source-backed unit coverage |
 |---|---|
 | Independent projects and same-project concurrency | [`test_project_database_locks_are_independent_across_processes`](../../tests/test_project_storage.py) proves independent writes while another project is locked; `test_multiple_tasks_in_one_project_remain_consistent` verifies same-project task bindings and foreign keys. |
+| One-way legacy transfer and conflicts | [`test_one_way_legacy_storage_transfer_moves_only_absent_components`](../../tests/test_project_storage.py) covers database-only, reports-only and complete legacy trees; [`test_one_way_legacy_storage_transfer_rejects_conflicts_without_moving`](../../tests/test_project_storage.py) proves conflicting source/destination content remains unchanged; [`test_server_reopens_a_complete_legacy_project_tree_after_transfer`](../../tests/test_project_storage.py) verifies reopen from the unified root. |
 | Native project routing and recovery | [`test_child_requires_indexed_parent_and_rejects_cross_project_or_edge_conflicts`](../../tests/test_project_storage.py), `test_restart_routes_from_index_without_rollout_and_preserves_archive` and `test_missing_or_corrupt_native_index_has_no_global_or_cwd_fallback` cover routing limits. |
 | Safe rejection and retention | [`test_rejected_database_keeps_bytes_and_journal_mode`](../../tests/test_project_storage.py) preserves incompatible files; [`test_retention_command_uses_only_selected_project_store`](../../tests/test_retention.py) leaves a legacy global store unchanged. |
 | Explicit archive split | [`test_split_preserves_all_selected_metadata_and_never_copies_markdown`](../../tests/test_project_split.py) checks selected rows and backups; `test_split_holds_source_sqlite_and_destination_access_locks_through_publication` verifies full lock lifetime. |

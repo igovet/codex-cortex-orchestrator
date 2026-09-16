@@ -69,7 +69,7 @@ def test_root_child_nested_restart_and_automatic_pipeline(tmp_path):
     restarted=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
     assert ok(call(restarted,'read_report',{'report_id':worker['report_id']},nested,child))['markdown'].endswith('Complete evidence.')
     assert ok(call(restarted,'read_report',{},root))['report_id']==pipeline['report_id']
-    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
+    with Store(tmp_path/'.cortex',project_root=tmp_path).connection() as db:
         assert db.execute('SELECT COUNT(DISTINCT task_id) FROM thread_bindings').fetchone()[0]==1
         assert db.execute('SELECT COUNT(*) FROM thread_bindings').fetchone()[0]==3
 
@@ -87,7 +87,7 @@ def test_same_worker_new_assignment_preserves_report_and_pipeline_after_restart(
     assert ok(call(restarted,'read_report',{},root))['report_id']==pipeline['report_id']
     assert ok(call(restarted,'read_report',{'report_id':second['report_id']},root))['sha256']==second['sha256']
     # Storage retains ownership; it does not implement an assignment approval gate.
-    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
+    with Store(tmp_path/'.cortex',project_root=tmp_path).connection() as db:
         assert db.execute('SELECT COUNT(*) FROM thread_bindings').fetchone()[0]==2
 
 
@@ -143,7 +143,7 @@ def test_only_coordinator_can_create_pipeline_draft_workers_publish_reports(tmp_
 
     pipeline=ok(call(server,'create_draft',dict(template='pipeline',request_key='coordinator-pipeline'),root))
     assert pipeline['kind']=='pipeline'
-    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
+    with Store(tmp_path/'.cortex',project_root=tmp_path).connection() as db:
         before=db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
 
     denied=call(server,'create_draft',dict(template='pipeline',request_key='worker-pipeline'),worker,root)
@@ -151,7 +151,7 @@ def test_only_coordinator_can_create_pipeline_draft_workers_publish_reports(tmp_
     denied_body=denied['content'][0]['text']
     assert 'pipeline' in denied_body and 'no draft was created' in denied_body
     assert ok(call(server,'list_reports',{},worker,root))['own_drafts']==[]
-    with Store(tmp_path/'.codex/cortex',project_root=tmp_path).connection() as db:
+    with Store(tmp_path/'.cortex',project_root=tmp_path).connection() as db:
         assert db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]==before
 
     published=[]
@@ -229,7 +229,7 @@ def test_internal_task_identifier_is_redacted_from_tool_errors(tmp_path):
     with server.store.connection() as db:
         task=db.execute('SELECT task_id FROM thread_bindings WHERE thread_id=?',(thread,)).fetchone()[0]
         filename=db.execute('SELECT filename FROM reports WHERE id=?',(original['original_report_id'],)).fetchone()[0]
-    report=tmp_path/'.codex/cortex'/task/filename
+    report=tmp_path/'.cortex'/task/filename
     os.chmod(report,0o644)
     result=call(server,'read_report',dict(report_id=original['original_report_id']),thread)
     body=result['content'][0]['text']
@@ -255,12 +255,12 @@ def test_clear_removes_all_bindings_receipts_and_protects_native_threads(tmp_pat
     server=Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)));one,two,child=tid(),tid(),tid()
     create(server,tmp_path,one);create(server,tmp_path,two)
     ok(call(server,'list_reports',{},child,one))
-    store=Store(tmp_path/'.codex/cortex',project_root=tmp_path)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
     with store.connection() as db:
         tasks={row['thread_id']:row['task_id'] for row in db.execute('SELECT * FROM thread_bindings')}
     result=clear_tasks(store,str(tmp_path),0,[child],datetime.now(timezone.utc)+timedelta(days=1))
     assert result['deleted_tasks']==1 and result['skipped_protected']==1
-    assert not (tmp_path/'.codex/cortex'/tasks[two]).exists()
+    assert not (tmp_path/'.cortex'/tasks[two]).exists()
     error(call(server,'list_reports',{},two),'task_not_bound')
     ok(call(server,'list_reports',{},one))
     with store.connection() as db:

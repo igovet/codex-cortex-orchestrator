@@ -41,7 +41,7 @@ def test_coordinator_python_reconciliation_is_closed_read_only_grammar():
         program+'; Path("RESULT.md").write_bytes(b"oops")',
         program.replace('"RESULT.md"','"../RESULT.md"'),
         program.replace('"RESULT.md"','"/tmp/RESULT.md"'),
-        program.replace('"RESULT.md"','".codex/cortex/private"'),
+        program.replace('"RESULT.md"','".cortex/private"'),
         'import os; '+program,
         'from pathlib import Path; print(__import__("os").system("id"))',
         'from pathlib import Path; Path=print; print(Path("RESULT.md"))',
@@ -864,7 +864,7 @@ def test_python_audit_comparison_marker_is_static_but_access_remains_forbidden(t
 
 def test_worker_private_cortex_cache_is_blocked_but_bounded_report_read_is_allowed(tmp_path):
     helper=OBSERVER
-    private_path=str(tmp_path/'.codex/cortex/t_1/pipeline.md')
+    private_path=str(tmp_path/'.cortex/t_1/pipeline.md')
     shell=json.dumps({'cmd':'sed -n 1,40p '+private_path})
     metadata=helper['path_policy_metadata']('exec_command',shell,'general',str(tmp_path))
     assert metadata['path_target_class']=='cortex_internal'
@@ -909,7 +909,7 @@ def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
         violations=helper['call_policy_violations']([row])
         return metadata,flags,violations
 
-    pattern,flags,violations=audit("rg -n '.codex/cortex/' scripts")
+    pattern,flags,violations=audit("rg -n '.cortex/' scripts")
     assert pattern['path_target_class']=='approved_instruction_or_static_mention'
     assert pattern['path_access_kind']=='static_mention'
     assert pattern['path_policy_provenance']=='observer_literal_marker'
@@ -918,14 +918,14 @@ def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
     assert helper['orchestration_policy_violations'](violations)==[]
 
     for glob in ('*','?','[abc]','{private,public}'):
-        literal,flags,violations=audit(f"rg -n .codex/cortex/{glob} scripts")
+        literal,flags,violations=audit(f"rg -n .cortex/{glob} scripts")
         assert literal['path_target_class']=='cortex_internal'
         assert literal['path_policy_decision']=='unauthorized_access'
         assert flags==['forbidden_plugin_or_cache_access']
         assert helper['orchestration_policy_violations'](violations)
 
     for glob in ('*','?','[abc]','{private,public}'):
-        quoted,flags,violations=audit(f"rg -n '.codex/cortex/{glob}' scripts")
+        quoted,flags,violations=audit(f"rg -n '.cortex/{glob}' scripts")
         assert quoted['path_target_class']=='approved_instruction_or_static_mention'
         assert quoted['path_access_kind']=='static_mention'
         assert quoted['path_policy_decision']=='allowed'
@@ -934,14 +934,14 @@ def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
 
     # Double-quoted rg/grep patterns are equally static; only unquoted
     # expansion/glob operands are private-target findings.
-    double_quoted,flags,violations=audit('rg --files -g "!**/.codex/cortex/**" | sed -n "1,120p"')
+    double_quoted,flags,violations=audit('rg --files -g "!**/.cortex/**" | sed -n "1,120p"')
     assert double_quoted['path_target_class']=='approved_instruction_or_static_mention'
     assert double_quoted['path_access_kind']=='static_mention'
     assert double_quoted['path_policy_decision']=='allowed'
     assert flags==[]
     assert helper['orchestration_policy_violations'](violations)==[]
 
-    target,flags,violations=audit("grep -R -n needle .codex/cortex/private")
+    target,flags,violations=audit("grep -R -n needle .cortex/private")
     assert target['path_target_class']=='cortex_internal'
     assert target['path_access_kind']=='unauthorized_read_or_probe'
     assert target['path_policy_decision']=='unauthorized_access'
@@ -949,13 +949,13 @@ def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
     assert helper['orchestration_policy_violations'](violations)
 
 
-    ambiguous,flags,violations=audit('rg -n "$PATTERN .codex/cortex/" scripts')
+    ambiguous,flags,violations=audit('rg -n "$PATTERN .cortex/" scripts')
     assert ambiguous['path_target_class']=='cortex_internal'
     assert ambiguous['path_policy_decision']=='unauthorized_access'
     assert flags==['forbidden_plugin_or_cache_access']
     assert helper['orchestration_policy_violations'](violations)
 
-    direct,flags,violations=audit('cat .codex/cortex/private')
+    direct,flags,violations=audit('cat .cortex/private')
     assert direct['path_target_class']=='cortex_internal'
     assert direct['path_policy_decision']=='unauthorized_access'
     assert flags==['forbidden_plugin_or_cache_access']
@@ -964,8 +964,8 @@ def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
     # A separated option value is a filesystem operand too; it must not be
     # mistaken for the search pattern or silently dropped from path analysis.
     for command in (
-        'grep --exclude-from .codex/cortex/private needle scripts',
-        'grep --exclude-from=.codex/cortex/private needle scripts',
+        'grep --exclude-from .cortex/private needle scripts',
+        'grep --exclude-from=.cortex/private needle scripts',
     ):
         excluded_file,flags,violations=audit(command)
         assert excluded_file['path_target_class']=='cortex_internal'
@@ -977,14 +977,14 @@ def test_rg_grep_path_policy_is_command_aware_end_to_end(tmp_path):
 def test_pipeline_private_exclusion_is_not_a_private_read_but_private_target_is(tmp_path):
     helper=OBSERVER
 
-    excluded="pwd && rg --files -g '!**/.codex/cortex/**' | sed -n '1,120p'"
+    excluded="pwd && rg --files -g '!**/.cortex/**' | sed -n '1,120p'"
     arguments=json.dumps({'cmd':excluded})
     metadata=helper['path_policy_metadata']('exec_command',arguments,'explorer',str(tmp_path))
     assert metadata['path_target_class']=='approved_instruction_or_static_mention'
     assert metadata['path_access_kind']=='static_mention'
     assert helper['call_policy_flags']('exec_command',arguments,'explorer',str(tmp_path))==[]
 
-    private="cat .codex/cortex/private | sed -n '1,20p'"
+    private="cat .cortex/private | sed -n '1,20p'"
     private_arguments=json.dumps({'cmd':private})
     private_metadata=helper['path_policy_metadata']('exec_command',private_arguments,
                                                      'explorer',str(tmp_path))

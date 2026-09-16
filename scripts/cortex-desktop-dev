@@ -180,7 +180,7 @@ def project_store(workdir):
     project=Path(workdir)
     if not project.is_absolute() or not project.is_dir() or project.resolve(strict=True)!=project:
         raise RuntimeError('workdir must be an absolute existing canonical project directory')
-    return project/'.codex/cortex/cortex.sqlite3'
+    return project/'.cortex/cortex.sqlite3'
 
 
 def ensure_git_workspace(workdir):
@@ -1481,7 +1481,7 @@ def active_coordinator_skill_read(tool,arguments):
 
 
 PRIVATE_CORTEX_MARKER=re.compile(
-    r'(?<![A-Za-z0-9_.-])\.codex/cortex(?:/|(?=$|[\s"\'`]))'
+    r'(?<![A-Za-z0-9_.-])\.cortex(?:/(?!draft-reports(?:/|$)|pipeline-drafts(?:/|$))|(?=$|[\s"\'`]))'
 )
 
 
@@ -1493,7 +1493,7 @@ def private_cortex_cache_mentioned(value):
 PATH_POLICY_MARKERS={
     'plugin_or_cache':('/.codex/plugins/','/plugins/cache/','/.agents/plugins/',
                        '/.cortex-dev/candidates/','/.codex/agents/','CODEX_HOME/plugins/'),
-    'cortex_internal':('.codex/cortex/',),
+    'cortex_internal':('.cortex/cortex.sqlite3','.cortex/t_'),
 }
 
 
@@ -1539,7 +1539,7 @@ def _rg_grep_marker_operand_indexes(parts):
 
     ``None`` means the command shape is ambiguous.  A set distinguishes actual
     path operands from patterns, globs and regular expressions; this keeps a
-    literal ``.codex/cortex/`` search marker from becoming an access finding.
+    literal ``.cortex/`` search marker from becoming an access finding.
     """
     if not parts or parts[0] not in {'rg','grep'}:
         return None
@@ -1592,7 +1592,7 @@ def _rg_grep_marker_operand_indexes(parts):
 def _marker_policy_segments(command):
     """Analyze simple pipelines without treating quoted search globs as paths.
 
-    The worker may use ``rg --files -g '!**/.codex/cortex/**'`` to exclude
+    The worker may use ``rg --files -g '!**/.cortex/**'`` to exclude
     private task storage from project discovery.  The older whole-command
     fallback treated the pipe in a harmless ``rg | sed`` pipeline as opaque and
     then classified that exclusion marker as a private read.  Keep the

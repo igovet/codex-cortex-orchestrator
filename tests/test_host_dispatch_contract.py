@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize('command,allowed', [
     ('cat README.md', True), ('sed -n 1,40p README.md', True),
     ('cat README.md; touch changed', False), ('sed -i 1d README.md', False),
-    ('cat /tmp/.codex/cortex/private.md', False), ('cat $(touch changed)', False),
+    ('cat .cortex/t_0123456789ab/private.md', False), ('cat $(touch changed)', False),
 ])
 def test_coordinator_can_read_evidence_but_cannot_mutate(command, allowed, tmp_path):
     result = authorize_pre_dispatch(
