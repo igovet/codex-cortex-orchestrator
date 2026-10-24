@@ -1,3 +1,16 @@
+
+> [!IMPORTANT]
+> ### 🚀 Project Moved to Cortex ACP
+>
+> **This repository is deprecated and is no longer maintained.**
+>
+> Active development has moved to **[Cortex ACP](https://github.com/igovet/cortex-orch-acp)** — the new home of Cortex orchestration.
+>
+> For the latest updates, documentation, releases, bug reports, and contributions, please visit the new repository.
+>
+> **👉 [Go to Cortex ACP →](https://github.com/igovet/cortex-orch-acp)**
+
+
 The [incident coordination guide](docs/project/incident-outcomes.md) describes
 continuous ownership, full-path rehearsal, evidence-based replanning and quiet waits.
 The compact orchestrator loads specialized procedures only when needed.
