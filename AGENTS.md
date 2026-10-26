@@ -27,8 +27,9 @@ not relax the CLI-before-Desktop rule below.
 For the explicit current-host observational qualification mode, the absence of a
 signal the installed host cannot emit is `not_applicable` or a retained
 diagnostic, never by itself a BLOCK: this includes bootstrap attestation,
-assignment-policy/skill-load receipts, a separate server event, and a process
-self-exit marker. `observational_accept` still requires complete, non-truncated
+assignment-policy attestation, a separate server event, and a process self-exit
+marker. The exact assigned worker-SKILL receipt remains mandatory.
+`observational_accept` still requires complete, non-truncated
 capture/calls/events/audit plus one exact successful public task binding, one
 completed native worker, one task-bound worker report, and exact coordinator
 artifact reconciliation. BLOCK only for an actual task failure; pending or
@@ -49,15 +50,16 @@ artifact reconciliation prove the report identity. One completed, non-mutating
 publication and reconciliation are independently present. Neither exception
 permits missing/ambiguous publication, a failed write, a mismatch, replay or
 truncation, mutation, or an unsafe/private target.
-One or more exact-equivalent denied-before-dispatch errors from the bounded
-registered worker `SKILL.md` read are diagnostics only after that same complete
-outcome proof. They must share worker/profile/manifest-bound static-read identity;
-any differing, replayed, private/project, mutating, dispatched, truncated, or
-ambiguous read remains blocking and none credits a skill receipt.
-The current interactive transport may use exactly one literal `bash -lc` envelope
-around that read; the observer must revalidate its sole payload against the same
-closed static-read grammar. Nested shells, extra commands, paths other than the
-registered leaf, directories, globs, and every write remain forbidden access.
+One or more exact-equivalent failures while inspecting a declared public skill or
+reference leaf are diagnostics only after that same complete outcome proof and a
+separate successful mandatory worker-`SKILL.md` receipt. They must share
+worker/profile/manifest-bound read identity; any differing, replayed,
+private/project, mutating, dispatched, truncated, or ambiguous read remains blocking
+and none credits a skill receipt. The model may choose any supported ordinary
+read-only means. The observer validates the declared literal leaf and the operation's
+read-only outcome without requiring a particular shell command or quoting. Nested
+shells, extra operations, paths other than the declared leaf, directories, globs,
+and every write remain forbidden access.
 In `current_host_mcp_first` only,
 `worker_assignment_policy_unverified` and `mcp_first_bootstrap_unverified` are
 always printed `unsupported_by_current_host`, `not_applicable` diagnostics. The
@@ -77,7 +79,7 @@ read-only literal `skills/orchestrator/SKILL.md` or its declared instruction-ref
 read with its active-skill marker and exact installed-candidate identity;
 the same exact read-only proof covers its bundled communication, tool-discipline,
 content-safety and recovery companions. Up to four literal instruction leaves may
-be read in one bounded shell command; no arbitrary skill or cache path qualifies.
+be inspected in one bounded read-only operation; no arbitrary skill or cache path qualifies.
 the separate registered-worker static-SKILL predicate can retain independently
 complete, read-only denied records as diagnostics. Neither exception admits a
 directory, glob, different skill, unknown provenance, private/project target,
@@ -101,7 +103,7 @@ After behavior changes update README.md, SECURITY.md and affected documentation;
 check links and commands against source. Keep secrets, private reports and raw
 host logs out of repository documents and diagnostics. Report unrun checks.
 
-For this release use semantic version 1.15.9. After any plugin payload
+For this release use semantic version 1.16.0. After any plugin payload
 edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, sync and test checks sequentially in the same checkout. Use the
@@ -116,6 +118,11 @@ All live-dev tests use `gpt-5.6-luna` with `high` effort for the coordinator.
 Native test workers also use Luna, at medium or high effort; heavy models are
 prohibited in live CLI/Desktop tests. Keep this test policy in isolated launcher
 configuration, without changing stable user settings or general plugin routing.
+
+Any subagent assigned to edit prompts or skills must use only `gpt-5.6-sol` with
+`medium` reasoning effort. Record that explicit user-requested override in the
+assignment. This repository-development rule does not change the Luna-only model
+policy for real live-dev CLI/Desktop qualification workloads.
 
 After any repository work, live-dev verification is mandatory in both real
 environments, in this order: run a focused CLI scenario first, then run Desktop

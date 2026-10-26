@@ -11,6 +11,15 @@ import pytest
 ROOT=Path(__file__).resolve().parents[1]
 OBSERVER=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'))
 EVAL=runpy.run_path(str(ROOT/'scripts/cortex_eval.py'))
+CANDIDATE_VERSION = json.loads((ROOT / 'plugins/cortex/.codex-plugin/plugin.json').read_text())['version']
+
+
+def trusted_cache(base):
+    cache = base / CANDIDATE_VERSION
+    manifest = cache / '.codex-plugin/plugin.json'
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_bytes((ROOT / 'plugins/cortex/.codex-plugin/plugin.json').read_bytes())
+    return cache
 
 
 def token_record(thread,response,stamp,**overrides):
@@ -667,10 +676,13 @@ def test_publication_identity_ignores_nested_governance_but_not_conflicting_root
 
 def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
-    skill.parent.mkdir(parents=True);skill.write_text('instructions')
-    reference=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-backend-dev/references/report-publication.md'
-    reference.parent.mkdir(parents=True);reference.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/worker-general/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    reference=cache/'skills/worker-backend-dev/references/report-publication.md'
+    reference.parent.mkdir(parents=True)
+    reference.write_bytes((ROOT/'plugins/cortex/skills/worker-backend-dev/references/report-publication.md').read_bytes())
     check=OBSERVER['skill_instruction_read']
     positive=("pwd && printf '%s\\n' '--- skill ---' && echo 'reading exact skill' && sed -n '1,240p' "
               +str(skill))
@@ -681,7 +693,7 @@ def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tm
         f"sed -n '1,240p' {skill} > /tmp/skill-copy",
         f"find {skill.parents[3]} -name SKILL.md",
         f"cat {skill.parents[2]}/agents/general.toml && sed -n '1,240p' {skill}",
-        f"sed -n '1,240p' {skill} && sed -n '1,120p' .codex/cortex/t_1/pipeline.md",
+        f"sed -n '1,240p' {skill} && sed -n '1,120p' .cortex/t_1/pipeline.md",
         f"sed -n '1,240p' {skill} && cat solution.py",
         f"sed -n '1,240p' {skill} && touch {tmp_path/'changed'}",
         f"printf '%s\\n' \"$(pwd)\" && sed -n '1,240p' {skill}",
@@ -691,10 +703,13 @@ def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tm
 
 def test_skill_read_accepts_newline_reference_batches_but_rejects_mixed_or_quoted_paths(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
-    skill.parent.mkdir(parents=True);skill.write_text('instructions')
-    reference=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-backend-dev/references/report-publication.md'
-    reference.parent.mkdir(parents=True);reference.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/worker-general/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    reference=cache/'skills/worker-backend-dev/references/report-publication.md'
+    reference.parent.mkdir(parents=True)
+    reference.write_bytes((ROOT/'plugins/cortex/skills/worker-backend-dev/references/report-publication.md').read_bytes())
     check=OBSERVER['skill_instruction_read']
     newline_batch=(f"sed -n '1,240p' {skill}\n"
                    f"sed -n '1,260p' {reference}")
@@ -704,7 +719,7 @@ def test_skill_read_accepts_newline_reference_batches_but_rejects_mixed_or_quote
         OBSERVER['call_policy_flags']('exec_command',arguments,'general','/fixture'))
 
     mixed=(f"sed -n '1,240p' {skill}\n"
-           "cat .codex/cortex/t_1/pipeline.md")
+           "cat .cortex/t_1/pipeline.md")
     mixed_arguments=json.dumps({'cmd':mixed})
     assert not check('exec_command',mixed_arguments)
     assert 'forbidden_plugin_or_cache_access' in set(
@@ -718,8 +733,10 @@ def test_skill_read_accepts_newline_reference_batches_but_rejects_mixed_or_quote
 
 def test_mixed_skill_read_and_project_discovery_has_scoped_cache_policy(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
-    skill=tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex/version/skills/worker-general/SKILL.md'
-    skill.parent.mkdir(parents=True);skill.write_text('instructions')
+    cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
+    skill=cache/'skills/worker-general/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
     mixed=(f"sed -n '1,240p' {skill} && printf '%s\\n' '--- files ---' && "
            "rg --files -g '!*.pyc' . | sort")
     arguments=json.dumps({'cmd':mixed})
@@ -743,7 +760,7 @@ def test_mixed_skill_read_and_project_discovery_has_scoped_cache_policy(tmp_path
     for command in (
         f"sed -n '1,240p' {skill} && cat {skill.parents[2]}/agents/general.toml",
         f"sed -n '1,240p' {skill}; cat {skill.parents[2]}/agents/general.toml",
-        f"sed -n '1,240p' {skill} && cat .codex/cortex/t_1/pipeline.md",
+        f"sed -n '1,240p' {skill} && cat .cortex/t_1/pipeline.md",
         f"sed -n '1,240p' {skill} && python3 -c \"open('{skill}').read()\"",
         f"sed -n '1,240p' {skill} && printf '%s' \"$(cat '{skill}')\"",
         f"sed -n '1,240p' {skill} && {skill.parents[2]}/scripts/cortex.py",
@@ -777,10 +794,16 @@ def test_desktop_launcher_and_observer_require_explicit_spawn_route_fields():
     assert 'must not use functions.exec, exec_command, terminal, or another shell route' in instructions
     assert 'attributable complete' in instructions
     assert 'nested success never excuses truncation' in instructions
+    assert 'ordinary read-only means selected by the model' in instructions
+    assert "sed -n '1,$p' <literal-path>" not in instructions
+    assert 'malformed EOF marker' not in instructions
 
     cli=runpy.run_path(str(ROOT/'scripts/cortex-live-smoke'),run_name='live_instruction_fixture')
-    assert 'Both roles may read their exact advertised SKILL.md' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'Each role may inspect its exact advertised SKILL.md first' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
     assert 'does not permit directory scans or private plugin/cache/candidate/registry probing' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'ordinary read-only means selected by the model' in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert "sed -n '1,$p' <literal-path>" not in cli['LIVE_DEVELOPER_INSTRUCTIONS']
+    assert 'malformed EOF marker' not in cli['LIVE_DEVELOPER_INSTRUCTIONS']
     forbidden=OBSERVER['call_policy_flags'](
         'exec_command',json.dumps({'cmd':'ls /fixture/.cortex-dev/.codex/plugins/cache'}),
         'coordinator','/fixture')

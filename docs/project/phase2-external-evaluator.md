@@ -19,7 +19,7 @@ environment allowlist, model/effort contract, and timeout values. It then:
   disposable directories, overlaying only the supplied current candidate payload;
 - verifies the complete candidate and baseline payload digests and the exact
   stamped version embedded in each archived plugin manifest;
-- creates private `.codex/cortex` parents while requiring the SQLite store to be
+- creates private `.cortex` parents while requiring the SQLite store to be
   absent;
 - seals one common external live harness for both archived arms without changing
   either archived product tree; and
@@ -69,8 +69,8 @@ python3 scripts/phase2_cli_runner.py \
   --baseline-commit 17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9 \
   --baseline-version 1.15.6+codex.sha256.cc786ae2fbd04cf1 \
   --baseline-payload-sha256 cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698 \
-  --candidate-version 1.15.9+codex.sha256.121a79864903aeee \
-  --candidate-payload-sha256 121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750 \
+  --candidate-version 1.16.0+codex.sha256.5445b95361d15a5e \
+  --candidate-payload-sha256 5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35 \
   --coordinator-model gpt-5.6-luna --coordinator-effort high \
   --worker-model gpt-5.6-luna --worker-effort medium \
   --cell-timeout-seconds 1800 --wait-timeout-ms 600000
@@ -160,11 +160,11 @@ reuse guard. Any created session is stopped only by its returned tmux session ID
 A failed or incomplete transaction requires a new control and new disposable
 workdir; no `begin-cell` or send is authorized.
 
-The harness also supplies the exact fresh `<workdir>/.codex/cortex` directory as
+The harness also supplies the exact fresh `<workdir>/.cortex` directory as
 `CORTEX_DATA_DIR` to both launchers after removing any ambient value. This is a
 sealed compatibility input for the format-10 baseline, which predates native
 project-store resolution; the format-11 candidate independently resolves the same
-directory from validated thread/project state and ignores the variable. The
+`.cortex` directory from validated thread/project state and ignores the variable. The
 database remains absent until the selected runtime handles `create_task`. Invalid,
 redirected, non-private, or already populated project-store layouts fail closed.
 

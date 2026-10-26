@@ -4,10 +4,14 @@ Use Python 3.11+ and `python3`, with no runtime third-party dependencies. Keep
 installable behavior under `plugins/cortex/`. All tool arguments, retry contracts
 and size limits belong in advertised schemas and descriptions, not prompt prose.
 
-Use one project-local SQLite store at `<project>/.codex/cortex/cortex.sqlite3`.
+Use one project-local SQLite store at `<project>/.cortex/cortex.sqlite3`.
 The native host index locates and validates the canonical project but never supplies
 a home-wide Cortex store. Same-project access is serialized; different projects
-have independent stores. Use one Markdown pipeline per task with newest editions first. Ordinary reports
+have independent stores. The same `.cortex` root contains immutable task Markdown,
+pipeline and reports plus editable `draft-reports` and `pipeline-drafts`. When a
+recognized `<project>/.codex/cortex` legacy tree exists, the runtime transfers only
+missing validated components before opening the project store; conflicts and unsafe identities fail closed,
+with no fallback reads or duplicate writes. Use one Markdown pipeline per task with newest editions first. Ordinary reports
 are immutable. Workers receive obligations directly and select only necessary
 optional reports. The model owns coordination, evidence interpretation and final
 judgment. No mandatory specialist sequence or protocol compatibility is allowed.
@@ -38,13 +42,15 @@ registered-file integrity violations and the narrow worker private-root executio
 boundary may deny a patch; no other workflow decision is enforced. Hook metadata
 and model actions remain separately observable.
 
-Use semantic version 1.15.9 for this release. Recompute the complete payload hash
+Use semantic version 1.16.0 for this release. Recompute the complete payload hash
 before package checks or tests after every installable edit. Run release-sensitive
 checks sequentially. Do not modify stable Codex configuration or plugin caches.
 Use the dedicated isolated candidate launcher for real-host verification.
 
 Plugin instructions use standard marketplace skill loading: an attached complete
 body or the exact advertised SKILL.md path, plus needed declared Markdown references.
+The model may choose any supported ordinary read-only means for those exact declared
+resources; declared references never satisfy the initial complete worker-SKILL receipt.
 Already attached live schemas need no catalogue bootstrap or prescribed first-call
 batch. Do not read agent TOML, server internals or enumerate the installation. No
 personal registration, copied skill bodies or custom loader is needed. Inert
@@ -56,9 +62,10 @@ forbidden. See
 Current isolated live qualification uses Luna/high for every coordinator and Luna
 at medium/high for native workers. Product routing is stricter and explicit: Luna
 is the default/priority worker model for ordinary, research, exploration and
-fact gathering; Terra is reserved for complex implementation/review. Both use
-medium/high. Consequential decisions use Sol medium, difficult risk trade-offs
-Sol high, exceptional system decisions Astra medium only. Security implementation
+fact gathering, preferring high and allowing xhigh/max for bounded implementation
+when supported; Terra is reserved for complex implementation and is the default
+for code review. Consequential decisions use Sol medium, difficult risk trade-offs
+Sol high. Security implementation
 returns to Luna/Terra; source exploration stays Luna. Reviews and
 verifications use the permitted model and effort routes without automatic
 escalation from the implementation they inspect.

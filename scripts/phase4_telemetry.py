@@ -62,6 +62,7 @@ WALL_SOURCES = ("coordinator_task_lifecycle", "response_span", "reviewed", "unav
 TERMINAL_STATUSES = ("complete", "incomplete", "unavailable", "unknown")
 QUALITY_STATUSES = ("measured", "unavailable", "unknown")
 QUALITY_SOURCES = ("independent_oracle", "independent_review")
+ADVISORY_STATUSES = ("consulted", "skipped", "unavailable", "failed")
 
 _OPAQUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -75,6 +76,20 @@ _PRIVATE_WORDS = re.compile(
 
 class TelemetryError(ValueError):
     """Raised when a source row is not safe or does not match the contract."""
+
+
+def _advisory(value: Any) -> dict[str, Any] | None:
+    """Reduce optional Duck observations to non-sensitive counters/reasons."""
+    if value is None:
+        return None
+    source = _mapping(value, "advisory")
+    _keys(source, {"status", "reason", "consultation_count", "retry_count"}, "advisory")
+    status = source.get("status")
+    if status not in ADVISORY_STATUSES:
+        raise TelemetryError("advisory.status is invalid")
+    return {"status": status, "reason": _reason(source.get("reason"), "advisory.reason"),
+            "consultation_count": _bounded_int(source.get("consultation_count", 0), "advisory.consultation_count"),
+            "retry_count": _bounded_int(source.get("retry_count", 0), "advisory.retry_count")}
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -348,10 +363,10 @@ def _validate_aggregate(value: Any) -> dict[str, Any]:
     allowed = {
         "schema_version", "run_id", "pair_id", "suite_id", "phase", "strategy_version", "host",
         "digests", "lifecycle", "participants", "participant_counts", "tokens", "response_count",
-        "counts", "orchestration_cost_signals", "availability", "quality", "errors", "unavailable_reason",
+        "counts", "orchestration_cost_signals", "availability", "quality", "errors", "advisory", "unavailable_reason",
     }
     _keys(source, allowed, "aggregate")
-    required = allowed - {"orchestration_cost_signals"}
+    required = allowed - {"orchestration_cost_signals", "advisory"}
     missing = required - set(source)
     if missing:
         raise TelemetryError(f"aggregate is missing required fields: {sorted(missing)!r}")
@@ -395,6 +410,7 @@ def _validate_aggregate(value: Any) -> dict[str, Any]:
         "availability": _availability(source["availability"]),
         "quality": _quality(source["quality"]),
         "errors": _errors(source["errors"]),
+        "advisory": _advisory(source.get("advisory")),
         "unavailable_reason": _reason(source["unavailable_reason"], "aggregate.unavailable_reason"),
     }
     try:
@@ -413,7 +429,7 @@ def aggregate_run(source: Mapping[str, Any]) -> dict[str, Any]:
         "run_id", "pair_id", "suite_id", "phase", "strategy_version", "host",
         "payload_digest", "config_digest", "dependency_digest", "tool_catalogue_digest",
         "task_family_digest", "fixture_digest", "oracle_digest", "lifecycle", "participants",
-        "counts", "orchestration_cost_signals", "availability", "quality", "errors", "unavailable_reason",
+        "counts", "orchestration_cost_signals", "availability", "quality", "errors", "advisory", "unavailable_reason",
     }
     _keys(source, allowed, "run")
     required = ("run_id", "pair_id", "suite_id", "phase", "strategy_version", "host", "availability", "lifecycle")
@@ -455,6 +471,7 @@ def aggregate_run(source: Mapping[str, Any]) -> dict[str, Any]:
         "availability": _availability(source["availability"]),
         "quality": quality,
         "errors": _errors(source.get("errors")),
+        "advisory": _advisory(source.get("advisory")),
         "unavailable_reason": unavailable_reason,
     }
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()

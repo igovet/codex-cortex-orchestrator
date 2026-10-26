@@ -26,12 +26,12 @@ SCHEMA = "phase2-cli-v1-control-v2"
 BASELINE_COMMIT = "17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.121a79864903aeee"
-CANDIDATE_PAYLOAD_SHA256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
-TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
-TRUSTED_ADAPTER_SHA256 = "9ab5bddad55c9dcf90daa37508c4f0c41440f71c85e3fc547bba79d7a04e6134"
-TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
+CANDIDATE_VERSION = "1.16.0+codex.sha256.0b57a4030a81dd03"
+CANDIDATE_PAYLOAD_SHA256 = "0b57a4030a81dd038eb9d869ad98bf1d12e92375ac8835deacee66c3061ad1fa"
+TRUSTED_HARNESS_SHA256 = "309ae21c99a9b4c3ed99c32ccdef68e077f01b76db1112f68bd040b58aa110df"
+TRUSTED_ADAPTER_SHA256 = "7a8307d4c105637c2ffeb0e70cb644277c0d2916cdc80484177d235441b5d5ba"
+TRUSTED_OBSERVER_SHA256 = "c518b0425415c53294f112b8b872ce33cff8655072f2cb0e20061418fedb5ce9"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "761e6b0f0ca2b7e41255f5b21a5f7d6e88130d5281d58e65530115225cfc5bb4"
 EVIDENCE_COLLECTION = {
     "begin_command": "begin-cell",
     "cell_authorization_schema": "phase2-cli-cell-authorization-v2",
@@ -151,7 +151,8 @@ def verify_observer_dependencies(record_root: Path, launcher: dict[str, Any],
         fail(errors, "common observer dependency binding is malformed")
         return
     required = "plugins/cortex/profiles.json"
-    if (not manifest or required not in manifest
+    identity = "plugins/cortex/.codex-plugin/plugin.json"
+    if (not manifest or required not in manifest or identity not in manifest
             or not any(isinstance(key, str) and key.startswith("plugins/cortex/skills/")
                        for key in manifest)):
         fail(errors, "common observer dependency closure is incomplete")
@@ -174,7 +175,8 @@ def verify_observer_dependencies(record_root: Path, launcher: dict[str, Any],
         path = Path(relative) if isinstance(relative, str) else Path("__invalid__")
         if (not isinstance(relative, str) or not hex64(digest) or path.is_absolute()
                 or ".." in path.parts
-                or not (relative == required or relative.startswith("plugins/cortex/skills/"))):
+                or not (relative in {required, identity}
+                        or relative.startswith("plugins/cortex/skills/"))):
             fail(errors, "common observer dependency manifest is malformed")
             valid_manifest = False
             continue
@@ -556,7 +558,7 @@ def _audit_impl(record_path: Path) -> dict[str, Any]:
             continue
         name = arm.get("arm")
         expected = BASELINE_PAYLOAD_SHA256 if name == "baseline" else CANDIDATE_PAYLOAD_SHA256 if name == "candidate" else None
-        base_version = "1.15.6" if name == "baseline" else "1.15.9"
+        base_version = "1.15.6" if name == "baseline" else "1.16.0"
         expected_identity = {
             "version": BASELINE_VERSION if name == "baseline" else CANDIDATE_VERSION,
             "baseline_commit": BASELINE_COMMIT if name == "baseline" else None,
@@ -603,8 +605,8 @@ def _audit_impl(record_path: Path) -> dict[str, Any]:
                     fail(errors, f"{name} payload digest mismatch")
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 fail(errors, f"{name} payload unreadable: {exc}")
-        store = workdir / ".codex" / "cortex" / "cortex.sqlite3"
-        if store.exists() or store.is_symlink() or fresh_store != {"status": "observed_absent", "relative_path": ".codex/cortex/cortex.sqlite3", "sha256": None}:
+        store = workdir / ".cortex" / "cortex.sqlite3"
+        if store.exists() or store.is_symlink() or fresh_store != {"status": "observed_absent", "relative_path": ".cortex/cortex.sqlite3", "sha256": None}:
             fail(errors, f"{name} fresh store is not proven absent")
         reset = object_or_empty(arm.get("reset"), f"{name}.reset", errors)
         if reset.get("status") != "contract_sealed" or reset.get("manifest_sha256") != task.get("manifest_sha256"):

@@ -3,8 +3,15 @@
 - Keep exactly seven public storage operations and model-owned coordination.
 - Allocate typed drafts in the server, bind their short IDs to native caller threads,
   and publish only by ID; keep the same ID in the filename and Markdown marker.
-- Put editable drafts below project `.cortex`; reserve `.codex/cortex` for final
-  task files written by the MCP server because Codex protects project `.codex`.
+- Put the complete project-local Cortex store below `.cortex`, including the
+  database, immutable task files, pipeline, reports, `draft-reports`, and
+  `pipeline-drafts`; retain `<project>/.codex/cortex` only as a one-way migration
+  source and never as a continuing fallback.
+- Transfer recognized legacy database/report components only when destination
+  components are absent. Validate identities and lock both roots; conflicts or
+  unsafe/ambiguous state fail closed without overwriting either copy. Renames are
+  atomic per component, but a multi-entry transfer is not globally atomic and an
+  interruption can leave a partial state that then fails closed.
 - Keep one actual pipeline file, prepend editions, and preserve older text below.
 - Store bodies in project task files, only metadata and durable intents in SQLite.
 - Delegate the main technical work while allowing coordinator short answers, necessary
@@ -26,7 +33,7 @@
   or leaves impact unresolved with acceptance withheld until synchronization or sufficient
   no-impact evidence exists.
 - Keep explicit retention cleanup as a host-side command with project isolation.
-- Preserve semantic version 1.15.9 for this release; update the payload hash after
+- Preserve semantic version 1.16.0 for this release; update the payload hash after
   every installable payload edit.
 - Bind tasks to host MCP thread metadata after real CLI/Desktop observation; no model-authored task selector or latest-task fallback.
 
@@ -46,6 +53,12 @@
   follow-ups create new immutable reports; independent verification uses fresh context.
 - Keep graph-first discovery concrete in every generated worker profile. Codebase
   Memory availability never becomes a server gate or permission to widen scope.
+- Keep the optional Advisory Lane coordinator-owned and catalogue-only. It may
+  activate only for an explicit live `mcp-rubber-duck` provider/server identity
+  paired with the exact `ask_duck` tool; absent, unrelated, or identity-less
+  entries are silent no-ops. It has no runtime dependency, profile, stage, bridge,
+  routing, gate, or acceptance authority, and never replaces worker evidence or
+  coordinator decisions.
 - Evaluate outcome quality and resource cost separately from protocol conformance
   when an evaluation is authorized. The user cancelled the Phase 2 outcome/efficiency
   comparison for 1.15.9; it is non-blocking and non-scoring, and no efficacy claim

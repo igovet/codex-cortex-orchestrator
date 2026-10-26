@@ -241,7 +241,7 @@ def test_file_backed_pipeline_and_private_paths(store,tmp_path):
     task=create(store,tmp_path)
     body='x'*250001
     pipeline=write(store,task,body,kind='pipeline')
-    assert (tmp_path/'.codex/cortex'/task/'pipeline.md').read_text().endswith(body)
+    assert (tmp_path/'.cortex'/task/'pipeline.md').read_text().endswith(body)
     assert (store.path.stat().st_mode&0o777)==0o600
     assert (store.directory.stat().st_mode&0o777)==0o700
     link=tmp_path/'link';link.symlink_to(store.directory,target_is_directory=True)
@@ -268,7 +268,7 @@ def test_steering_pipeline_editions_and_recovery(store,tmp_path):
     assert len(reports)==5 and first==second
     body=call_store(restarted,'read_report',dict(task_id=task,report_id=first))['markdown']
     assert 'User added a farewell.' in body and body.endswith('Check its text.')
-    assert (tmp_path/'.codex/cortex'/task/'pipeline.md').is_file()
+    assert (tmp_path/'.cortex'/task/'pipeline.md').is_file()
 
 
 def test_pipeline_newest_first_cursor_and_snapshot(store,tmp_path):
@@ -292,7 +292,7 @@ def test_pipeline_newest_first_cursor_and_snapshot(store,tmp_path):
 def test_bodies_only_in_real_files_and_report_tamper(store,tmp_path):
     task=create(store,tmp_path);body='private report body marker'
     rid=write(store,task,body)['report_id']
-    file=tmp_path/'.codex/cortex'/task/(rid+'.md')
+    file=tmp_path/'.cortex'/task/(rid+'.md')
     assert file.read_text().endswith(body) and file.stat().st_mode&0o777==0o600
     with store.connection() as db:
         dump='\n'.join(db.iterdump())

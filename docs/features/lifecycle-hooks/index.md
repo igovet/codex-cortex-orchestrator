@@ -8,7 +8,7 @@ is the source of host payload contracts; source tests do not establish installed
 CLI/Desktop support.
 
 Hook storage follows the current native project binding and writes to that project's
-`.codex/cortex/cortex.sqlite3`. It does not use a home-wide database or
+`.cortex/cortex.sqlite3`. It does not use a home-wide database or
 `CORTEX_DATA_DIR`; concurrent hooks for one project share the store's serialization,
 while hooks for different projects remain isolated.
 
@@ -23,10 +23,10 @@ workflow gates, score evaluation outcomes, or accept task results.
 | SubagentStart | Records explicit child/parent lifecycle binding and reminds the worker to preserve the complete initial skill-load command receipt, including output and the actual exit_code or running session_id | Never treats parent session_id as child or infers a selected profile |
 | PreCompact/PostCompact | Records observed compaction boundary | Their stdout is not the recovery context channel |
 | PostToolUse | Records selected statuses, exit/session receipts, truncation and change signals, including worker command-session cwd provenance | Tool events without actor identity require validated child/parent provenance or remain session-scoped |
-| PreToolUse apply_patch | Checks actual parsed targets against registered Cortex files and the private-root boundary | Denies only established immutable-report/draft-integrity/ownership violations or a worker operand resolving inside `.codex/cortex/` |
+| PreToolUse apply_patch | Checks actual parsed targets against registered Cortex files and the private-root boundary | Denies only established immutable-report/draft-integrity/ownership violations or a worker operand resolving inside `.cortex/` |
 | PreToolUse app-thread messaging | Denies `mcp__codex_app__send_message_to_thread` and its direct alias before dispatch for active Cortex tasks | Tool events may not identify a worker, so the exact denial is task-wide and does not revoke the connector outside Cortex |
 | PreToolUse coordinator project access | Allows read-only file evidence and literal bounded reads; delegates project mutation and arbitrary execution | Private operands remain protected; unproven session events do not establish authority |
-| PreToolUse worker private-root boundary | Rejects shell, file, and patch operands resolving inside the confirmed task-private `.codex/cortex/` root | Deny-only preflight; bounded `mcp__cortex__read_report` and ordinary external/workspace diagnostics remain available |
+| PreToolUse worker private-root boundary | Rejects shell, file, and patch operands resolving inside the confirmed task-private `.cortex/` root | Deny-only preflight; bounded `mcp__cortex__read_report` and ordinary external/workspace diagnostics remain available |
 | SubagentStop/Stop | Diagnoses open drafts and missing saved publications | Advisory; reused assignment boundaries may be unavailable |
 | Interrupt/SessionEnd | Commits a short observed boundary receipt | Does not keep a session alive |
 
@@ -88,15 +88,11 @@ provenance, replay/truncation, publication, cleanup, audit, or protected action
 responses, and does not catch or demote `StoreError` or `PermissionError`.
 
 Current-host static skill reads retain the same strict boundary at pre-dispatch and
-when transported through `functions.exec`: one direct `tools.exec_command` call must be bound once
-to a safe JavaScript identifier with `const` and forwarded completely with
-`text(<that-same-identifier>);` (for example, `const result = await ...;
-text(result);`). The
-observer rejects aliases, extra calls, partial forwarding, nested shells, and
-non-manifest paths. The pre-dispatch boundary admits only the exact manifest-bound
-`SKILL.md` leaf through a bounded literal `cat`/`sed` command, optionally inside one
-literal `bash -lc` envelope; the complete successful result is then available for
-the normal worker-skill receipt correlation.
+when transported through a host wrapper: the observer requires one attributable,
+completely forwarded read-only result for the exact declaration-bound leaf. It rejects
+aliases, extra operations, partial forwarding, nested shells, and non-manifest paths.
+The model chooses the supported ordinary read-only means; only a complete successful
+read of the exact manifest-bound `SKILL.md` can satisfy worker-skill receipt correlation.
 
 Private observation streams contain event types, safe identities/digests, statuses,
 terminal receipts, actor/thread lineage and bounded path-policy provenance
@@ -105,7 +101,7 @@ prompts, commands, private paths, patches or result bodies. Diagnostics may
 include a bounded response shape: JSON types, approved key names,
 capped lengths and unknown-key counts, without raw values or arbitrary key names.
 The command-aware observer treats a quoted `rg`/`grep` pattern or glob mentioning
-`.codex/cortex/` as a static search marker, not a cache target. Explicit path
+`.cortex/` as a static search marker, not a cache target. Explicit path
 operands and direct readers remain unauthorized; shell expansion, control syntax,
 including unquoted filename globs (`*`, `?`, `[]`) or brace expansion (`{}`),
 or otherwise ambiguous command shapes fail closed and retain only digests.

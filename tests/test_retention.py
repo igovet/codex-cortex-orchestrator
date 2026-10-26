@@ -31,7 +31,7 @@ def test_retention_deletes_artifacts_and_receipts_but_keeps_recent_active_foreig
     report(updated,project,'updated.md','Done','new')
     result=clear_tasks(store,str(project),7,[thread_for(store,active)],now)
     assert result['deleted_tasks']==1 and result['skipped_protected']==1
-    assert not (project/'.codex/cortex'/old).exists() and not old_source.exists()
+    assert not (project/'.cortex'/old).exists() and not old_source.exists()
     for task in [recent,active,other,updated,drafted]:assert call_store(store,'list_reports',dict(task_id=task))['reports']
     with pytest.raises(StoreError,match='task_not_bound'):call_store(store,'list_reports',dict(task_id=old))
     with store.connection() as db:
@@ -47,14 +47,14 @@ def test_committed_deletion_recovers_after_restart(tmp_path):
     with store.connection() as db:db.execute('INSERT INTO pending_deletions VALUES (?)',(task,))
     restarted=Store(store.directory)
     with pytest.raises(StoreError,match='task_not_bound'):call_store(restarted,'list_reports',dict(task_id=task))
-    assert not (tmp_path/'.codex/cortex'/task).exists()
+    assert not (tmp_path/'.cortex'/task).exists()
 
 
 def test_retention_command_uses_only_selected_project_store(tmp_path, monkeypatch, capsys):
     import json
     project=tmp_path/'project';project.mkdir()
     foreign=tmp_path/'foreign';foreign.mkdir()
-    local=Store(project/'.codex/cortex',project_root=str(project))
+    local=Store(project/'.cortex',project_root=str(project))
     global_store=Store(tmp_path/'legacy-global')
     old=(datetime.now(timezone.utc)-timedelta(days=10)).isoformat(timespec='microseconds')
     with patch.object(Store,'_now',return_value=old):
@@ -66,8 +66,8 @@ def test_retention_command_uses_only_selected_project_store(tmp_path, monkeypatc
     monkeypatch.setattr('sys.argv',['cortex_clear.py','--project-root',str(project),'--days','7'])
     cortex_clear.main()
     assert json.loads(capsys.readouterr().out)['deleted_tasks']==1
-    assert not (project/'.codex/cortex'/local_task).exists()
-    assert (foreign/'.codex/cortex'/foreign_task).exists()
+    assert not (project/'.cortex'/local_task).exists()
+    assert (foreign/'.cortex'/foreign_task).exists()
     assert global_store.path.read_bytes()==before
 
 

@@ -277,7 +277,7 @@ class HookStorage:
                                    (context["project_root"], path)).fetchone()
                 if draft:
                     records.append(dict(path=path, kind="draft", published=bool(draft["published_report_id"]), owner_thread_id=draft["owner_thread_id"]))
-                base = Path(context["project_root"]) / ".codex" / "cortex"
+                base = Path(context["project_root"]) / ".cortex"
                 if Path(path).parent.parent == base:
                     report = db.execute("""SELECT r.id FROM reports r JOIN tasks t ON t.id=r.task_id
                         WHERE t.project_root=? AND r.task_id=? AND r.filename=?""",

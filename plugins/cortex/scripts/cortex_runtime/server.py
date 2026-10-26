@@ -14,7 +14,7 @@ from collections import OrderedDict
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
 from .host_source import original_request, pending_requests
 from .store import Store, private_directory
-from .project_storage import ProjectResolver, project_store_directory
+from .project_storage import ProjectResolver, migrate_legacy_project_storage, project_store_directory
 from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 PLUGIN = Path(__file__).resolve().parents[2]
@@ -155,6 +155,7 @@ class Server:
             project=self.projects.resolve(thread,parent)
             if name=='create_task' and params['arguments']['project_root']!=project:
                 raise StoreError('project_context_conflict')
+            migrate_legacy_project_storage(project)
             store=self.stores.get(project)
             if store is None:
                 directory=project_store_directory(project)

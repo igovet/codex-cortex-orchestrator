@@ -171,7 +171,7 @@ def test_diagnostic_failure_record_is_value_free_for_unusual_exception_type():
 
 def test_class_b_private_pre_dispatch_remains_denied():
     decision = authorize_pre_dispatch(
-        "Bash", {"command": "cat .codex/cortex/private-report.md"},
+        "Bash", {"command": "cat .cortex/private-report.md"},
         actor_kind="native_worker", role="worker", task_id="task-1",
         assignment_id="assignment-1", route="native_hook",
         capabilities=frozenset({"cortex.runtime.execute"}), cwd=str(ROOT),

@@ -92,13 +92,14 @@ observation only with a complete receipt. It never authorizes filters, queries, 
 content extraction, mutation, nested calls, or mixed wrappers.
 
 The private-path boundary evaluates the manifest-bound active skill exception before
-the general cache deny. It permits only one bounded literal `sed` or `cat` read of the
-exact active coordinator `skills/orchestrator/SKILL.md`, or a native-child worker's
-exact registered `skills/worker-*/SKILL.md`; the worker read may use one literal
-`bash -lc` envelope whose sole payload is reparsed by that same grammar. Direct
-dispatch therefore reaches the registered leaf and can produce its complete result
-receipt; directories, globs, aliases, other profiles, nested shells, extra commands,
-registries, runtime/state files, and every mutation remain denied. A complete result
+the general cache deny. It permits an ordinary read-only inspection, chosen by the
+model, of the exact active coordinator `skills/orchestrator/SKILL.md`, a native-child
+worker's exact registered `skills/worker-*/SKILL.md`, or a directly declared Markdown
+reference leaf of that same skill. Direct dispatch therefore reaches the registered
+resource; only the complete worker `SKILL.md` can produce its initial skill receipt.
+Directories, globs, aliases, unlinked or adjacent files, other profiles, nested shells,
+extra operations, shell expansion/control, symlinks, registries, runtime/state files,
+private or project paths, and every mutation remain denied. A complete result
 receipt is distinct from a server event. Where the current host has no separate event,
 observational evidence requires that result receipt plus one later non-replayed
 task-thread publication correlation; it remains `host_enforcement_state=unverified`.
@@ -111,15 +112,16 @@ closed native worker result; a cross-profile, absent, duplicate, or unmatched re
 is BLOCK. Current-host `functions.exec` transports retain only the exact bounded
 nested skill-read metadata necessary to classify that known coordinator read; a
 generic wrapper or any omitted bounded field remains a pre-binding invalidator.
-For the worker's exact registered leaf only, one literal `bash -lc` transport
-envelope is accepted as transport rather than a second command. Its sole payload is
-reparsed by the same closed `cat`/`sed`/`wc` read grammar; nested shells, extra
-operations, directories, globs, adjacent cache files, and mutations remain denied.
+For the worker's exact registered leaf, a host transport is accepted only when it
+contains one attributable read-only operation whose complete result is preserved.
+Nested shells, extra operations, directories, globs, adjacent cache files, and
+mutations remain denied.
 
 In the current-host MCP-first observational mode, a verified closed native-worker
 result plus its correlated coordinator delegation-evidence report may classify an
-otherwise missing assignment receipt, separate worker skill-load receipt, or
-worker-project-before-skill-receipt finding as a retained non-blocking diagnostic.
+unavailable assignment-policy attestation as a retained non-blocking diagnostic.
+The worker's complete exact assigned-SKILL receipt remains mandatory, and a worker
+project action before that receipt remains blocking.
 Likewise, a missing separate server event is diagnostic only after one complete public
 MCP result and exactly one later same-thread non-replayed publication result. This is
 post-observation evidence interpretation, not pre-dispatch authorization and not a
@@ -129,8 +131,9 @@ or incomplete audit—remain hard non-ACCEPT conditions.
 
 For current-host interactive qualification, a capability the installed host cannot
 emit is `not_applicable` or a retained diagnostic, never a hard result by itself:
-bootstrap attestation, assignment-policy/skill-load receipt, separate server event,
-and process self-exit are the bounded examples. A completed route still needs exactly
+bootstrap attestation, assignment-policy attestation, a separate server event, and
+process self-exit are the bounded examples. The exact assigned worker-SKILL receipt
+remains mandatory. A completed route still needs exactly
 one direct public task receipt, one terminal native worker, one task-bound worker
 publication, coordinator reconciliation of the exact artifact hash, complete and
 non-truncated capture/calls/events/audit, and no pending/open work. A verified idle
@@ -143,6 +146,12 @@ private/project mutation remain hard BLOCK conditions; the result is only
 The same outcome rule treats a worker final that omits a redundant report ID as a
 diagnostic only where exactly one task/parent/profile-correlated worker publication
 and exact coordinator artifact reconciliation independently supply the identity.
+A later final from the same parent-bound worker is a sequential follow-up only when
+each earlier final names a distinct, exactly-one observed worker publication; the
+publication must follow its final and precede the next final, and the terminal final
+still requires exact artifact reconciliation. A duplicate final, multiple worker
+identities, replay, truncation, or an absent, competing, early, or delayed publication
+remains BLOCK.
 One completed non-mutating public `read_report` `invalid_arguments` lookup is also
 diagnostic only after that valid publication/reconciliation proof. These narrow
 current-host exceptions do not admit failed writes, missing or ambiguous report
@@ -168,11 +177,15 @@ uses only one immutable expected root, one parent-bound native worker/report, an
 one exact non-replayed coordinator artifact reconciliation as opaque root/report
 correlation. It never infers task identity: missing, duplicate, replayed, or
 mismatched root, worker, report, or artifact links remain BLOCK. One or more
-exact-equivalent denied-before-dispatch errors from the bounded registered worker
-`SKILL.md` read are diagnostic only after that same full outcome proof. They require
-the same worker/profile/manifest-bound static-read identity; differing, replayed,
-private/project, mutating, dispatched, truncated, or ambiguous reads remain blocking
-and none credits a skill receipt.
+exact-equivalent failures while inspecting a declared skill/reference leaf are
+diagnostic only after that same full outcome proof and a separate successful
+mandatory worker-SKILL receipt. They require the same worker/profile/manifest-bound
+read identity; differing, replayed, private/project, mutating, dispatched, truncated,
+or ambiguous reads remain blocking and none credits a skill receipt.
+Where Desktop emits a nested read and a separate terminal execution receipt, the
+observer joins them only on one same-worker, same-intent, declaration-bound read;
+the terminal receipt supplies failure status but does not broaden the approved
+resource or prescribe a command form.
 
 Within `current_host_mcp_first` only, the exact labels
 `worker_assignment_policy_unverified` and `mcp_first_bootstrap_unverified`
@@ -190,10 +203,10 @@ Generic `pre_binding_host_action` is never a route-specific diagnostic: it lacks
 strict actor/profile/path proof and can describe an unsafe dispatch. The one
 coordinator setup exception is an observer-proven manifest-bound, bounded, read-only
 literal `skills/orchestrator/SKILL.md` read carrying the active-skill marker; the
-separate exact-equivalent registered-worker static-SKILL-read predicate can retain
-complete read-only denied records. Any failed, replayed, ambiguous,
-directory/glob/other-skill, private/project-target, dispatched, truncated, or
-mutating bootstrap action remains a hard block.
+separate declaration-bound read predicate can retain complete, safe read failures
+only after the mandatory worker-SKILL receipt and outcome proof. Any replayed,
+ambiguous, directory/glob/other-skill, private/project-target, dispatched, truncated,
+or mutating bootstrap action remains a hard block.
 
 The helper's exit status is derived from this final classification: it returns 0
 only when `observational_accept` and valid evidence are present and every retained

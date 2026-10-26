@@ -7,7 +7,7 @@ Cortex/normal state. Receipts establish local routing, not authentication agains
 a malicious same-user process.
 
 Each canonical project has one private SQLite store at
-`<project>/.codex/cortex/cortex.sqlite3`. It stores metadata, relationships,
+`<project>/.cortex/cortex.sqlite3`. It stores metadata, relationships,
 delivery receipts, source revisions and recovery information. Projects do not share
 this store. Writes within one project are serialized by SQLite transactions; stores
 for different projects are independent. Body text remains in real Markdown:
@@ -15,14 +15,27 @@ for different projects are independent. Body text remains in real Markdown:
 ```text
 <project>/.cortex/draft-reports/<draft>.md
 <project>/.cortex/pipeline-drafts/<draft>.md
-<project>/.codex/cortex/cortex.sqlite3
-<project>/.codex/cortex/<task>/pipeline.md
-<project>/.codex/cortex/<task>/<report>.md
+<project>/.cortex/cortex.sqlite3
+<project>/.cortex/<task>/pipeline.md
+<project>/.cortex/<task>/<report>.md
 ```
 
-Codex protects ordinary agent writes to project `.codex`, so editable drafts use
-`.cortex`. Only storage publication writes final task documents. Keep these private
-files out of repository documents and diagnostics.
+The complete Cortex store is owner-private below project `.cortex`; this includes
+the database, immutable task Markdown, pipeline, reports, `draft-reports`, and
+`pipeline-drafts`. Only storage publication writes final task documents. Keep these
+private files out of repository documents and diagnostics.
+
+When a recognized legacy tree exists at `<project>/.codex/cortex`, the runtime
+performs a one-way transfer into missing `.cortex` components before opening the
+project store. It moves the SQLite
+family (`cortex.sqlite3` and recognized sidecars) and published `t_<12 hex>` task
+directories only after validating owner-private identities and acquiring exclusive
+source and destination locks. Any destination component, unsafe identity, or
+ambiguous partial state fails closed without overwriting either copy. The legacy path
+is never reopened as a compatibility fallback, and successful moves are not duplicated.
+Each rename is atomic on the project filesystem, but the multi-entry transfer is not
+globally atomic: interruption can leave a partial state that subsequent attempts
+fail closed.
 
 The native Codex `state_5.sqlite` index locates source records and validates the
 current thread, parent and canonical project. It is not a Cortex metadata store, and the
@@ -128,8 +141,8 @@ publication that bypasses a later credential redaction. See [hook coverage](../f
 
 ## Offline project split
 
-The replacement does not automatically migrate a legacy shared store. With all
-CLI, Desktop, MCP and hook access stopped, split one canonical project at a time:
+For a legacy shared v11 database, the offline split remains a separate operation.
+With all CLI, Desktop, MCP and hook access stopped, split one canonical project at a time:
 
 ```bash
 python3 -B plugins/cortex/scripts/cortex_split.py \
@@ -140,7 +153,7 @@ python3 -B plugins/cortex/scripts/cortex_split.py \
 ```
 
 The source directory must contain the legacy `cortex.sqlite3`; the destination is
-created at `<project>/.codex/cortex/cortex.sqlite3`. `--backup` must name a new
+created at `<project>/.cortex/cortex.sqlite3`. `--backup` must name a new
 owner-private file. The command exports only rows belonging to the selected
 canonical project, validates relationships and delivery ownership, and leaves the
 legacy SQLite file and every Markdown file unchanged. It does not remove the source

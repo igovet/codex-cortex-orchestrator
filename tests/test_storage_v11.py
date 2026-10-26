@@ -18,7 +18,7 @@ def test_corrupt_neighbor_never_blocks_restart_or_other_task(tmp_path):
     store=Store(tmp_path/'private')
     damaged=create(store,tmp_path); write(store,damaged,'Committed pipeline',kind='pipeline')
     good=create(store,tmp_path)
-    (tmp_path/'.codex/cortex'/damaged/'pipeline.md').write_text('Corrupted')
+    (tmp_path/'.cortex'/damaged/'pipeline.md').write_text('Corrupted')
     restarted=Store(tmp_path/'private')
     assert call_store(restarted,'list_reports',dict(task_id=good))['reports']
     with pytest.raises(StoreError,match='file_conflict'):
@@ -46,7 +46,7 @@ def test_checked_pages_skip_unchanged_full_reads_and_detect_replacement(tmp_path
     count=len(scans)
     second=call_store(store,'read_report',dict(task_id=task,cursor=first['next_cursor']))
     assert len(scans)==count and len(second['markdown'])==4000
-    path=tmp_path/'.codex/cortex'/task/(report+'.md')
+    path=tmp_path/'.cortex'/task/(report+'.md')
     path.write_text('Altered')
     with pytest.raises(StoreError,match='file_conflict'):
         call_store(store,'read_report',dict(task_id=task,report_id=report))
@@ -92,7 +92,7 @@ def test_offline_migration_needs_new_backup_and_never_changes_markdown(tmp_path)
         delivery=db.execute("SELECT response FROM deliveries WHERE operation='write_report'").fetchone()[0]
         legacy=json.loads(delivery);legacy.pop('source_revision');legacy.pop('artifacts')
         db.execute("UPDATE deliveries SET response=? WHERE operation='write_report'",(json.dumps(legacy),))
-    path=tmp_path/'.codex/cortex'/task
+    path=tmp_path/'.cortex'/task
     before={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in path.iterdir()}
     # Build an authentic format-10 metadata layout by removing only v11 additions.
     with store.connection() as db:
@@ -164,12 +164,12 @@ def test_database_open_failure_releases_migration_lock(tmp_path,monkeypatch):
 def test_recovery_restores_invalid_utf8_pipeline_and_removes_unindexed_first_edition(tmp_path):
     store=Store(tmp_path/'private');task=create(store,tmp_path)
     write(store,task,'Committed',kind='pipeline')
-    pipeline=tmp_path/'.codex/cortex'/task/'pipeline.md'
+    pipeline=tmp_path/'.cortex'/task/'pipeline.md'
     saved=pipeline.read_bytes();backup=pipeline.parent/'.backup_pipeline_test.md'
     backup.write_bytes(saved);backup.chmod(0o600);pipeline.write_bytes(b'\xff')
     call_store(Store(store.directory),'list_reports',dict(task_id=task))
     assert pipeline.read_bytes()==saved and not backup.exists()
-    other=create(store,tmp_path);orphan=tmp_path/'.codex/cortex'/other/'pipeline.md'
+    other=create(store,tmp_path);orphan=tmp_path/'.cortex'/other/'pipeline.md'
     orphan.write_text('Uncommitted first edition');orphan.chmod(0o600)
     call_store(Store(store.directory),'list_reports',dict(task_id=other))
     assert not orphan.exists()

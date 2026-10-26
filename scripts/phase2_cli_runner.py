@@ -28,12 +28,12 @@ SCHEMA = "phase2-cli-v1-control-v2"
 BASELINE_COMMIT = "17ace1ce2f7e3c5bb3dcf2b2b16424a16db7d7d9"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.121a79864903aeee"
-CANDIDATE_PAYLOAD_SHA256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
-TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
-TRUSTED_ADAPTER_SHA256 = "9ab5bddad55c9dcf90daa37508c4f0c41440f71c85e3fc547bba79d7a04e6134"
-TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
+CANDIDATE_VERSION = "1.16.0+codex.sha256.0b57a4030a81dd03"
+CANDIDATE_PAYLOAD_SHA256 = "0b57a4030a81dd038eb9d869ad98bf1d12e92375ac8835deacee66c3061ad1fa"
+TRUSTED_HARNESS_SHA256 = "309ae21c99a9b4c3ed99c32ccdef68e077f01b76db1112f68bd040b58aa110df"
+TRUSTED_ADAPTER_SHA256 = "7a8307d4c105637c2ffeb0e70cb644277c0d2916cdc80484177d235441b5d5ba"
+TRUSTED_OBSERVER_SHA256 = "c518b0425415c53294f112b8b872ce33cff8655072f2cb0e20061418fedb5ce9"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "761e6b0f0ca2b7e41255f5b21a5f7d6e88130d5281d58e65530115225cfc5bb4"
 EVIDENCE_COLLECTION = {
     "begin_command": "begin-cell",
     "cell_authorization_schema": "phase2-cli-cell-authorization-v2",
@@ -439,10 +439,14 @@ def _require_file(path: Path, label: str) -> Path:
 def _observer_dependency_manifest(source: Path) -> dict[str, str]:
     """Return the complete dynamic file closure used by the common observer."""
     profiles = _require_file(source / "plugins/cortex/profiles.json", "observer profiles dependency")
+    plugin_manifest = _require_file(
+        source / "plugins/cortex/.codex-plugin/plugin.json",
+        "observer plugin identity dependency",
+    )
     skills = source / "plugins/cortex/skills"
     if not skills.is_dir() or skills.is_symlink():
         raise PreparationError("observer skills dependency must be a real directory")
-    paths = [profiles]
+    paths = [plugin_manifest, profiles]
     for path in sorted(skills.rglob("*")):
         if path.is_symlink():
             raise PreparationError("observer dependency closure contains a symlink")
@@ -570,7 +574,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         os.chmod(observer_path, 0o600)
         observer_dependencies = _copy_observer_dependencies(candidate_source, destination)
         for arm in (baseline_dir, candidate_dir):
-            cortex = arm / ".codex" / "cortex"
+            cortex = arm / ".cortex"
             _assert_real_owned_dir(cortex, create=True)
             store = cortex / "cortex.sqlite3"
             if store.exists() or store.is_symlink():
@@ -681,7 +685,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "workdir": str(arm_dir),
                 "workdir_sha256": _sha256_bytes(str(arm_dir).encode()),
                 "checkout": "detached Git archive snapshot; candidate payload overlaid from supplied worktree" if arm_name == "candidate" else "detached Git archive snapshot",
-                "fresh_store": {"status": "observed_absent", "relative_path": ".codex/cortex/cortex.sqlite3", "sha256": None},
+                "fresh_store": {"status": "observed_absent", "relative_path": ".cortex/cortex.sqlite3", "sha256": None},
                 "reset": {"status": "contract_sealed", "manifest_sha256": manifest_sha, "reason": "fixture reset is supplied by the immutable manifest and is not invoked by this offline preparer"},
                 "terminal_receipt": _opaque_receipt("phase2-terminal-v1"),
                 "audit_receipt": _opaque_receipt("phase2-audit-v1"),

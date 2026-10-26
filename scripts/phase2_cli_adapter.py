@@ -33,13 +33,13 @@ SCHEMA = "phase2-cli-v1-control-v2"
 MECHANISM = "phase2-common-live-harness-v1"
 MODEL = "gpt-5.6-luna"
 EFFORT = "high"
-TRUSTED_HARNESS_SHA256 = "b6964bed2483fb69c89afb526237440b8949ee05a20080fba328dff74504c849"
-TRUSTED_OBSERVER_SHA256 = "e809f559deea470337b68d805d6e65f02438ca4d3002aeb267220a1eaa956227"
-TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
+TRUSTED_HARNESS_SHA256 = "309ae21c99a9b4c3ed99c32ccdef68e077f01b76db1112f68bd040b58aa110df"
+TRUSTED_OBSERVER_SHA256 = "c518b0425415c53294f112b8b872ce33cff8655072f2cb0e20061418fedb5ce9"
+TRUSTED_OBSERVER_DEPENDENCIES_SHA256 = "761e6b0f0ca2b7e41255f5b21a5f7d6e88130d5281d58e65530115225cfc5bb4"
 BASELINE_VERSION = "1.15.6+codex.sha256.cc786ae2fbd04cf1"
 BASELINE_PAYLOAD_SHA256 = "cc786ae2fbd04cf1e9c29cfb34cf721de6ad6b8663f2d05f809baf2bee158698"
-CANDIDATE_VERSION = "1.15.9+codex.sha256.121a79864903aeee"
-CANDIDATE_PAYLOAD_SHA256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
+CANDIDATE_VERSION = "1.16.0+codex.sha256.0b57a4030a81dd03"
+CANDIDATE_PAYLOAD_SHA256 = "0b57a4030a81dd038eb9d869ad98bf1d12e92375ac8835deacee66c3061ad1fa"
 EVIDENCE_SCHEMA = "phase2-cli-evidence-bundle-v1"
 CELL_AUTH_SCHEMA = "phase2-cli-cell-authorization-v2"
 SESSION_BINDING_SCHEMA = "phase2-cli-session-binding-v1"
@@ -327,7 +327,9 @@ def _verify_observer_dependencies(record_root: Path, launcher: dict[str, Any]) -
                                for key, value in manifest.items()):
         raise AdapterError("common observer dependency manifest is malformed")
     required = "plugins/cortex/profiles.json"
-    if required not in manifest or not any(key.startswith("plugins/cortex/skills/") for key in manifest):
+    identity = "plugins/cortex/.codex-plugin/plugin.json"
+    if (required not in manifest or identity not in manifest
+            or not any(key.startswith("plugins/cortex/skills/") for key in manifest)):
         raise AdapterError("common observer dependency closure is incomplete")
     expected_keys = set(manifest)
     actual_keys = set()
@@ -344,7 +346,8 @@ def _verify_observer_dependencies(record_root: Path, launcher: dict[str, Any]) -
     for relative, digest in manifest.items():
         path = Path(relative)
         if (path.is_absolute() or ".." in path.parts
-                or not (relative == required or relative.startswith("plugins/cortex/skills/"))):
+                or not (relative in {required, identity}
+                        or relative.startswith("plugins/cortex/skills/"))):
             raise AdapterError("common observer dependency path is invalid")
         target = _canonical_file(record_root / path, "common observer dependency")
         info = target.stat()
@@ -510,7 +513,7 @@ def _require_frozen_start(argv: list[str]) -> None:
     if parsed.model != MODEL or parsed.effort != EFFORT:
         raise AdapterError("Phase 2 start requires gpt-5.6-luna with high effort")
     workdir = _canonical_directory(Path(parsed.workdir), "evaluation workdir")
-    store = workdir / ".codex" / "cortex" / "cortex.sqlite3"
+    store = workdir / ".cortex" / "cortex.sqlite3"
     try:
         store.lstat()
     except FileNotFoundError:
@@ -835,10 +838,10 @@ def _prebinding_failed_launch_inventory(
                        ("started_at", "thread_created_since", "trial_started_at"))):
         raise AdapterError("pre-binding failed-launch GC refuses bound, submitted, active, or malformed session")
     workdir = _canonical_directory(Path(session.get("workdir", "")), "pre-binding failed-launch workdir")
-    cortex_dir = _canonical_directory(workdir / ".codex/cortex", "pre-binding failed-launch project state")
+    cortex_dir = _canonical_directory(workdir / ".cortex", "pre-binding failed-launch project state")
     if cortex_dir.stat().st_uid != os.getuid() or cortex_dir.stat().st_mode & 0o077:
         raise AdapterError("pre-binding failed-launch project state must be owner-private")
-    store = workdir / ".codex/cortex/cortex.sqlite3"
+    store = workdir / ".cortex/cortex.sqlite3"
     expected_digest = hashlib.sha256(f"{workdir}\0{store}".encode()).hexdigest()
     if (session.get("store") != str(store) or session.get("events") != str(state_root / "events")
             or expected_digest != workdir_digest):
@@ -879,8 +882,8 @@ def _prebinding_failed_launch_inventory(
             or event.get("canonical_path_digest") != workdir_digest
             or event.get("path_digest") != workdir_digest
             or event.get("host_class") != "cli"
-            or event.get("project_relative_store") != ".codex/cortex/cortex.sqlite3"
-            or event.get("project_relative_path") != ".codex/cortex/cortex.sqlite3"
+            or event.get("project_relative_store") != ".cortex/cortex.sqlite3"
+            or event.get("project_relative_path") != ".cortex/cortex.sqlite3"
             or event.get("existed_before") is not False
             or event.get("freshness_check") != "absent-before-launch"
             or event.get("path_type") != "absent" or event.get("path_check") != "canonical-under-workdir"
@@ -1373,7 +1376,7 @@ def _session_context(namespace: dict[str, Any]) -> dict[str, Any]:
     workdir = _canonical_directory(Path(workdir_value), "live evaluation workdir")
     store = Path(store_value)
     events = _canonical_directory(Path(events_value), "live event directory")
-    if store != workdir / ".codex" / "cortex" / "cortex.sqlite3" or events.parent != state_root:
+    if store != workdir / ".cortex" / "cortex.sqlite3" or events.parent != state_root:
         raise AdapterError("current live session path binding mismatch")
     fields = {
         "workdir": str(workdir),

@@ -35,8 +35,8 @@ def _native_turn(thread_id: str = "thread-current", control: str = "1" * 64,
 def test_phase2_identity_lock_matches_current_plugin_manifest():
     manifest = json.loads((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
     expected_version = manifest["version"]
-    expected_payload_sha256 = "121a79864903aeee34a37ab762da360c3449bfd4f8eb14ee190e8384d18d7750"
-    assert expected_version == "1.15.9+codex.sha256.121a79864903aeee"
+    expected_payload_sha256 = "0b57a4030a81dd038eb9d869ad98bf1d12e92375ac8835deacee66c3061ad1fa"
+    assert expected_version == "1.16.0+codex.sha256.0b57a4030a81dd03"
     assert expected_version == phase2_cli_runner.CANDIDATE_VERSION
     assert expected_version == phase2_cli_auditor.CANDIDATE_VERSION
     assert expected_payload_sha256 == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
@@ -57,9 +57,9 @@ def test_phase2_live_harness_trusted_anchors_match_current_source():
             phase2_cli_auditor.TRUSTED_OBSERVER_SHA256,
             phase2_cli_adapter.TRUSTED_OBSERVER_SHA256} == {observer_sha256}
     assert {phase2_cli_runner.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
-            phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
-            phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
-                "34a0a325db1cbde69ca7cfb588a82be22052439c80aaa9cfd69c22d488a4ab33"
+                phase2_cli_auditor.TRUSTED_OBSERVER_DEPENDENCIES_SHA256,
+                phase2_cli_adapter.TRUSTED_OBSERVER_DEPENDENCIES_SHA256} == {
+                    "761e6b0f0ca2b7e41255f5b21a5f7d6e88130d5281d58e65530115225cfc5bb4"
             }
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_auditor.EVIDENCE_COLLECTION
     assert phase2_cli_runner.EVIDENCE_COLLECTION == phase2_cli_adapter.EVIDENCE_CONTRACT
@@ -215,10 +215,10 @@ def _fake_live_namespace(tmp_path: Path, actions: list[tuple[str, tuple[str, ...
     events.mkdir(mode=0o700)
     workdir = tmp_path / "workdir"
     workdir.mkdir(mode=0o700)
-    (workdir / ".codex/cortex").mkdir(parents=True, mode=0o700)
+    (workdir / ".cortex").mkdir(parents=True, mode=0o700)
     state = {
         "workdir": str(workdir),
-        "store": str(workdir / ".codex/cortex/cortex.sqlite3"),
+        "store": str(workdir / ".cortex/cortex.sqlite3"),
         "events": str(events),
         "started_at": 1000.0,
         "thread_created_since": 1000.0,
@@ -317,7 +317,7 @@ def _absent_gc_state(tmp_path: Path, *, status: str = "submitted", active: bool 
         "schema_version": phase2_cli_adapter.CELL_AUTH_SCHEMA, "status": status,
         "cell_id": "cell-001", "nonce": nonce, "control_record_sha256": control,
         "arm": "baseline", "workdir": str(workdir),
-        "store": str(workdir / ".codex/cortex/cortex.sqlite3"), "started_at": 1000.0,
+        "store": str(workdir / ".cortex/cortex.sqlite3"), "started_at": 1000.0,
         "thread_created_since": 1000.0, "session_receipt": receipt,
         "submission_request_sha256": request if submitted else None,
         "submitted_at": submitted_at if submitted else None,
@@ -365,7 +365,7 @@ def _absent_gc_state(tmp_path: Path, *, status: str = "submitted", active: bool 
         }) + "\n")
         authorization2 = {**authorization, "control_record_sha256": control2,
                           "session_receipt": receipt2, "cell_id": "cell-002", "workdir": str(workdir2),
-                          "store": str(workdir2 / ".codex/cortex/cortex.sqlite3")}
+                          "store": str(workdir2 / ".cortex/cortex.sqlite3")}
         if submitted:
             native2 = _native_turn(control=control2, receipt=receipt2)
             authorization2["submission_native_user_turn"] = native2
@@ -388,7 +388,7 @@ def _prebinding_failed_launch_state(tmp_path: Path):
     state_root = tmp_path / "failed-state"
     state_root.mkdir(mode=0o700)
     workdir = tmp_path / "failed-run/cells/cell-001/work"
-    cortex = workdir / ".codex/cortex"
+    cortex = workdir / ".cortex"
     cortex.mkdir(parents=True, mode=0o700)
     control = "1" * 64
     store = cortex / "cortex.sqlite3"
@@ -436,8 +436,8 @@ def _prebinding_failed_launch_state(tmp_path: Path):
     event = {
         "event_kind": "launcher", "operation": "evaluation_fresh_store", "outcome": "success",
         "run_id": transaction["transaction_id"], "host_class": "cli",
-        "project_relative_store": ".codex/cortex/cortex.sqlite3",
-        "project_relative_path": ".codex/cortex/cortex.sqlite3",
+        "project_relative_store": ".cortex/cortex.sqlite3",
+        "project_relative_path": ".cortex/cortex.sqlite3",
         "canonical_path_digest": path_digest, "path_digest": path_digest,
         "existed_before": False, "freshness_check": "absent-before-launch", "path_type": "absent",
         "path_check": "canonical-under-workdir", "symlink_check": "pass",
@@ -2128,10 +2128,10 @@ def test_cross_cell_bundle_replay_is_refused_for_same_control_and_arm(tmp_path):
 
     second_workdir = tmp_path / "workdir-002"
     second_workdir.mkdir(mode=0o700)
-    (second_workdir / ".codex/cortex").mkdir(parents=True, mode=0o700)
+    (second_workdir / ".cortex").mkdir(parents=True, mode=0o700)
     state.update({
         "workdir": str(second_workdir),
-        "store": str(second_workdir / ".codex/cortex/cortex.sqlite3"),
+        "store": str(second_workdir / ".cortex/cortex.sqlite3"),
         "started_at": 2000.0,
         "thread_created_since": 2000.0,
         "first_submission_at": 2001.0,
@@ -2671,7 +2671,7 @@ def _exact_stop_harness(monkeypatch, tmp_path, *, list_rows, start_ticks=(902,),
     (state_root / "events").mkdir(mode=0o700)
     (state_root / "capture.txt").write_text("")
     fields = {
-        "workdir": str(tmp_path), "store": str(tmp_path / ".codex/cortex/cortex.sqlite3"),
+        "workdir": str(tmp_path), "store": str(tmp_path / ".cortex/cortex.sqlite3"),
         "events": str(state_root / "events"), "started_at": 1000.0,
         "thread_created_since": 1000.0, "tmux_server_pid": 900,
         "tmux_session_name": "cortex-markdown-smoke", "tmux_session_id": "$1",
@@ -2872,7 +2872,7 @@ def test_preparer_rejects_stale_embedded_version_even_when_normalized_hash_match
     value["version"] = "1.15.8+codex.sha256.9dfe4c2cf790714c"
     manifest.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
-    assert phase2_cli_runner._payload_digest(plugin, canonical_version="1.15.9") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
+    assert phase2_cli_runner._payload_digest(plugin, canonical_version="1.16.0") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
     with pytest.raises(phase2_cli_runner.PreparationError, match="archived payload version"):
         phase2_cli_runner._validate_payload_identity(
             plugin,
@@ -2891,7 +2891,7 @@ def test_stale_archive_version_fails_audit_and_preflight_with_outer_hash_unchang
     manifest.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
     assert candidate["identity"]["payload_sha256"] == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
-    assert phase2_cli_auditor.payload_digest(manifest.parents[1], "1.15.9") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
+    assert phase2_cli_auditor.payload_digest(manifest.parents[1], "1.16.0") == phase2_cli_runner.CANDIDATE_PAYLOAD_SHA256
     audited = phase2_cli_auditor.audit(record)
     assert audited["status"] == "fail-closed"
     assert any("candidate archived payload version mismatch" in error for error in audited["errors"])
@@ -2996,8 +2996,7 @@ def test_archived_baseline_create_task_accepts_bound_fresh_project_store(tmp_pat
     harness = phase2_cli_adapter._load_harness(harness_path, observer_path, selected_root, selected)
     project = (tmp_path / "offline-create-task").resolve()
     project.mkdir(mode=0o700)
-    (project / ".codex/cortex").mkdir(parents=True, mode=0o700)
-    (project / ".codex").chmod(0o700)
+    (project / ".cortex").mkdir(parents=True, mode=0o700)
     command = harness["launch_command"](
         tmp_path / "events", False, "gpt-5.6-luna", "high", False, False,
         False, project,
@@ -3145,6 +3144,7 @@ def test_common_observer_separates_evidence_integrity_from_quality_symmetrically
 def test_common_observer_dependency_closure_is_complete_and_sealed(tmp_path):
     source_manifest = phase2_cli_runner._observer_dependency_manifest(ROOT)
     assert "plugins/cortex/profiles.json" in source_manifest
+    assert "plugins/cortex/.codex-plugin/plugin.json" in source_manifest
     assert {key for key in source_manifest if key.startswith("plugins/cortex/skills/")} == {
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "plugins/cortex/skills").rglob("*") if path.is_file()
@@ -3157,7 +3157,8 @@ def test_common_observer_dependency_closure_is_complete_and_sealed(tmp_path):
         and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)
     }
     assert direct_root_operands == {
-        "plugins/cortex/profiles.json", "plugins/cortex/skills", "scripts/cortex-dev",
+        "plugins/cortex/.codex-plugin/plugin.json", "plugins/cortex/profiles.json",
+        "plugins/cortex/skills", "scripts/cortex-dev",
     }
 
     record = _run_prepare(tmp_path)
@@ -3174,14 +3175,17 @@ def test_common_observer_dependency_closure_is_complete_and_sealed(tmp_path):
     assert observer["assigned_worker_profile"]("$cortex:worker-general") == "general"
 
 
-@pytest.mark.parametrize("mutation", ["missing", "tampered", "extra"])
+@pytest.mark.parametrize("mutation", ["missing", "missing_manifest", "tampered", "extra"])
 def test_common_observer_dependency_drift_fails_audit_and_preflight(tmp_path, mutation):
     record = _run_prepare(tmp_path)
     data = json.loads(record.read_text())
     launcher = data["neutral"]["live_launcher"]
     profile = record.parent / "plugins/cortex/profiles.json"
+    plugin_manifest = record.parent / "plugins/cortex/.codex-plugin/plugin.json"
     if mutation == "missing":
         profile.unlink()
+    elif mutation == "missing_manifest":
+        plugin_manifest.unlink()
     elif mutation == "tampered":
         profile.write_bytes(profile.read_bytes() + b"\n")
     else:

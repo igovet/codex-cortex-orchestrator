@@ -13,6 +13,7 @@ import pytest
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.hooks import main as hook_main
 from cortex_runtime.host_source import pending_requests
+from cortex_runtime.project_storage import migrate_legacy_project_storage
 from cortex_runtime.server import Server
 from cortex_runtime.store import Store
 from cortex_runtime.store import APPLICATION_ID
@@ -20,7 +21,7 @@ from cortex_runtime.store import APPLICATION_ID
 
 @pytest.mark.parametrize('kind', ['foreign', 'format10'])
 def test_rejected_database_keeps_bytes_and_journal_mode(tmp_path, kind):
-    directory=tmp_path/'.codex/cortex'
+    directory=tmp_path/'.cortex'
     directory.mkdir(parents=True,mode=0o700)
     database=directory/'cortex.sqlite3'
     db=sqlite3.connect(database)
@@ -143,6 +144,132 @@ def create_report(server, thread, parent, body):
         "draft_id": draft["draft_id"], "request_key": "report-" + identifier()}, thread, parent))
 
 
+def test_fresh_project_keeps_all_cortex_persistence_under_one_root(tmp_path, monkeypatch):
+    index = NativeIndex(tmp_path, monkeypatch)
+    project = tmp_path / "project"; project.mkdir()
+    coordinator, worker = identifier(), identifier()
+    index.add(coordinator, project)
+    index.add(worker, project, coordinator)
+    server = configured_server("Original native request")
+
+    created = create_task(server, project, coordinator)
+    report_draft = successful(dispatch(server, "create_draft", {
+        "template": "implementation", "request_key": "fresh-report-draft"},
+        worker, coordinator))
+    pipeline_draft = successful(dispatch(server, "create_draft", {
+        "template": "pipeline", "request_key": "fresh-pipeline-draft"},
+        coordinator))
+    assert Path(report_draft["draft_path"]).parent == project / ".cortex/draft-reports"
+    assert Path(pipeline_draft["draft_path"]).parent == project / ".cortex/pipeline-drafts"
+
+    report_path = Path(report_draft["draft_path"])
+    report_path.write_text(report_path.read_text().split("\n\n", 1)[0] +
+                           "\n\n# Implementation evidence\n")
+    report = successful(dispatch(server, "write_report", {
+        "title": "Implementation evidence", "summary": "Stored implementation evidence.",
+        "author": "backend developer", "draft_id": report_draft["draft_id"],
+        "request_key": "fresh-report-publication"}, worker, coordinator))
+
+    pipeline_path = Path(pipeline_draft["draft_path"])
+    pipeline_path.write_text(pipeline_path.read_text().split("\n\n", 1)[0] +
+                             "\n\n# Current pipeline\n")
+    pipeline = successful(dispatch(server, "write_report", {
+        "title": "Current pipeline", "summary": "Stored current pipeline.",
+        "author": "coordinator", "draft_id": pipeline_draft["draft_id"],
+        "request_key": "fresh-pipeline-publication"}, coordinator))
+
+    root = project / ".cortex"
+    with next(iter(server.stores.values())).connection() as database:
+        task = database.execute("SELECT id FROM tasks").fetchone()[0]
+    assert (root / "cortex.sqlite3").is_file()
+    assert (root / task / (created["original_report_id"] + ".md")).read_text() == "Original native request"
+    assert (root / task / (report["report_id"] + ".md")).is_file()
+    assert pipeline["report_id"] and (root / task / "pipeline.md").is_file()
+    assert not (project / ".codex" / "cortex").exists()
+
+
+@pytest.mark.parametrize("contents", ["database", "reports", "complete"])
+def test_one_way_legacy_storage_transfer_moves_only_absent_components(tmp_path, contents):
+    project = tmp_path / "project"; project.mkdir()
+    legacy = project / ".codex" / "cortex"; legacy.mkdir(parents=True, mode=0o700)
+    task = "t_0123456789ab"
+    if contents in {"database", "complete"}:
+        database = legacy / "cortex.sqlite3"
+        database.write_bytes(b"legacy database"); database.chmod(0o600)
+    if contents in {"reports", "complete"}:
+        reports = legacy / task; reports.mkdir(mode=0o700)
+        report = reports / "r_0123456789ab.md"
+        report.write_text("legacy report"); report.chmod(0o600)
+
+    assert migrate_legacy_project_storage(project) is True
+    destination = project / ".cortex"
+    if contents in {"database", "complete"}:
+        assert (destination / "cortex.sqlite3").read_bytes() == b"legacy database"
+        assert not (legacy / "cortex.sqlite3").exists()
+    if contents in {"reports", "complete"}:
+        assert (destination / task / "r_0123456789ab.md").read_text() == "legacy report"
+        assert not (legacy / task).exists()
+
+
+def test_one_way_legacy_storage_transfer_is_noop_when_source_is_absent(tmp_path):
+    project = tmp_path / "project"; project.mkdir()
+    destination = project / ".cortex"; destination.mkdir(mode=0o700)
+    database = destination / "cortex.sqlite3"
+    database.write_bytes(b"current database"); database.chmod(0o600)
+    assert migrate_legacy_project_storage(project) is False
+    assert database.read_bytes() == b"current database"
+    assert not (project / ".codex" / "cortex").exists()
+
+
+@pytest.mark.parametrize("conflict", ["database", "reports"])
+def test_one_way_legacy_storage_transfer_rejects_conflicts_without_moving(tmp_path, conflict):
+    project = tmp_path / "project"; project.mkdir()
+    legacy = project / ".codex" / "cortex"; legacy.mkdir(parents=True, mode=0o700)
+    destination = project / ".cortex"; destination.mkdir(mode=0o700)
+    task = "t_0123456789ab"
+    if conflict == "database":
+        source = legacy / "cortex.sqlite3"; target = destination / "cortex.sqlite3"
+        source.write_bytes(b"legacy"); target.write_bytes(b"current")
+        source.chmod(0o600); target.chmod(0o600)
+    else:
+        source = legacy / task; target = destination / task
+        source.mkdir(mode=0o700); target.mkdir(mode=0o700)
+        for root, body in ((source, "legacy"), (target, "current")):
+            report = root / "pipeline.md"; report.write_text(body); report.chmod(0o600)
+    with pytest.raises(StoreError, match="legacy_storage_conflict"):
+        migrate_legacy_project_storage(project)
+    assert source.exists() and target.exists()
+    if conflict == "database":
+        assert source.read_bytes() == b"legacy" and target.read_bytes() == b"current"
+    else:
+        assert (source / "pipeline.md").read_text() == "legacy"
+        assert (target / "pipeline.md").read_text() == "current"
+
+
+def test_server_reopens_a_complete_legacy_project_tree_after_transfer(tmp_path, monkeypatch):
+    index = NativeIndex(tmp_path, monkeypatch)
+    project = tmp_path / "project"; project.mkdir()
+    thread = identifier(); index.add(thread, project)
+    first = configured_server("Preserved legacy source")
+    created = create_task(first, project, thread)
+    with next(iter(first.stores.values())).connection() as database:
+        task = database.execute("SELECT id FROM tasks").fetchone()[0]
+    current = project / ".cortex"
+    legacy = project / ".codex" / "cortex"; legacy.mkdir(parents=True, mode=0o700)
+    for name in ("cortex.sqlite3", "cortex.sqlite3-wal", "cortex.sqlite3-shm"):
+        path = current / name
+        if path.exists(): path.replace(legacy / name)
+    (current / task).replace(legacy / task)
+
+    reopened = configured_server()
+    result = successful(dispatch(reopened, "read_report", {
+        "report_id": created["original_report_id"]}, thread))
+    assert result["markdown"] == "Preserved legacy source"
+    assert (current / "cortex.sqlite3").is_file()
+    assert (current / task / (created["original_report_id"] + ".md")).is_file()
+    assert not (legacy / "cortex.sqlite3").exists() and not (legacy / task).exists()
+
+
 def test_one_server_routes_two_projects_to_independent_local_databases(tmp_path, monkeypatch):
     index = NativeIndex(tmp_path, monkeypatch)
     project_a, project_b = tmp_path / "project-a", tmp_path / "project-b"
@@ -154,8 +281,8 @@ def test_one_server_routes_two_projects_to_independent_local_databases(tmp_path,
     create_task(server, project_a, thread_a, "a-task")
     create_task(server, project_b, thread_b, "b-task")
 
-    assert (project_a / ".codex/cortex/cortex.sqlite3").is_file()
-    assert (project_b / ".codex/cortex/cortex.sqlite3").is_file()
+    assert (project_a / ".cortex/cortex.sqlite3").is_file()
+    assert (project_b / ".cortex/cortex.sqlite3").is_file()
     assert not (tmp_path / "ignored-global-store").exists()
     assert not (index.home / "cortex").exists()
     assert set(server.stores) == {str(project_a), str(project_b)}
@@ -218,7 +345,7 @@ def test_child_requires_indexed_parent_and_rejects_cross_project_or_edge_conflic
                    (wrong_parent, child, "completed"))
     mismatched_edge = dispatch(server, "list_reports", {}, child, parent_a)
     assert error_code(mismatched_edge) == "project_context_conflict"
-    assert not (project_b / ".codex/cortex/cortex.sqlite3").exists()
+    assert not (project_b / ".cortex/cortex.sqlite3").exists()
 
 
 def test_mismatched_create_project_is_rejected_before_any_local_store_creation(tmp_path, monkeypatch):
@@ -231,8 +358,8 @@ def test_mismatched_create_project_is_rejected_before_any_local_store_creation(t
     result = dispatch(server, "create_task", {
         "project_root": str(project_b), "request_key": "wrong-project"}, thread)
     assert error_code(result) == "project_context_conflict"
-    assert not (project_a / ".codex/cortex").exists()
-    assert not (project_b / ".codex/cortex").exists()
+    assert not (project_a / ".cortex").exists()
+    assert not (project_b / ".cortex").exists()
     assert not server.stores and not server.projects.routes
 
 
@@ -248,14 +375,14 @@ def test_changed_native_cwd_never_reroutes_or_creates_a_second_database(tmp_path
     changed = dispatch(server, "read_report", {
         "report_id": created["original_report_id"]}, thread)
     assert error_code(changed) == "project_context_conflict"
-    assert not (project_b / ".codex/cortex/cortex.sqlite3").exists()
+    assert not (project_b / ".cortex/cortex.sqlite3").exists()
 
     restarted = configured_server()
     fresh = dispatch(restarted, "read_report", {
         "report_id": created["original_report_id"]}, thread)
     assert error_code(fresh) == "task_not_bound"
-    assert not (project_b / ".codex/cortex/cortex.sqlite3").exists()
-    assert (project_a / ".codex/cortex/cortex.sqlite3").is_file()
+    assert not (project_b / ".cortex/cortex.sqlite3").exists()
+    assert (project_a / ".cortex/cortex.sqlite3").is_file()
 
 
 def test_restart_routes_from_index_without_rollout_and_preserves_archive(tmp_path, monkeypatch):
@@ -298,8 +425,8 @@ def test_missing_or_corrupt_native_index_has_no_global_or_cwd_fallback(tmp_path,
     assert error_code(result) == "project_context_unavailable"
     assert not restarted.stores
     assert not (tmp_path / "ignored-global-store").exists()
-    assert not (tmp_path / ".codex/cortex/cortex.sqlite3").exists()
-    assert (project / ".codex/cortex/cortex.sqlite3").is_file()
+    assert not (tmp_path / ".cortex/cortex.sqlite3").exists()
+    assert (project / ".cortex/cortex.sqlite3").is_file()
 
 
 def test_copied_foreign_project_database_is_rejected(tmp_path, monkeypatch):
@@ -309,16 +436,16 @@ def test_copied_foreign_project_database_is_rejected(tmp_path, monkeypatch):
     thread = identifier(); index.add(thread, project_a)
     server = configured_server()
     create_task(server, project_a, thread)
-    shutil.copytree(project_a / ".codex/cortex", project_b / ".codex/cortex")
+    shutil.copytree(project_a / ".cortex", project_b / ".cortex")
 
     with pytest.raises(StoreError, match="project_storage_mismatch"):
-        Store(project_b / ".codex/cortex", initialize=False, project_root=project_b)
-    copied = project_b / '.codex/cortex/cortex.sqlite3'
+        Store(project_b / ".cortex", initialize=False, project_root=project_b)
+    copied = project_b / '.cortex/cortex.sqlite3'
     with sqlite3.connect(copied) as db:
         assert db.execute('PRAGMA journal_mode=DELETE').fetchone()[0] == 'delete'
     before = copied.read_bytes()
     with pytest.raises(StoreError, match="project_storage_mismatch"):
-        Store(project_b / '.codex/cortex', project_root=project_b)
+        Store(project_b / '.cortex', project_root=project_b)
     assert copied.read_bytes() == before
 
 
@@ -358,13 +485,13 @@ def test_active_hooks_use_project_store_and_reject_cwd_mismatch(tmp_path, monkey
     code, _ = run_hook(hook_event("UserPromptSubmit", session_a, project_a,
                                   prompt="defer this native source"))
     assert code == 0
-    with sqlite3.connect(project_a / ".codex/cortex/cortex.sqlite3") as db:
+    with sqlite3.connect(project_a / ".cortex/cortex.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM hook_pending_sources").fetchone()[0] == 1
 
     code, _ = run_hook(hook_event("UserPromptSubmit", session_a, project_b,
                                   prompt="wrong project"))
     assert code == 1
-    with sqlite3.connect(project_b / ".codex/cortex/cortex.sqlite3") as db:
+    with sqlite3.connect(project_b / ".cortex/cortex.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM hook_events").fetchone()[0] == 0
 
 
@@ -381,9 +508,9 @@ def test_subagent_hook_rejects_child_indexed_in_another_project(tmp_path, monkey
     code, _ = run_hook(hook_event("SubagentStart", parent, project_a,
                                   agent_id=foreign_child))
     assert code == 1
-    with sqlite3.connect(project_a / ".codex/cortex/cortex.sqlite3") as db:
+    with sqlite3.connect(project_a / ".cortex/cortex.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM hook_agent_bindings").fetchone()[0] == 0
-    assert not (project_b / ".codex/cortex/cortex.sqlite3").exists()
+    assert not (project_b / ".cortex/cortex.sqlite3").exists()
 
 
 def test_nested_hook_parent_sessions_bind_only_after_native_mcp_binding(tmp_path, monkeypatch):
@@ -402,7 +529,7 @@ def test_nested_hook_parent_sessions_bind_only_after_native_mcp_binding(tmp_path
     assert code == 0
     code, _ = run_hook(hook_event("SubagentStart", child, project, agent_id=nested))
     assert code == 0
-    with sqlite3.connect(project / ".codex/cortex/cortex.sqlite3") as db:
+    with sqlite3.connect(project / ".cortex/cortex.sqlite3") as db:
         agents = {row[0] for row in db.execute("SELECT agent_id FROM hook_agent_bindings")}
     assert agents == {child, nested}
 
@@ -437,13 +564,13 @@ def test_project_database_locks_are_independent_across_processes(tmp_path, monke
     b_started, a_started = context.Event(), context.Event()
     b_done, a_done = context.Event(), context.Event()
     worker_b = context.Process(target=_store_writer, args=(
-        str(project_b / ".codex/cortex"), str(project_b), root_b, "parallel-b",
+        str(project_b / ".cortex"), str(project_b), root_b, "parallel-b",
         b_started, b_done, results))
     worker_a = context.Process(target=_store_writer, args=(
-        str(project_a / ".codex/cortex"), str(project_a), root_a, "parallel-a",
+        str(project_a / ".cortex"), str(project_a), root_a, "parallel-a",
         a_started, a_done, results))
 
-    holder = Store(project_a / ".codex/cortex", project_root=project_a)
+    holder = Store(project_a / ".cortex", project_root=project_a)
     try:
         with holder.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -477,7 +604,7 @@ def test_multiple_tasks_in_one_project_remain_consistent(tmp_path, monkeypatch):
         reports = list(pool.map(publish, range(8)))
     assert len({report['report_id'] for report in reports}) == 8
 
-    with sqlite3.connect(project / ".codex/cortex/cortex.sqlite3") as db:
+    with sqlite3.connect(project / ".cortex/cortex.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
         assert db.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 10
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

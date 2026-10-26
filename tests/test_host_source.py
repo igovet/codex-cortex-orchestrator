@@ -288,7 +288,7 @@ def test_failed_operation_rolls_back_source_and_cursor(tmp_path,monkeypatch):
     with server.store.connection() as db:
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
         task=db.execute('SELECT id FROM tasks').fetchone()[0]
-        assert len(list((project/'.codex/cortex'/task).glob('*.md')))==2
+        assert len(list((project/'.cortex'/task).glob('*.md')))==2
 
 
 def test_steering_redaction_and_delivery_replay(tmp_path,monkeypatch):

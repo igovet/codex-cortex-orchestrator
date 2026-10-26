@@ -596,6 +596,9 @@ class HookHandler:
                     message = (
                         "This worker has a confirmed Cortex task binding. " + skill_instruction + " Read that complete "
                         "SKILL.md filesystem file before any Cortex call, tool discovery, project read or project work. "
+                        "After that initial complete receipt, directly declared Markdown reference leaves from the same "
+                        "skill may be read on demand with bounded literal read-only commands; they are normal instruction "
+                        "loads and never replace or duplicate the initial worker-SKILL receipt. "
                         "Never use ALL_TOOLS to discover skills. Never print filtered tool objects or declarations; for "
                         "tool discovery emit names only, then emit the exact selected tool's `.description` before calling it. "
                         "Follow the concrete assignment and its constraints, use relevant report references, and publish the saved result. "

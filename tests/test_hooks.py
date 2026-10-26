@@ -21,7 +21,7 @@ from cortex_runtime.store import Store
 
 @pytest.fixture
 def active(tmp_path):
-    store = Store(tmp_path / ".codex/cortex",project_root=tmp_path)
+    store = Store(tmp_path / ".cortex",project_root=tmp_path)
     store.call("create_task", {"project_root": str(tmp_path), "request_key": "first"},
                "parent", original_request="Original requirements")
     storage = HookStorage(store)
@@ -84,7 +84,7 @@ def test_deferred_source_can_be_redacted_before_immutable_publication(active):
     latest = result["reports"][0]["report_id"]
     archived = store.call("read_report", dict(report_id=latest), "parent")["markdown"]
     assert "literal-secret" not in archived and "[REDACTED]" in archived
-    for path in (root / ".codex" / "cortex").rglob("*.md"):
+    for path in (root / ".cortex").rglob("*.md"):
         assert "literal-secret" not in path.read_text()
 
 
@@ -102,7 +102,7 @@ def test_capture_failure_keeps_pending_signal_and_rolls_back_source(active, monk
         assert db.execute("SELECT COUNT(*) FROM source_turns").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM hook_pending_sources").fetchone()[0] == 1
         task = db.execute("SELECT id FROM tasks").fetchone()[0]
-    assert len(list((root / ".codex" / "cortex" / task).glob("*.md"))) == 1
+    assert len(list((root / ".cortex" / task).glob("*.md"))) == 1
 
 
 def test_restore_is_bounded_metadata_only_and_state_sensitive(active):
@@ -148,6 +148,8 @@ def test_subagent_bootstrap_delivers_exact_skill_file_and_tool_order(active):
     assert "cortex:worker-backend-dev" in context
     assert "skills/worker-backend-dev/SKILL.md" in context
     assert "Read that complete SKILL.md filesystem file before any Cortex call" in context
+    assert "directly declared Markdown reference leaves" in context
+    assert "never replace or duplicate the initial worker-SKILL receipt" in context
     assert "Never use ALL_TOOLS to discover skills" in context
     assert "Never print filtered tool objects or declarations" in context
     assert context.index("emit names only") < context.index("exact selected tool's `.description`")
@@ -219,7 +221,7 @@ def test_semantic_pre_dispatch_authorization_denies_before_dispatch_and_keeps_wo
     denied = authorize_pre_dispatch("exec_command", {"cmd":"true"}, **missing, capabilities=None)
     assert denied == {"allowed":False,"code":PERMISSION_DENIED,
                       "capability":CAPABILITY_EXECUTE,"reason":"missing_or_ambiguous_context"}
-    internal = authorize_pre_dispatch("exec_command", {"cmd":f"cat {root}/.codex/cortex/state"}, **context)
+    internal = authorize_pre_dispatch("exec_command", {"cmd":f"cat {root}/.cortex/state"}, **context)
     assert internal["allowed"] is False and internal["code"] == PERMISSION_DENIED
     assert internal["capability"] == CAPABILITY_INTERNAL
 
@@ -228,7 +230,7 @@ def test_semantic_pre_dispatch_authorization_denies_before_dispatch_and_keeps_wo
     assert allowed == {}
     for name, tool, tool_input, expected_code in (
         ("coordinator-cache", "exec_command", {"cmd":"ls .cortex-dev/.codex/plugins/cache"}, PERMISSION_DENIED),
-        ("coordinator-internal", "read_file", {"path":str(root / ".codex/cortex/state")}, PERMISSION_DENIED),
+        ("coordinator-internal", "read_file", {"path":str(root / ".cortex/state")}, PERMISSION_DENIED),
         ("coordinator-mutation", "apply_patch", {"command":"*** Begin Patch\n*** Add File: release.md\n+x\n*** End Patch"}, CAPABILITY_NOT_GRANTED),
     ):
         denied = handler.handle(event(root, "PreToolUse", tool_name=tool, tool_use_id=name,
@@ -254,7 +256,7 @@ def test_worker_skill_read_pretool_to_result_receipt_allows_exact_leaf_only(acti
     skill.write_text("# Backend worker\n")
     manifest = skill_root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.15.9+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
     handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
     command = f"bash -lc {shlex.quote(f'cat {skill}')}"
     pre = handler.handle(event(root, "PreToolUse", tool_name=tool_name, tool_use_id="skill-read",
@@ -274,13 +276,34 @@ def test_worker_skill_read_pretool_to_result_receipt_allows_exact_leaf_only(acti
     assert handler.observation["outcome"] == "diagnostic"
 
 
+def test_worker_skill_read_accepts_exact_read_file_leaf_without_shell_syntax(active):
+    _, _, handler, root = active
+    skill_root = root / ".codex" / "plugins" / "cache" / "cortex" / "cortex" / "candidate"
+    skill = skill_root / "skills" / "worker-backend-dev" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Backend worker\n")
+    manifest = skill_root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
+    pre = handler.handle(event(root, "PreToolUse", tool_name="read_file", tool_use_id="skill-read",
+                               agent_id="child", agent_type="backend_dev", tool_input={"path":str(skill)}))
+    assert pre == {}
+    assert handler.observation["outcome"] == "observed"
+    denied = handler.handle(event(root, "PreToolUse", tool_name="read_file", tool_use_id="directory",
+                                  agent_id="child", agent_type="backend_dev",
+                                  tool_input={"path":str(skill.parent)}))
+    assert "permissionDecision" not in denied["hookSpecificOutput"]
+    assert handler.observation["outcome"] == "diagnostic"
+
+
 def test_private_execution_boundary_resolves_symlink_routes(active):
     _, _, handler, root = active
     handler.handle(event(root, "SubagentStart", agent_id="child"))
-    private = root / ".codex" / "cortex" / "task"
+    private = root / ".cortex" / "task"
     private.mkdir(parents=True)
     link = root / "workspace-alias"
-    link.symlink_to(root / ".codex" / "cortex", target_is_directory=True)
+    link.symlink_to(root / ".cortex", target_is_directory=True)
     command = {"cmd": f"cat {link}/task/pipeline.md"}
     assert private_access_denied("exec_command", command, cwd=str(root), project_root=str(root))
     assert private_access_denied("exec_command", {"cmd": "cat workspace-alias"}, cwd=str(root), project_root=str(root))
@@ -292,7 +315,7 @@ def test_private_execution_boundary_resolves_symlink_routes(active):
 def test_private_boundary_uses_validated_parent_provenance_without_agent_id(active):
     _, _, handler, root = active
     handler.handle(event(root, "SubagentStart", agent_id="child"))
-    private = root / ".codex" / "cortex" / "task" / "pipeline.md"
+    private = root / ".cortex" / "task" / "pipeline.md"
     worker_event = event(root, "PreToolUse", tool_name="exec_command", tool_use_id="provenance-worker",
                          thread_id="child", parent_thread_id="parent",
                          tool_input={"cmd": f"cat {private}"})
@@ -309,7 +332,7 @@ def test_private_boundary_uses_validated_parent_provenance_without_agent_id(acti
 def test_private_boundary_reuses_worker_command_cwd_for_unidentified_write_stdin(active):
     store, _, handler, root = active
     handler.handle(event(root, "SubagentStart", agent_id="child"))
-    shell_cwd = root / ".codex" / "cortex"
+    shell_cwd = root / ".cortex"
     shell_cwd.mkdir(parents=True, exist_ok=True)
     started = event(root, "PostToolUse", tool_name="exec_command", tool_use_id="running-shell",
                     agent_id="child", tool_input={"cmd": "pwd", "workdir": str(shell_cwd)},
@@ -340,7 +363,7 @@ def test_patch_mentions_in_content_do_not_block_but_registered_mutation_does(act
     store, storage, handler, root = active
     with store.connection() as db:
         row = db.execute("SELECT task_id,filename FROM reports").fetchone()
-    protected = root / ".codex" / "cortex" / row[0] / row[1]
+    protected = root / ".cortex" / row[0] / row[1]
     mention = f"*** Begin Patch\n*** Add File: ordinary.md\n+Path {protected}\n+*** Delete File: {protected}\n*** End Patch"
     assert handler.handle(patch_event(root, mention)) == {}
     mutation = f"*** Begin Patch\n*** Delete File: {protected}\n*** End Patch"
@@ -369,13 +392,13 @@ def test_exact_registered_neighbor_publication_is_protected_without_reading_it(a
     store.call("create_task", dict(project_root=str(root), request_key="neighbor"), "neighbor", original_request="Neighbor work")
     with store.connection() as db:
         row = db.execute("SELECT r.task_id,r.filename FROM reports r JOIN thread_bindings b ON r.task_id=b.task_id WHERE b.thread_id='neighbor'").fetchone()
-    protected = root / ".codex" / "cortex" / row[0] / row[1]
+    protected = root / ".cortex" / row[0] / row[1]
     protected.write_text("damaged report")
     mutation = f"*** Begin Patch\n*** Delete File: {protected}\n*** End Patch"
     assert "permissionDecision" not in handler.handle(patch_event(root, mutation))["hookSpecificOutput"]
 
 
-@pytest.mark.parametrize("patch", ["echo .codex/cortex/report.md", "*** Begin Patch\n*** Update File: x\n*** End Patch", "*** Begin Patch\n*** Add File: x\nraw text\n*** End Patch"])
+@pytest.mark.parametrize("patch", ["echo .cortex/report.md", "*** Begin Patch\n*** Update File: x\n*** End Patch", "*** Begin Patch\n*** Add File: x\nraw text\n*** End Patch"])
 def test_unparsed_patch_is_not_a_proven_integrity_violation(active, patch):
     store, storage, handler, root = active
     assert parse_patch(patch, root) is None
@@ -665,6 +688,6 @@ def test_hook_load_does_not_recover_corrupt_neighbor(active):
     store.call("create_task", dict(project_root=str(root), request_key="second"), "other", original_request="Other task")
     with store.connection() as db:
         row = db.execute("SELECT r.task_id,r.filename FROM reports r JOIN thread_bindings b ON r.task_id=b.task_id WHERE b.thread_id='other'").fetchone()
-    (root / ".codex" / "cortex" / row[0] / row[1]).write_text("corrupt neighbor")
+    (root / ".cortex" / row[0] / row[1]).write_text("corrupt neighbor")
     reopened = HookHandler(HookStorage(Store(store.directory, initialize=False)))
     assert reopened.handle(event(root, "UserPromptSubmit", prompt="Own task update")) == {}
